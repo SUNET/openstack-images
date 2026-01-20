@@ -1,6 +1,6 @@
 ---
 environment_variables:
-  IMAGE_VERSION: "2025.1-ubuntu_noble-1"
+  IMAGE_VERSION: "2025.1-ubuntu_noble-2"
 git:
   branch: main
 triggers:

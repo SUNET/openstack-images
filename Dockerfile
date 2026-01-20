@@ -12,4 +12,8 @@ RUN apt-get update && \
 # Enable the module
 RUN a2enmod auth_openidc
 
+# Add wrapper script that generates OIDC secrets config before starting Apache
+COPY apache2-oidc-wrapper.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/apache2-oidc-wrapper.sh
+
 USER keystone
