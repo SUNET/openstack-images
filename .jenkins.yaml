@@ -1,23 +1,22 @@
 ---
 # OpenStack custom images for SUNET Platform
-# Each image adds wrapper scripts for secret injection from Kubernetes Secrets
+# Main job builds keystone, extra_jobs build the oslo-secrets-wrapper images
+
+# Main job: Keystone with OIDC support
 clean_workspace: true
 git:
   branch: main
 triggers:
   cron: "@daily"
+builders:
+  - docker
+docker_name: platform/openstack-keystone
+docker_context_dir: keystone
+docker_tags:
+  - "2025.1-ubuntu_noble-2"
+  - "latest"
 
 extra_jobs:
-  # Keystone with OIDC support
-  - name: openstack-keystone
-    builders:
-      - docker
-    docker_name: platform/openstack-keystone
-    docker_context_dir: keystone
-    docker_tags:
-      - "2025.1-ubuntu_noble-2"
-      - "latest"
-
   # Heat with oslo-secrets-wrapper for memcache keys
   - name: openstack-heat
     builders:
