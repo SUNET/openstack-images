@@ -24,7 +24,7 @@ extra_jobs:
     docker_name: platform/openstack-heat
     docker_context_dir: heat
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"
 
   # Glance with oslo-secrets-wrapper for memcache keys
@@ -34,7 +34,7 @@ extra_jobs:
     docker_name: platform/openstack-glance
     docker_context_dir: glance
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"
 
   # Cinder with oslo-secrets-wrapper for memcache keys
@@ -44,7 +44,7 @@ extra_jobs:
     docker_name: platform/openstack-cinder
     docker_context_dir: cinder
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"
 
   # Nova with oslo-secrets-wrapper for memcache keys
@@ -54,7 +54,7 @@ extra_jobs:
     docker_name: platform/openstack-nova
     docker_context_dir: nova
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"
 
   # Placement with oslo-secrets-wrapper for memcache keys
@@ -64,7 +64,7 @@ extra_jobs:
     docker_name: platform/openstack-placement
     docker_context_dir: placement
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"
 
   # Neutron with oslo-secrets-wrapper for memcache keys
@@ -74,5 +74,5 @@ extra_jobs:
     docker_name: platform/openstack-neutron
     docker_context_dir: neutron
     docker_tags:
-      - "2025.2-ubuntu_noble-1"
+      - "2025.1-ubuntu_noble-1"
       - "latest"

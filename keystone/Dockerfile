@@ -1,6 +1,6 @@
 # OpenStack Keystone with OIDC support
 # Based on airshipit keystone image with libapache2-mod-auth-openidc added
-FROM quay.io/airshipit/keystone:2025.2-ubuntu_noble
+FROM quay.io/airshipit/keystone:2025.1-ubuntu_noble
 
 USER root
 

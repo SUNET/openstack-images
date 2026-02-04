@@ -1,6 +1,6 @@
 # OpenStack Nova with oslo-secrets-wrapper
 # Allows loading sensitive config from Kubernetes Secrets
-FROM quay.io/airshipit/nova:2025.2-ubuntu_noble
+FROM quay.io/airshipit/nova:2025.1-ubuntu_noble
 
 USER root
 
