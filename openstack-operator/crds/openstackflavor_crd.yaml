@@ -1,0 +1,143 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: openstackflavors.sunet.se
+spec:
+  group: sunet.se
+  names:
+    kind: OpenstackFlavor
+    listKind: OpenstackFlavorList
+    plural: openstackflavors
+    singular: openstackflavor
+    shortNames:
+      - osf
+      - osflavor
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Flavor
+          type: string
+          jsonPath: .spec.name
+        - name: vCPUs
+          type: integer
+          jsonPath: .spec.vcpus
+        - name: RAM (MB)
+          type: integer
+          jsonPath: .spec.ram
+        - name: Disk (GB)
+          type: integer
+          jsonPath: .spec.disk
+        - name: Public
+          type: boolean
+          jsonPath: .spec.isPublic
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - name
+                - vcpus
+                - ram
+              properties:
+                name:
+                  type: string
+                  description: "OpenStack flavor name"
+                  minLength: 1
+                  maxLength: 255
+                description:
+                  type: string
+                  description: "Flavor description"
+                  default: ""
+                vcpus:
+                  type: integer
+                  description: "Number of virtual CPUs"
+                  minimum: 1
+                ram:
+                  type: integer
+                  description: "RAM in MB"
+                  minimum: 1
+                disk:
+                  type: integer
+                  description: "Root disk size in GB"
+                  minimum: 0
+                  default: 0
+                ephemeral:
+                  type: integer
+                  description: "Ephemeral disk size in GB"
+                  minimum: 0
+                  default: 0
+                swap:
+                  type: integer
+                  description: "Swap disk size in MB"
+                  minimum: 0
+                  default: 0
+                isPublic:
+                  type: boolean
+                  description: "Whether the flavor is publicly visible"
+                  default: true
+                extraSpecs:
+                  type: object
+                  description: "Extra specifications for the flavor"
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Ready
+                    - Error
+                    - Deleting
+                  description: "Current phase of the flavor"
+                flavorId:
+                  type: string
+                  description: "OpenStack flavor ID"
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                observedGeneration:
+                  type: integer
+                  description: "Generation observed by the controller"
+                lastSyncTime:
+                  type: string
+                  format: date-time
+                  description: "Last time the resource was synced"

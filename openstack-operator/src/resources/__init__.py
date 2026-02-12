@@ -1,0 +1,1 @@
+"""OpenStack resource management modules."""

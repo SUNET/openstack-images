@@ -1,0 +1,332 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: openstackprojects.sunet.se
+spec:
+  group: sunet.se
+  names:
+    kind: OpenstackProject
+    listKind: OpenstackProjectList
+    plural: openstackprojects
+    singular: openstackproject
+    shortNames:
+      - osp
+      - osproject
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Project
+          type: string
+          jsonPath: .spec.name
+        - name: Domain
+          type: string
+          jsonPath: .spec.domain
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - name
+                - domain
+              properties:
+                name:
+                  type: string
+                  description: "OpenStack project name"
+                  minLength: 1
+                  maxLength: 64
+                description:
+                  type: string
+                  description: "Project description"
+                  default: ""
+                domain:
+                  type: string
+                  description: "OpenStack domain for the project"
+                  minLength: 1
+                enabled:
+                  type: boolean
+                  description: "Whether the project is enabled"
+                  default: true
+
+                quotas:
+                  type: object
+                  description: "Resource quotas for the project"
+                  properties:
+                    compute:
+                      type: object
+                      properties:
+                        instances:
+                          type: integer
+                          minimum: -1
+                          description: "Maximum number of instances (-1 for unlimited)"
+                        cores:
+                          type: integer
+                          minimum: -1
+                          description: "Maximum number of CPU cores"
+                        ramMB:
+                          type: integer
+                          minimum: -1
+                          description: "Maximum RAM in MB"
+                        serverGroups:
+                          type: integer
+                          minimum: -1
+                        serverGroupMembers:
+                          type: integer
+                          minimum: -1
+                    storage:
+                      type: object
+                      properties:
+                        volumes:
+                          type: integer
+                          minimum: -1
+                          description: "Maximum number of volumes"
+                        volumesGB:
+                          type: integer
+                          minimum: -1
+                          description: "Maximum total volume size in GB"
+                        snapshots:
+                          type: integer
+                          minimum: -1
+                        backups:
+                          type: integer
+                          minimum: -1
+                        backupsGB:
+                          type: integer
+                          minimum: -1
+                    network:
+                      type: object
+                      properties:
+                        floatingIps:
+                          type: integer
+                          minimum: -1
+                        networks:
+                          type: integer
+                          minimum: -1
+                        subnets:
+                          type: integer
+                          minimum: -1
+                        routers:
+                          type: integer
+                          minimum: -1
+                        ports:
+                          type: integer
+                          minimum: -1
+                        securityGroups:
+                          type: integer
+                          minimum: -1
+                        securityGroupRules:
+                          type: integer
+                          minimum: -1
+
+                networks:
+                  type: array
+                  description: "Networks to create in the project"
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - cidr
+                    properties:
+                      name:
+                        type: string
+                        description: "Network name"
+                      cidr:
+                        type: string
+                        description: "Subnet CIDR (e.g., 192.168.100.0/24)"
+                        pattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+                      enableDhcp:
+                        type: boolean
+                        default: true
+                      dnsNameservers:
+                        type: array
+                        items:
+                          type: string
+                      router:
+                        type: object
+                        description: "Router configuration for this network"
+                        properties:
+                          externalNetwork:
+                            type: string
+                            description: "External network to connect router to"
+                          enableSnat:
+                            type: boolean
+                            default: true
+
+                securityGroups:
+                  type: array
+                  description: "Security groups to create in the project"
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        description: "Security group name"
+                      description:
+                        type: string
+                        default: ""
+                      rules:
+                        type: array
+                        items:
+                          type: object
+                          required:
+                            - direction
+                          properties:
+                            direction:
+                              type: string
+                              enum:
+                                - ingress
+                                - egress
+                            protocol:
+                              type: string
+                              enum:
+                                - tcp
+                                - udp
+                                - icmp
+                                - any
+                            portRangeMin:
+                              type: integer
+                              minimum: 1
+                              maximum: 65535
+                            portRangeMax:
+                              type: integer
+                              minimum: 1
+                              maximum: 65535
+                            remoteIpPrefix:
+                              type: string
+                              description: "Remote IP prefix (CIDR)"
+                            remoteGroupName:
+                              type: string
+                              description: "Remote security group name"
+                            ethertype:
+                              type: string
+                              enum:
+                                - IPv4
+                                - IPv6
+                              default: IPv4
+
+                roleBindings:
+                  type: array
+                  description: "Role assignments for users and groups"
+                  items:
+                    type: object
+                    required:
+                      - role
+                    properties:
+                      role:
+                        type: string
+                        description: "Role name (e.g., member, admin, reader)"
+                      users:
+                        type: array
+                        description: "List of user names/emails"
+                        items:
+                          type: string
+                      groups:
+                        type: array
+                        description: "List of group names"
+                        items:
+                          type: string
+                      userDomain:
+                        type: string
+                        description: "Domain for users (defaults to project domain)"
+                      groupDomain:
+                        type: string
+                        description: "Domain for groups (defaults to project domain)"
+
+                federationRef:
+                  type: object
+                  description: "Reference to federation configuration"
+                  properties:
+                    configMapName:
+                      type: string
+                      description: "ConfigMap containing IdP settings"
+                    configMapNamespace:
+                      type: string
+                      description: "Namespace of the ConfigMap"
+
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Ready
+                    - Error
+                    - Deleting
+                  description: "Current phase of the project"
+                projectId:
+                  type: string
+                  description: "OpenStack project ID"
+                groupId:
+                  type: string
+                  description: "OpenStack group ID for project users"
+                networks:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      networkId:
+                        type: string
+                      subnetId:
+                        type: string
+                      routerId:
+                        type: string
+                securityGroups:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      id:
+                        type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                observedGeneration:
+                  type: integer
+                  description: "Generation observed by the controller"
+                lastSyncTime:
+                  type: string
+                  format: date-time
+                  description: "Last time the resource was synced"

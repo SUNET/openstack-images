@@ -1,0 +1,191 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: openstackimages.sunet.se
+spec:
+  group: sunet.se
+  names:
+    kind: OpenstackImage
+    listKind: OpenstackImageList
+    plural: openstackimages
+    singular: openstackimage
+    shortNames:
+      - osi
+      - osimage
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.name
+        - name: Visibility
+          type: string
+          jsonPath: .spec.visibility
+        - name: External
+          type: boolean
+          jsonPath: .spec.external
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Upload Status
+          type: string
+          jsonPath: .status.uploadStatus
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: "OpenStack image name (display name)"
+                  minLength: 1
+                  maxLength: 255
+                external:
+                  type: boolean
+                  description: "If true, the image is externally managed. Only settings (visibility, protected, etc.) are enforced on existing images. The image is not created or deleted by the operator."
+                  default: false
+                visibility:
+                  type: string
+                  description: "Image visibility"
+                  enum:
+                    - public
+                    - private
+                    - shared
+                    - community
+                  default: private
+                protected:
+                  type: boolean
+                  description: "Whether the image is protected from deletion"
+                  default: false
+                tags:
+                  type: array
+                  description: "Image tags"
+                  items:
+                    type: string
+                properties:
+                  type: object
+                  description: "Image properties (metadata)"
+                  additionalProperties:
+                    type: string
+                content:
+                  type: object
+                  description: "Image content specification"
+                  required:
+                    - diskFormat
+                    - containerFormat
+                    - source
+                  properties:
+                    diskFormat:
+                      type: string
+                      description: "Disk format of the image"
+                      enum:
+                        - raw
+                        - qcow2
+                        - vhd
+                        - vhdx
+                        - vmdk
+                        - vdi
+                        - iso
+                        - aki
+                        - ari
+                        - ami
+                    containerFormat:
+                      type: string
+                      description: "Container format of the image"
+                      enum:
+                        - bare
+                        - ovf
+                        - ova
+                        - aki
+                        - ari
+                        - ami
+                        - docker
+                      default: bare
+                    source:
+                      type: object
+                      description: "Source of the image content"
+                      required:
+                        - url
+                      properties:
+                        url:
+                          type: string
+                          description: "URL to download the image from (uses Glance web-download)"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Ready
+                    - Error
+                    - Deleting
+                  description: "Current phase of the image"
+                imageId:
+                  type: string
+                  description: "OpenStack image ID"
+                uploadStatus:
+                  type: string
+                  description: "Status of the image upload"
+                  enum:
+                    - queued
+                    - saving
+                    - active
+                    - killed
+                    - deleted
+                    - pending_delete
+                    - deactivated
+                    - uploading
+                    - importing
+                checksum:
+                  type: string
+                  description: "MD5 checksum of the image data"
+                sizeBytes:
+                  type: integer
+                  description: "Size of the image in bytes"
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                observedGeneration:
+                  type: integer
+                  description: "Generation observed by the controller"
+                lastSyncTime:
+                  type: string
+                  format: date-time
+                  description: "Last time the resource was synced"

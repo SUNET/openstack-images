@@ -1,8 +1,6 @@
 ---
 # OpenStack custom images for SUNET Platform
-# Main job builds keystone, extra_jobs build the oslo-secrets-wrapper images
 
-# Main job: Keystone with OIDC support
 clean_workspace: true
 git:
   branch: main
@@ -10,61 +8,27 @@ triggers:
   cron: "@daily"
 builders:
   - docker
-docker_name: platform/openstack-keystone
-docker_context_dir: keystone
-docker_tags:
-  - "2025.1-ubuntu_noble-1"
-  - "latest"
 
 extra_jobs:
-  # Heat with oslo-secrets-wrapper for memcache keys
-  - name: openstack-heat
+  # Keystone with OIDC support
+  - name: openstack-keystone
     builders:
       - docker
-    docker_name: platform/openstack-heat
-    docker_context_dir: heat
+    docker_name: platform/openstack-keystone
+    docker_context_dir: keystone
     docker_tags:
       - "2025.1-ubuntu_noble-1"
       - "latest"
 
-  # Glance with oslo-secrets-wrapper for memcache keys
-  - name: openstack-glance
+  # OpenStack Operator (Kopf-based K8s operator)
+  - name: openstack-operator
     builders:
       - docker
-    docker_name: platform/openstack-glance
-    docker_context_dir: glance
+    docker_name: platform/openstack-operator
+    docker_context_dir: openstack-operator
+    docker_no_cache: true
     docker_tags:
-      - "2025.1-ubuntu_noble-1"
-      - "latest"
-
-  # Cinder with oslo-secrets-wrapper for memcache keys
-  - name: openstack-cinder
-    builders:
-      - docker
-    docker_name: platform/openstack-cinder
-    docker_context_dir: cinder
-    docker_tags:
-      - "2025.1-ubuntu_noble-1"
-      - "latest"
-
-  # Nova with oslo-secrets-wrapper for memcache keys
-  - name: openstack-nova
-    builders:
-      - docker
-    docker_name: platform/openstack-nova
-    docker_context_dir: nova
-    docker_tags:
-      - "2025.1-ubuntu_noble-1"
-      - "latest"
-
-  # Placement with oslo-secrets-wrapper for memcache keys
-  - name: openstack-placement
-    builders:
-      - docker
-    docker_name: platform/openstack-placement
-    docker_context_dir: placement
-    docker_tags:
-      - "2025.1-ubuntu_noble-1"
+      - "0.1.0"
       - "latest"
 
   # Libvirt with QEMU SPICE support
@@ -77,12 +41,3 @@ extra_jobs:
       - "2025.1-ubuntu_noble-1"
       - "latest"
 
-  # Neutron with oslo-secrets-wrapper and L3 HA accept_ra fix (LP#1958149)
-  - name: openstack-neutron
-    builders:
-      - docker
-    docker_name: platform/openstack-neutron
-    docker_context_dir: neutron
-    docker_tags:
-      - "2025.1-ubuntu_noble-2"
-      - "latest"
