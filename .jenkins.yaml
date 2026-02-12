@@ -1,13 +1,8 @@
 ---
 # OpenStack custom images for SUNET Platform
-
 clean_workspace: true
-git:
-  branch: main
 triggers:
   cron: "@daily"
-builders:
-  - docker
 
 extra_jobs:
   # Keystone with OIDC support
