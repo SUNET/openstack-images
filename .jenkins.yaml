@@ -67,6 +67,16 @@ extra_jobs:
       - "2025.1-ubuntu_noble-1"
       - "latest"
 
+  # Libvirt with QEMU SPICE support
+  - name: openstack-libvirt
+    builders:
+      - docker
+    docker_name: platform/openstack-libvirt
+    docker_context_dir: libvirt
+    docker_tags:
+      - "2025.1-ubuntu_noble-1"
+      - "latest"
+
   # Neutron with oslo-secrets-wrapper and L3 HA accept_ra fix (LP#1958149)
   - name: openstack-neutron
     builders:
