@@ -1,0 +1,28 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Note: namespace is intentionally not set here
+# Deployers should set the namespace in their overlay
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  # Uncomment if using Prometheus Operator
+  # - servicemonitor.yaml
+  - ../../crds/openstackproject_crd.yaml
+  - ../../crds/openstackdomain_crd.yaml
+  - ../../crds/openstackflavor_crd.yaml
+  - ../../crds/openstackimage_crd.yaml
+  - ../../crds/openstacknetwork_crd.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: openstack-operator
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: docker.sunet.se/platform/openstack-operator
+    newTag: latest

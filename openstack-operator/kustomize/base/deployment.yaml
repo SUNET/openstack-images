@@ -1,0 +1,83 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openstack-operator
+  labels:
+    app.kubernetes.io/name: openstack-operator
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openstack-operator
+  strategy:
+    type: Recreate  # Only one instance should run at a time
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openstack-operator
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: openstack-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: operator
+          image: docker.sunet.se/platform/openstack-operator:latest
+          imagePullPolicy: Always
+          env:
+            - name: OS_CLIENT_CONFIG_FILE
+              value: /etc/openstack/clouds.yaml
+            - name: OS_CLOUD
+              value: openstack
+            - name: METRICS_PORT
+              value: "9090"
+            # Uncomment to watch a specific namespace only
+            # - name: WATCH_NAMESPACE
+            #   value: openstack-operator
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: clouds-yaml
+              mountPath: /etc/openstack
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: clouds-yaml
+          secret:
+            secretName: openstack-operator-credentials
+      terminationGracePeriodSeconds: 30

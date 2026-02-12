@@ -1,0 +1,59 @@
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openstack-operator
+  labels:
+    app.kubernetes.io/name: openstack-operator
+    app.kubernetes.io/component: operator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openstack-operator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow Prometheus scraping and health checks
+    - ports:
+        - protocol: TCP
+          port: 8080  # health
+        - protocol: TCP
+          port: 9090  # metrics
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow access to Kubernetes API server
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Allow access to OpenStack APIs (typically 5000, 8774, 9292, 9696, 8776)
+    # Using broad HTTPS access since OpenStack endpoints vary by deployment
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 5000   # Keystone
+        - protocol: TCP
+          port: 8774   # Nova
+        - protocol: TCP
+          port: 9292   # Glance
+        - protocol: TCP
+          port: 9696   # Neutron
+        - protocol: TCP
+          port: 8776   # Cinder
