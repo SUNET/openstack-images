@@ -1,5 +1,6 @@
 """Kopf handlers for OpenstackImage CRD."""
 
+import datetime
 import logging
 import time
 from typing import Any
@@ -121,6 +122,8 @@ def create_image_handler(
                     patch, "ImageReady", "False", "Importing",
                     f"Image import in progress (status: {upload_status})"
                 )
+                patch.status["importStartedAt"] = now_iso()
+                patch.status["importRetries"] = 0
                 # Keep phase as Provisioning until import completes
 
             patch.status["lastSyncTime"] = now_iso()
@@ -343,6 +346,40 @@ def poll_image_status(
                 f"Image status: {image_status['status']}"
             )
 
+            # Detect stuck imports: only timeout on "queued" status
+            # (importing/saving indicate active progress)
+            if image_status["status"] == "queued":
+                import_started = status.get("importStartedAt")
+                if not import_started:
+                    # Pre-existing CR from before this fix; give it a fresh window
+                    patch.status["importStartedAt"] = now_iso()
+                else:
+                    started_dt = datetime.datetime.fromisoformat(import_started)
+                    elapsed = (datetime.datetime.now(datetime.UTC) - started_dt).total_seconds()
+                    if elapsed > 600:
+                        retries = status.get("importRetries", 0)
+                        logger.warning(
+                            f"Image {name} stuck in queued for {elapsed:.0f}s "
+                            f"(retry {retries + 1}/3), deleting"
+                        )
+                        try:
+                            client.delete_image(image_id)
+                        except Exception:
+                            logger.exception(f"Failed to delete stuck image {image_id}")
+                        retries += 1
+                        if retries < 3:
+                            patch.status["phase"] = "Pending"
+                            patch.status["imageId"] = None
+                            patch.status["uploadStatus"] = None
+                            patch.status["importStartedAt"] = None
+                            patch.status["importRetries"] = retries
+                        else:
+                            patch.status["phase"] = "Error"
+                            _set_patch_condition(
+                                patch, "ImageReady", "False", "ImportFailed",
+                                f"Image stuck in queued after {retries} retries"
+                            )
+
         patch.status["lastSyncTime"] = now_iso()
 
     except Exception as e:
@@ -392,6 +429,7 @@ def reconcile_image(
                         patch, "ImageReady", "False", "Importing",
                         f"Image import in progress (status: {upload_status})"
                     )
+                    patch.status["importStartedAt"] = now_iso()
                     patch.status["phase"] = "Provisioning"
                 patch.status["lastSyncTime"] = now_iso()
                 logger.info(f"Recreated image {name} (id={image_id}, status={upload_status})")
