@@ -1,5 +1,6 @@
 """Kopf handlers for OpenstackProject CRD."""
 
+import asyncio
 import logging
 import os
 import sys
@@ -25,6 +26,7 @@ from resources.garbage_collection import (
     get_expected_projects_from_crs,
     get_federation_config_from_crs,
 )
+from notification_listener import start_notification_listener
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from state import state, get_openstack_client, get_registry
@@ -212,6 +214,80 @@ def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
     set_operator_info(OPERATOR_VERSION, cloud_name)
 
     logger.info("OpenStack operator started (version %s)", OPERATOR_VERSION)
+
+    # Start Keystone notification listener if configured
+    transport_url = os.environ.get("NOTIFICATION_TRANSPORT_URL")
+    if transport_url:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_start_notification_listener(transport_url))
+        logger.info("Keystone notification listener started")
+    else:
+        logger.info("NOTIFICATION_TRANSPORT_URL not set, notification listener disabled")
+
+
+async def _start_notification_listener(transport_url: str) -> None:
+    """Launch the notification listener with a user-sync callback."""
+
+    async def on_user_created(user_id: str) -> None:
+        """Triggered when Keystone creates a new user (e.g. federated shadow user)."""
+        client = get_openstack_client()
+
+        # Look up the user by ID to get username and domain
+        try:
+            user = client.conn.identity.get_user(user_id)
+        except Exception:
+            logger.exception("Failed to look up user %s", user_id)
+            return
+        if not user:
+            return
+
+        username = user.name
+        user_domain = client.conn.identity.get_domain(user.domain_id)
+        domain_name = user_domain.name if user_domain else "unknown"
+
+        logger.info("New user %s in domain %s, syncing groups", username, domain_name)
+
+        # Find all OpenstackProject CRs that reference this user
+        api = state.get_k8s_custom_api()
+        try:
+            crs = api.list_cluster_custom_object(
+                group="sunet.se", version="v1alpha1", plural="openstackprojects"
+            )
+        except Exception:
+            logger.exception("Failed to list OpenstackProject CRs")
+            return
+
+        for cr in crs.get("items", []):
+            spec = cr.get("spec", {})
+            cr_status = cr.get("status", {})
+            group_id = cr_status.get("groupId")
+            if not group_id or cr_status.get("phase") != "Ready":
+                continue
+
+            project_id = cr_status.get("projectId")
+            role_bindings = spec.get("roleBindings", [])
+            domain = spec.get("domain", "sso-users")
+
+            for binding in role_bindings:
+                if username in binding.get("users", []):
+                    try:
+                        apply_role_bindings(
+                            client, project_id, group_id, role_bindings, domain
+                        )
+                        logger.info(
+                            "Synced user %s to project %s",
+                            username,
+                            spec.get("name"),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to sync user %s to project %s",
+                            username,
+                            spec.get("name"),
+                        )
+                    break
+
+    await start_notification_listener(transport_url, on_user_created)
 
 
 @kopf.on.cleanup()

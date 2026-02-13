@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+    "aio-pika>=9.0.0",
     "kopf>=1.37.0",
     "kubernetes>=28.1.0",
     "openstacksdk>=3.0.0",

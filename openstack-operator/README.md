@@ -239,15 +239,28 @@ docker build -t docker.sunet.se/platform/openstack-operator:latest .
 
 The operator requires:
 
-1. **OpenStack credentials** - A Secret with `clouds.yaml` containing admin credentials
-2. **CRDs installed** - All CRDs from `crds/`
-3. **RBAC configured** - ServiceAccount with cluster-wide access to the CRDs
+1. **CRDs installed** - All CRDs from `crds/`
+2. **RBAC configured** - ServiceAccount with cluster-wide access to the CRDs
+3. **Secrets** - See below
 
 Example deployment using kustomize:
 
 ```bash
 # From a deployment overlay
 kubectl apply -k overlays/test/
+```
+
+### Secrets
+
+| Secret | Key | Description | Required |
+|--------|-----|-------------|----------|
+| `openstack-operator-credentials` | `clouds.yaml` | OpenStack admin credentials (`clouds.yaml` format). Mounted at `/etc/openstack/clouds.yaml`. | Yes |
+| `notification-transport-url` | `url` | AMQP URL for Keystone notification listener (see below). Format: `amqp://keystone:<password>@<rabbitmq-host>:5672/keystone` | No |
+
+Both secrets should be sealed with kubeseal before committing:
+
+```bash
+kubeseal --format yaml < secret.yaml > sealed-secret.yaml
 ```
 
 ## Development
@@ -274,6 +287,10 @@ pytest
 | `OS_CLOUD` | Cloud name in clouds.yaml | `openstack` |
 | `OS_CLIENT_CONFIG_FILE` | Path to clouds.yaml | Standard locations |
 | `WATCH_NAMESPACE` | Namespace to watch (empty = all) | `""` |
+| `NOTIFICATION_TRANSPORT_URL` | AMQP URL for Keystone notifications (optional) | Disabled |
+| `METRICS_PORT` | Port for Prometheus metrics server | `9090` |
+| `GC_INTERVAL_SECONDS` | Garbage collection interval | `600` |
+| `MANAGED_DOMAIN` | Domain for GC scope | `sso-users` |
 
 ### Federation ConfigMap
 
@@ -291,6 +308,23 @@ data:
 ```
 
 Reference it in OpenstackProject via `federationRef`.
+
+### Keystone Notification Listener
+
+When `NOTIFICATION_TRANSPORT_URL` is set, the operator subscribes to Keystone's
+oslo.messaging notifications on RabbitMQ. When a new federated user is created
+(shadow user on first SSO login), the operator immediately syncs them into the
+relevant project groups instead of waiting for the next 5-minute reconciliation.
+
+The URL should use the `keystone` RabbitMQ user (same credentials as in
+Keystone's `transport_url`), with the `amqp://` scheme:
+
+```
+amqp://keystone:<password>@rabbitmq-rabbitmq-0.rabbitmq.openstack.svc.cluster.local:5672/keystone
+```
+
+If the secret is missing or the connection fails, the operator falls back to
+the periodic reconciliation timer (every 300s).
 
 ## Resource Lifecycle
 
