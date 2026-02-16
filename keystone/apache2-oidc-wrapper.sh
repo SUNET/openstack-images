@@ -35,5 +35,13 @@ generate_oidc_config() {
 # Generate OIDC config
 generate_oidc_config
 
+# Install friendly error middleware, replacing the chart's default wsgi.py
+FRIENDLY_WSGI="/usr/local/share/keystone/wsgi-friendly.py"
+WSGI_DIR="/var/www/cgi-bin/keystone"
+if [ -f "$FRIENDLY_WSGI" ] && [ -d "$WSGI_DIR" ]; then
+    cat "$FRIENDLY_WSGI" > "$WSGI_DIR/wsgi.py"
+    echo "Installed friendly error middleware in wsgi.py"
+fi
+
 # Execute the real apache2 binary with all arguments
 exec /usr/sbin/apache2 "$@"

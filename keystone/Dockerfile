@@ -16,4 +16,7 @@ RUN a2enmod auth_openidc
 COPY apache2-oidc-wrapper.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/apache2-oidc-wrapper.sh
 
+# Add WSGI script with friendly error pages for browser 401 responses
+COPY wsgi-friendly.py /usr/local/share/keystone/
+
 USER keystone
