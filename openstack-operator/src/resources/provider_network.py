@@ -100,6 +100,8 @@ def _ensure_subnet(
         enable_dhcp=spec.get("enableDhcp", True),
         dns_nameservers=spec.get("dnsNameservers"),
         allocation_pools=allocation_pools,
+        ipv6_ra_mode=spec.get("ipv6RaMode"),
+        ipv6_address_mode=spec.get("ipv6AddressMode"),
     )
     logger.info(f"Created subnet {name} (id={subnet.id})")
 
@@ -129,7 +131,9 @@ def update_subnet_properties(
         name = spec["name"]
         existing = client.get_subnet(name, network_id)
         if not existing:
-            logger.warning(f"Subnet {name} not found for update, skipping")
+            logger.info(f"Subnet {name} not found, creating it")
+            subnet_status = _ensure_subnet(client, network_id, spec)
+            results.append(subnet_status)
             continue
 
         kwargs: dict[str, object] = {}

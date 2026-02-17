@@ -180,11 +180,15 @@ def update_network_handler(
         # Check if subnet changes are only mutable fields
         subnet_changed = "subnets" in str(changed_paths)
         if subnet_changed and not needs_recreate:
-            # Determine if any immutable subnet field changed
+            # Only trigger recreate if an existing subnet's immutable field
+            # is being changed — not when a new subnet is being added
             for change in diff:
+                op = change[0]
                 path_str = str(change[1])
-                if "subnets" in path_str and any(
-                    f in path_str for f in immutable_subnet_fields
+                if (
+                    op == "change"
+                    and "subnets" in path_str
+                    and any(f in path_str for f in immutable_subnet_fields)
                 ):
                     needs_recreate = True
                     break

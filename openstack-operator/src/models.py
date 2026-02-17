@@ -228,6 +228,8 @@ class ProviderSubnetSpec(TypedDict):
     enableDhcp: NotRequired[bool]
     dnsNameservers: NotRequired[list[str]]
     allocationPools: NotRequired[list[AllocationPoolSpec]]
+    ipv6RaMode: NotRequired[str]
+    ipv6AddressMode: NotRequired[str]
 
 
 class OpenstackNetworkSpec(TypedDict):

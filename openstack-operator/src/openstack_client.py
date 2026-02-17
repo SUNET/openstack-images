@@ -513,12 +513,13 @@ class OpenStackClient:
         tags: list[str] | None = None,
     ) -> Subnet:
         """Create a subnet."""
-        logger.info("Creating subnet: %s with CIDR %s", name, cidr)
+        ip_version = 6 if ":" in cidr else 4
+        logger.info("Creating subnet: %s with CIDR %s (ip_version=%d)", name, cidr, ip_version)
         subnet = self.conn.network.create_subnet(
             name=name,
             network_id=network_id,
             cidr=cidr,
-            ip_version=4,
+            ip_version=ip_version,
             is_dhcp_enabled=enable_dhcp,
             dns_nameservers=dns_nameservers or [],
         )
@@ -1062,14 +1063,17 @@ class OpenStackClient:
         enable_dhcp: bool = True,
         dns_nameservers: list[str] | None = None,
         allocation_pools: list[dict[str, str]] | None = None,
+        ipv6_ra_mode: str | None = None,
+        ipv6_address_mode: str | None = None,
     ) -> Subnet:
         """Create a subnet with allocation pools."""
-        logger.info("Creating subnet: %s with CIDR %s (gateway=%s)", name, cidr, gateway_ip)
+        ip_version = 6 if ":" in cidr else 4
+        logger.info("Creating subnet: %s with CIDR %s (ip_version=%d, gateway=%s)", name, cidr, ip_version, gateway_ip)
         kwargs: dict[str, object] = {
             "name": name,
             "network_id": network_id,
             "cidr": cidr,
-            "ip_version": 4,
+            "ip_version": ip_version,
             "is_dhcp_enabled": enable_dhcp,
             "dns_nameservers": dns_nameservers or [],
         }
@@ -1077,5 +1081,9 @@ class OpenStackClient:
             kwargs["gateway_ip"] = gateway_ip
         if allocation_pools:
             kwargs["allocation_pools"] = allocation_pools
+        if ipv6_ra_mode:
+            kwargs["ipv6_ra_mode"] = ipv6_ra_mode
+        if ipv6_address_mode:
+            kwargs["ipv6_address_mode"] = ipv6_address_mode
 
         return self.conn.network.create_subnet(**kwargs)
