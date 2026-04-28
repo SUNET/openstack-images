@@ -18,6 +18,7 @@ from kubernetes import client as k8s_client
 from prometheus_client import start_http_server
 
 from resources.federation import FederationManager
+from resources.kms import ensure_transit_key
 from resources.network import delete_networks, ensure_networks
 from resources.project import delete_project, ensure_project, get_project_info
 from resources.quota import apply_quotas
@@ -338,6 +339,18 @@ def create_project(
         patch.status["projectId"] = project_id
         patch.status["groupId"] = group_id
         _set_patch_condition(patch, "ProjectReady", "True", "Created", "")
+
+        # Provision SSE-KMS transit key (no-op if BAO_ADDR is unset).
+        # Failures here do not block project creation; the
+        # rgw-transit-key-reconciler CronJob is a backstop.
+        try:
+            if ensure_transit_key(project_id):
+                _set_patch_condition(patch, "KMSReady", "True", "Provisioned", "")
+        except Exception as e:
+            logger.warning(
+                f"Failed to provision SSE-KMS key for {project_id}: {e}"
+            )
+            _set_patch_condition(patch, "KMSReady", "False", "Error", str(e)[:200])
 
         # 2. Apply quotas
         quotas = spec.get("quotas", {})
@@ -718,6 +731,14 @@ def reconcile_project(
             patch.status["projectId"] = info["project_id"]
             patch.status["groupId"] = info["group_id"]
             return
+
+        # Repair the SSE-KMS transit key if it was deleted out-of-band.
+        try:
+            ensure_transit_key(info["project_id"])
+        except Exception as e:
+            logger.warning(
+                f"Failed to reconcile SSE-KMS key for {info['project_id']}: {e}"
+            )
 
         # Re-apply role bindings to sync group membership
         # Users may not have existed at CR creation time (federated users
