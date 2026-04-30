@@ -18,6 +18,7 @@ from kubernetes import client as k8s_client
 from prometheus_client import start_http_server
 
 from resources.federation import FederationManager
+from resources.kms import ensure_transit_key
 from resources.network import delete_networks, ensure_networks
 from resources.project import delete_project, ensure_project, get_project_info
 from resources.quota import apply_quotas
@@ -267,11 +268,13 @@ async def _start_notification_listener(transport_url: str) -> None:
             role_bindings = spec.get("roleBindings", [])
             domain = spec.get("domain", "sso-users")
 
+            managed = bool(spec.get("managed", False))
             for binding in role_bindings:
                 if username in binding.get("users", []):
                     try:
                         apply_role_bindings(
-                            client, project_id, group_id, role_bindings, domain
+                            client, project_id, group_id, role_bindings, domain,
+                            managed=managed,
                         )
                         logger.info(
                             "Synced user %s to project %s",
@@ -339,6 +342,18 @@ def create_project(
         patch.status["groupId"] = group_id
         _set_patch_condition(patch, "ProjectReady", "True", "Created", "")
 
+        # Provision SSE-KMS transit key (no-op if BAO_ADDR is unset).
+        # Failures here do not block project creation; the
+        # rgw-transit-key-reconciler CronJob is a backstop.
+        try:
+            if ensure_transit_key(project_id):
+                _set_patch_condition(patch, "KMSReady", "True", "Provisioned", "")
+        except Exception as e:
+            logger.warning(
+                f"Failed to provision SSE-KMS key for {project_id}: {e}"
+            )
+            _set_patch_condition(patch, "KMSReady", "False", "Error", str(e)[:200])
+
         # 2. Apply quotas
         quotas = spec.get("quotas", {})
         if quotas:
@@ -364,12 +379,18 @@ def create_project(
 
         # 5. Apply role bindings
         role_bindings = spec.get("roleBindings", [])
+        is_managed = bool(spec.get("managed", False))
         if role_bindings:
-            apply_role_bindings(client, project_id, group_id, role_bindings, domain)
+            apply_role_bindings(
+                client, project_id, group_id, role_bindings, domain,
+                managed=is_managed,
+            )
 
-        # 6. Update federation mapping
+        # 6. Update federation mapping (skipped for managed projects — those
+        #    don't propagate users to the project group, so there's no group
+        #    membership to map onto)
         federation_ref = spec.get("federationRef")
-        if federation_ref and role_bindings:
+        if federation_ref and role_bindings and not is_managed:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 _set_patch_condition(patch, "FederationReady", "False", "Configuring", "")
@@ -528,14 +549,17 @@ def update_project(
         # Always apply role bindings and federation to ensure consistency
         # This handles cases where the spec hasn't changed but state needs repair
         role_bindings = spec.get("roleBindings", [])
+        is_managed = bool(spec.get("managed", False))
         if role_bindings:
             apply_role_bindings(
-                client, project_id, group_id, role_bindings, domain
+                client, project_id, group_id, role_bindings, domain,
+                managed=is_managed,
             )
 
-        # Always update federation mapping
+        # Always update federation mapping (managed projects opt out — they
+        # use direct user-role assignments, no project-group propagation)
         federation_ref = spec.get("federationRef")
-        if federation_ref:
+        if federation_ref and not is_managed:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 users = get_users_from_role_bindings(role_bindings)
@@ -718,6 +742,14 @@ def reconcile_project(
             patch.status["projectId"] = info["project_id"]
             patch.status["groupId"] = info["group_id"]
             return
+
+        # Repair the SSE-KMS transit key if it was deleted out-of-band.
+        try:
+            ensure_transit_key(info["project_id"])
+        except Exception as e:
+            logger.warning(
+                f"Failed to reconcile SSE-KMS key for {info['project_id']}: {e}"
+            )
 
         # Re-apply role bindings to sync group membership
         # Users may not have existed at CR creation time (federated users

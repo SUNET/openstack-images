@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import io
+import json
 import logging
 import re
 import smtplib
@@ -15,7 +16,8 @@ import openstack
 from croniter import croniter
 from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session as SyncSession, sessionmaker
+from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
 from app.crypto import decrypt_value
@@ -23,11 +25,14 @@ from app.models import (
     BillingJob,
     BillingJobContract,
     BillingJobRun,
+    ClusterAddon,
+    ClusterRequest,
     Contract,
     ContractAccess,
     ContractPriceOverride,
     ContractRebate,
     ResourcePrice,
+    TenantCluster,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,6 +209,208 @@ def _load_rebates(sync_session: SyncSession) -> dict[int, Decimal]:
 def _load_contract_ids(sync_session: SyncSession) -> dict[str, int]:
     result = sync_session.execute(select(Contract))
     return {c.contract_number: c.id for c in result.scalars()}
+
+
+def _price_after_override_and_rebate(
+    *,
+    base_price: Decimal,
+    resource_type: str,
+    contract_id: int | None,
+    contract_overrides: dict[int, dict[str, Decimal]],
+    rebates: dict[int, Decimal],
+) -> Decimal:
+    """Apply per-contract override + rebate to a unit price."""
+    unit_price = base_price
+    if contract_id and contract_id in contract_overrides:
+        override = contract_overrides[contract_id].get(resource_type)
+        if override is not None:
+            unit_price = override
+    if contract_id and contract_id in rebates:
+        unit_price = unit_price * (1 - rebates[contract_id] / 100)
+    return unit_price
+
+
+def _emit_synthetic_cluster_lines(
+    sync_session: SyncSession,
+    period_start: datetime,
+    period_end: datetime,
+    contract_set: set[str],
+    prices: list,  # list[ResourcePrice]
+    contract_overrides: dict[int, dict[str, Decimal]],
+    rebates: dict[int, Decimal],
+    contract_id_map: dict[str, int],
+    writer,
+) -> None:
+    """Emit cluster management/setup/addon fee lines for the given period.
+
+    See plan §"Billing model" for the rules. Per-contract override and rebate
+    apply via the same path as Gnocchi-metered lines.
+    """
+    contract_id_to_number = {v: k for k, v in contract_id_map.items()}
+
+    # Load all provisioned clusters active during this period. We don't model
+    # decommissioning yet, so "active" ≡ provisioned_at < period_end.
+    clusters = list(
+        sync_session.execute(
+            select(TenantCluster).where(
+                TenantCluster.provisioned_at.is_not(None),
+                TenantCluster.provisioned_at < period_end,
+            )
+        ).scalars()
+    )
+
+    for cluster in clusters:
+        cn = contract_id_to_number.get(cluster.contract_id)
+        if not cn or cn not in contract_set:
+            continue
+        contract_id = cluster.contract_id
+        project_label = f"managed-cluster:{cluster.slug}"
+
+        # 1. Per-VM management fee: full month, never prorated.
+        mgmt = _find_price(prices, "cluster_management_fee", {})
+        if mgmt is not None:
+            qty = Decimal(3 + 3 * cluster.worker_groups)
+            unit_price = _price_after_override_and_rebate(
+                base_price=mgmt.unit_price,
+                resource_type="cluster_management_fee",
+                contract_id=contract_id,
+                contract_overrides=contract_overrides,
+                rebates=rebates,
+            )
+            cost = qty * unit_price
+            volume = f"{qty:.0f} {mgmt.unit}"
+            writer.writerow(
+                [cn, project_label, "Cluster management fee", volume, round(cost)]
+            )
+
+        # 2. Initial setup fee: only in the period the cluster was provisioned.
+        if period_start <= cluster.provisioned_at < period_end:
+            ctrl = _find_price(
+                prices, "cluster_setup_fee", {"group_type": "controllers"}
+            )
+            if ctrl is not None:
+                unit_price = _price_after_override_and_rebate(
+                    base_price=ctrl.unit_price,
+                    resource_type="cluster_setup_fee",
+                    contract_id=contract_id,
+                    contract_overrides=contract_overrides,
+                    rebates=rebates,
+                )
+                writer.writerow(
+                    [
+                        cn,
+                        project_label,
+                        "Controller setup fee",
+                        f"1 {ctrl.unit}",
+                        round(unit_price),
+                    ]
+                )
+            wkr = _find_price(
+                prices, "cluster_setup_fee", {"group_type": "workers"}
+            )
+            if wkr is not None and cluster.initial_worker_groups > 0:
+                qty = Decimal(cluster.initial_worker_groups)
+                unit_price = _price_after_override_and_rebate(
+                    base_price=wkr.unit_price,
+                    resource_type="cluster_setup_fee",
+                    contract_id=contract_id,
+                    contract_overrides=contract_overrides,
+                    rebates=rebates,
+                )
+                writer.writerow(
+                    [
+                        cn,
+                        project_label,
+                        f"Worker setup fee (initial, {cluster.initial_worker_groups} groups)",
+                        f"{qty:.0f} {wkr.unit}",
+                        round(qty * unit_price),
+                    ]
+                )
+
+    # 3. Resize expansion fees: any applied resize request in the period.
+    resize_rows = list(
+        sync_session.execute(
+            select(ClusterRequest, TenantCluster)
+            .join(TenantCluster, TenantCluster.id == ClusterRequest.cluster_id)
+            .where(
+                ClusterRequest.request_type == "resize",
+                ClusterRequest.status == "applied",
+                ClusterRequest.applied_at.is_not(None),
+                ClusterRequest.applied_at >= period_start,
+                ClusterRequest.applied_at < period_end,
+            )
+        ).all()
+    )
+    wkr = _find_price(prices, "cluster_setup_fee", {"group_type": "workers"})
+    for cr, cluster in resize_rows:
+        if wkr is None:
+            break
+        cn = contract_id_to_number.get(cluster.contract_id)
+        if not cn or cn not in contract_set:
+            continue
+        try:
+            payload = json.loads(cr.payload)
+        except (TypeError, ValueError):
+            continue
+        before = payload.get("before_worker_groups")
+        target = payload.get("target_worker_groups")
+        if before is None or target is None or target <= before:
+            continue
+        delta = Decimal(target - before)
+        unit_price = _price_after_override_and_rebate(
+            base_price=wkr.unit_price,
+            resource_type="cluster_setup_fee",
+            contract_id=cluster.contract_id,
+            contract_overrides=contract_overrides,
+            rebates=rebates,
+        )
+        writer.writerow(
+            [
+                cn,
+                f"managed-cluster:{cluster.slug}",
+                f"Worker setup fee (expansion, +{int(delta)} groups)",
+                f"{delta:.0f} {wkr.unit}",
+                round(delta * unit_price),
+            ]
+        )
+
+    # 4. Addons: full month if active any time during the period.
+    addon_rows = list(
+        sync_session.execute(
+            select(ClusterAddon, TenantCluster)
+            .join(TenantCluster, TenantCluster.id == ClusterAddon.cluster_id)
+            .where(
+                ClusterAddon.enabled_at < period_end,
+                (ClusterAddon.disabled_at.is_(None))
+                | (ClusterAddon.disabled_at > period_start),
+            )
+        ).all()
+    )
+    for addon, cluster in addon_rows:
+        cn = contract_id_to_number.get(cluster.contract_id)
+        if not cn or cn not in contract_set:
+            continue
+        price = _find_price(
+            prices, "cluster_addon_fee", {"addon": addon.addon_type}
+        )
+        if price is None:
+            continue
+        unit_price = _price_after_override_and_rebate(
+            base_price=price.unit_price,
+            resource_type="cluster_addon_fee",
+            contract_id=cluster.contract_id,
+            contract_overrides=contract_overrides,
+            rebates=rebates,
+        )
+        writer.writerow(
+            [
+                cn,
+                f"managed-cluster:{cluster.slug}",
+                f"Addon: {addon.addon_type}",
+                f"1 {price.unit}",
+                round(unit_price),
+            ]
+        )
 
 
 def _detect_granularity_seconds(measures: list) -> float:
@@ -392,6 +599,19 @@ def generate_billing_csv(
                 volume = f"{quantity:.2f} {unit}".replace(".", ",")
                 writer.writerow([cn, project_name, label, volume, round(cost)])
 
+        # Synthetic cluster billing lines (management fee, setup fees, addons).
+        _emit_synthetic_cluster_lines(
+            db,
+            period_start,
+            period_end,
+            contract_set,
+            prices,
+            contract_overrides,
+            rebates,
+            contract_id_map,
+            writer,
+        )
+
         return output.getvalue()
     finally:
         db.close()
@@ -448,9 +668,6 @@ async def deliver_email(recipient: str, subject: str, filename: str, content: st
 
 
 # --- Job execution ---
-
-
-import json
 
 
 def _decrypt_config(delivery_config_json: str) -> dict:

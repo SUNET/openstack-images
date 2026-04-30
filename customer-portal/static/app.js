@@ -91,6 +91,16 @@ async function route() {
         return renderAdminBillingJobs();
     if (parts[0] === "admin" && parts[1] === "pricing")
         return renderAdminPricing();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2] === "new")
+        return renderAdminCreateCluster();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2] === "help")
+        return renderClusterSetupHelp();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2])
+        return renderAdminClusterDetail(decodeURIComponent(parts[2]));
+    if (parts[0] === "admin" && parts[1] === "clusters")
+        return renderAdminClusters();
+    if (parts[0] === "admin" && parts[1] === "cluster-requests")
+        return renderAdminClusterRequests();
     if (parts[0] === "admin" && parts[1] === "contracts" && parts[2] === "edit" && parts[3])
         return renderAdminEditContract(parts[3]);
     if (parts[0] === "admin" && parts[1] === "contracts" && parts[2])
@@ -99,8 +109,10 @@ async function route() {
         return renderAdminEditCustomer(parts[3]);
     if (parts[0] === "admin" && parts[1] === "customers" && parts[2])
         return renderAdminCustomerDetail(parts[2]);
-    if (parts[0] === "admin")
+    if (parts[0] === "admin" && parts[1] === "customers")
         return renderAdminCustomers();
+    if (parts[0] === "admin")
+        return renderAdmin();
 
     // Billing routes
     if (parts[0] === "billing" && parts[1] === "new")
@@ -111,6 +123,14 @@ async function route() {
         return renderBillingJobDetail(parts[1]);
     if (parts[0] === "billing")
         return renderBillingJobs();
+
+    // Cluster routes (member-facing)
+    if (parts[0] === "clusters" && parts[1] && parts[2] === "users")
+        return renderClusterUsers(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters" && parts[1])
+        return renderClusterDetail(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters")
+        return renderClusters();
 
     // Customer routes
     if (parts[0] === "contracts" && parts[2] === "projects" && parts[3] === "new")
@@ -147,15 +167,9 @@ async function api(path, opts = {}) {
 
 function navKeyFromHash() {
     const parts = currentRoute().split("/").filter(Boolean);
-    if (parts[0] === "admin") {
-        if (parts[1] === "pricing" && parts[2] === "docs") return "docs";
-        if (parts[1] === "pricing") return "pricing";
-        if (parts[1] === "billing") return "billing";
-        if (parts[1] === "contracts") return "customers";
-        return "customers";
-    }
+    if (parts[0] === "admin") return "admin";
     if (parts[0] === "billing") return "billing";
-    if (parts[0] === "contracts" || !parts[0]) return "contracts";
+    if (parts[0] === "clusters" || parts[0] === "contracts" || !parts[0]) return "contracts";
     return "";
 }
 
@@ -169,19 +183,11 @@ function renderShell() {
     const active = navKeyFromHash();
 
     clear(nav);
-    const links = isAdmin
-        ? [
-            { key: "customers", label: "Customers", hash: "#/admin" },
-            { key: "pricing", label: "Pricing", hash: "#/admin/pricing" },
-            { key: "billing", label: "Billing", hash: "#/admin/billing" },
-            { key: "docs", label: "Docs", hash: "#/admin/pricing/docs" },
-            { key: "contracts", label: "My Contracts", hash: "#/contracts" },
-        ]
-        : [
-            { key: "contracts", label: "Contracts", hash: "#/contracts" },
-            { key: "billing", label: "Billing", hash: "#/billing" },
-            { key: "docs", label: "Pricing", hash: "#/admin/pricing/docs" },
-        ];
+    const links = [
+        { key: "contracts", label: "My Contracts", hash: "#/contracts" },
+        { key: "billing", label: "Billing", hash: "#/billing" },
+    ];
+    if (isAdmin) links.push({ key: "admin", label: "Admin", hash: "#/admin" });
     for (const l of links) {
         nav.appendChild(h("a", {
             href: l.hash,
@@ -371,18 +377,46 @@ async function renderContractProjects(contractNumber) {
         app.appendChild(slbl("Projects", projects.length));
         if (!projects.length) {
             app.appendChild(emptyState("No projects yet. Create one to get started."));
-            return;
-        }
-        for (const p of projects) {
-            const rn = encodeURIComponent(p.resource_name);
-            app.appendChild(h("a", { className: "card link", href: `#/contracts/${cn}/projects/${rn}` },
-                h("div", { className: "card-head" },
+        } else {
+            for (const p of projects) {
+                const rn = encodeURIComponent(p.resource_name);
+                const head = h("div", { className: "card-head" },
                     h("h3", {}, p.name),
                     phaseBadge(p.phase),
-                ),
-                p.description ? h("div", { className: "meta" }, p.description) : null,
-                h("div", { className: "meta mono" }, `${p.users.length} member${p.users.length === 1 ? "" : "s"} · ${p.resource_name}`),
-            ));
+                );
+                if (p.managed) head.appendChild(badge("managed-by-sunet", "managed"));
+                app.appendChild(h("a", { className: "card link", href: `#/contracts/${cn}/projects/${rn}` },
+                    head,
+                    p.description ? h("div", { className: "meta" }, p.description) : null,
+                    h("div", { className: "meta mono" },
+                        (p.managed
+                            ? "SUNET-managed"
+                            : `${p.users.length} member${p.users.length === 1 ? "" : "s"}`)
+                        + ` · ${p.resource_name}`),
+                ));
+            }
+        }
+
+        // Clusters belonging to this contract.
+        const allClusters = await api("/api/clusters");
+        const clusters = (allClusters || []).filter(c => c.contract_number === contractNumber);
+        app.appendChild(slbl("Clusters", clusters.length));
+        if (!clusters.length) {
+            app.appendChild(emptyState("No clusters on this contract. SUNET ops provisions clusters — contact them to request one."));
+        } else {
+            for (const c of clusters) {
+                const slug = encodeURIComponent(c.slug);
+                app.appendChild(h("a", { className: "card link", href: `#/clusters/${slug}` },
+                    h("div", { className: "card-head" },
+                        h("h3", {}, c.name),
+                        c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                    ),
+                    h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                    h("div", { className: "meta mono" },
+                        `Your role: ${c.caller_role || "?"}` +
+                        (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
+                ));
+            }
         }
     } catch (e) { showAlert(e.message); }
 }
@@ -403,38 +437,50 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
     try {
         const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
+        const canMutate = !p.managed || (currentUser && currentUser.is_admin);
+        const actions = [];
+        if (canMutate) {
+            actions.push(h("a", { className: "btn ghost sm", href: `#/contracts/${cn}/projects/edit/${rn}` }, "Edit"));
+            actions.push(h("button", { className: "btn danger sm", onclick: async () => {
+                if (!confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources.`)) return;
+                try {
+                    await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
+                    navigate(`/contracts/${cn}/projects`);
+                } catch (err) { showAlert(err.message); }
+            }}, "Delete"));
+        }
         app.appendChild(phead({
-            eyebrow: "Project",
+            eyebrow: p.managed ? "Project · managed-by-sunet" : "Project",
             title: p.name,
             lead: p.description || null,
-            actions: [
-                h("a", { className: "btn ghost sm", href: `#/contracts/${cn}/projects/edit/${rn}` }, "Edit"),
-                h("button", { className: "btn danger sm", onclick: async () => {
-                    if (!confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources.`)) return;
-                    try {
-                        await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
-                        navigate(`/contracts/${cn}/projects`);
-                    } catch (err) { showAlert(err.message); }
-                }}, "Delete"),
-            ],
+            actions: actions.length ? actions : null,
         }));
+
+        if (p.managed && !canMutate) {
+            const note = h("p", { className: "hint", style: "margin-bottom:16px" },
+                "This project is SUNET-managed and read-only. Use the cluster page to request changes.");
+            app.appendChild(note);
+        }
 
         app.appendChild(h("div", { className: "slbl first" }, "Status"));
         app.appendChild(kv(
             kvRow("Phase", phaseBadge(p.phase)),
             kvRowMono("Resource name", p.resource_name),
             kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, p.contract_number)),
+            p.managed ? kvRow("Ownership", badge("managed-by-sunet", "managed")) : null,
         ));
 
         app.appendChild(slbl("Members", p.users.length));
         if (!p.users.length) {
-            app.appendChild(emptyState("No members yet. Add one via Edit."));
+            app.appendChild(emptyState(p.managed
+                ? "SUNET-managed: customer admins of the linked cluster get Keystone reader on this project automatically."
+                : "No members yet. Add one via Edit."));
         } else {
             const ul = h("ul", { className: "ilist" });
             for (const u of p.users) {
                 ul.appendChild(h("li", {},
                     h("span", {}, u),
-                    h("span", { className: "meta" }, "member"),
+                    h("span", { className: "meta" }, p.managed ? "reader" : "member"),
                 ));
             }
             app.appendChild(ul);
@@ -1489,6 +1535,867 @@ async function renderAdminBillingJobs() {
             ));
         }
     } catch (e) { showAlert(e.message); }
+}
+
+// ========== Cluster helpers ==========
+
+const ADDON_DISPLAY_NAMES = { jupyterhub: "JupyterHub" };
+
+function statusBadge(status) {
+    if (status === "active") return badge("active", "ok");
+    if (status === "revoked") return badge("revoked", "err");
+    if (status === "expired") return badge("expired", "warn");
+    if (status === "pending") return badge("pending", "warn");
+    if (status === "applied") return badge("applied", "ok");
+    if (status === "denied") return badge("denied", "err");
+    return badge(status || "?", "neutral");
+}
+
+function daysUntil(iso) {
+    if (!iso) return null;
+    const ms = new Date(iso).getTime() - Date.now();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+}
+
+function formatRequestSummary(r) {
+    const p = r.payload || {};
+    if (r.request_type === "addon") {
+        const verb = p.action === "enable" ? "Enable" : "Disable";
+        const name = ADDON_DISPLAY_NAMES[p.addon_type] || p.addon_type || "addon";
+        return `${verb} ${name} addon`;
+    }
+    if (r.request_type === "resize") {
+        const tgt = p.target_worker_groups;
+        const before = p.before_worker_groups;
+        if (before != null && tgt != null)
+            return `Resize from ${before} to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+        if (tgt != null)
+            return `Resize to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+        return "Resize";
+    }
+    if (r.request_type === "backup") {
+        return p.action === "enable" ? "Enable backup" : "Disable backup";
+    }
+    return r.request_type;
+}
+
+// ========== Cluster: member-facing ==========
+
+async function renderClusters() {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
+        { label: "All clusters" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "Customer",
+        title: "All clusters",
+        lead: "Tenant Kubernetes clusters you have access to across every contract. Open a contract page from My Contracts to see clusters scoped to that contract.",
+    }));
+    try {
+        const clusters = await api("/api/clusters");
+        app.appendChild(slbl("Clusters", clusters.length));
+        if (!clusters.length) {
+            app.appendChild(emptyState("You don't have access to any clusters yet."));
+            return;
+        }
+        for (const c of clusters) {
+            app.appendChild(h("a", { className: "card link", href: `#/clusters/${encodeURIComponent(c.slug)}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, c.name),
+                    c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                ),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                h("div", { className: "meta mono" }, `Contract: ${c.contract_number} · Role: ${c.caller_role || "?"}`
+                    + (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
+            ));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderClusterDetail(slug) {
+    clear(app); app.className = "page";
+    try {
+        const cluster = await api(`/api/clusters/${slug}`);
+        const cn = encodeURIComponent(cluster.contract_number || "");
+        const isCustomerAdmin = cluster.caller_role === "customer_admin" || cluster.caller_role === "sunet_admin";
+
+        app.appendChild(bc(
+            { label: "Contracts", hash: "/contracts" },
+            { label: cluster.contract_number, hash: `/contracts/${cn}/projects` },
+            { label: slug },
+        ));
+        app.appendChild(phead({
+            eyebrow: `Cluster · ${cluster.size_label}`,
+            title: cluster.name,
+            lead: cluster.provisioned_at ? "Provisioned and ready." : "Not yet provisioned — credential issuance is disabled.",
+            actions: isCustomerAdmin
+                ? [h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}/users` }, "Manage users")]
+                : null,
+        }));
+
+        // Overview
+        app.appendChild(h("div", { className: "slbl first" }, "Overview"));
+        const overviewRows = [
+            kvRowMono("Slug", cluster.slug),
+            kvRow("Servers", `${cluster.total_servers} (3 controllers + ${3 * cluster.worker_groups} workers)`),
+            kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, cluster.contract_number)),
+            kvRow("Your role", cluster.caller_role || "—"),
+        ];
+        if (cluster.management_project_resource_name) {
+            overviewRows.push(kvRow("Management project",
+                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
+                    cluster.management_project_resource_name)));
+        }
+        if (cluster.backup_project_resource_name) {
+            overviewRows.push(kvRow("Backup project",
+                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
+                    cluster.backup_project_resource_name)));
+        }
+        if (cluster.active_addons.length) {
+            overviewRows.push(kvRow("Active addons", cluster.active_addons.join(", ")));
+        }
+        app.appendChild(kv(...overviewRows));
+
+        const requests = await api(`/api/clusters/${slug}/requests`);
+
+        // Credentials
+        app.appendChild(slbl("My credentials"));
+        if (!cluster.provisioned_at) {
+            app.appendChild(emptyState("Cluster is not yet provisioned — credential issuance is disabled."));
+        } else {
+            const issueForm = h("form", { className: "card", style: "margin-bottom:12px",
+                onsubmit: async (e) => {
+                    e.preventDefault();
+                    const label = e.target.querySelector('[name="label"]').value.trim();
+                    const ttlRaw = e.target.querySelector('[name="ttl_days"]').value.trim();
+                    const body = { label };
+                    if (ttlRaw) body.ttl_days = parseInt(ttlRaw, 10);
+                    try {
+                        const issued = await api(`/api/clusters/${slug}/credentials`, {
+                            method: "POST", body: JSON.stringify(body),
+                        });
+                        showIssuedKubeconfig(issued);
+                        renderClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }},
+                h("div", { className: "card-head" }, h("h3", {}, "Issue new kubeconfig")),
+                h("div", { className: "meta", style: "margin-top:8px" },
+                    h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Label"),
+                    h("input", { name: "label", required: true, maxlength: "128", placeholder: "laptop", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "TTL in days (optional, default 365)"),
+                    h("input", { name: "ttl_days", type: "number", min: "1", max: "3650", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("div", { className: "btn-row" },
+                        h("button", { type: "submit", className: "btn primary sm" }, "Issue kubeconfig"),
+                    ),
+                ),
+            );
+            app.appendChild(issueForm);
+
+            const creds = await api(`/api/clusters/${slug}/credentials`);
+            if (!creds.length) {
+                app.appendChild(emptyState("You haven't issued any credentials yet."));
+            } else {
+                for (const c of creds) {
+                    const expiryDays = daysUntil(c.expires_at);
+                    const expiryWarn = c.status === "active" && expiryDays !== null && expiryDays < 30;
+                    const card = h("div", { className: "card" },
+                        h("div", { className: "card-head" },
+                            h("h3", {}, c.label),
+                            statusBadge(c.status),
+                        ),
+                        h("div", { className: "meta" }, `Issued ${fmtDay(c.created_at)} · expires ${fmtDay(c.expires_at)}` + (expiryWarn ? ` (in ${expiryDays} days)` : "")),
+                        h("div", { className: "meta mono" }, `Serial: ${c.cert_serial.substring(0, 16)}…`),
+                    );
+                    if (c.status === "active") {
+                        const row = h("div", { className: "btn-row" },
+                            h("button", { className: "btn ghost tiny",
+                                onclick: async () => {
+                                    if (!confirm(`Rotate credential "${c.label}"? The old kubeconfig will stop working.`)) return;
+                                    try {
+                                        const issued = await api(`/api/clusters/${slug}/credentials/${c.id}/rotate`, { method: "POST" });
+                                        showIssuedKubeconfig(issued);
+                                        renderClusterDetail(slug);
+                                    } catch (err) { showAlert(err.message); }
+                                }}, "Rotate"),
+                            h("button", { className: "btn danger tiny",
+                                onclick: async () => {
+                                    if (!confirm(`Revoke credential "${c.label}"? Immediate, can't be undone.`)) return;
+                                    try {
+                                        await api(`/api/clusters/${slug}/credentials/${c.id}`, { method: "DELETE" });
+                                        renderClusterDetail(slug);
+                                    } catch (err) { showAlert(err.message); }
+                                }}, "Revoke"),
+                        );
+                        card.appendChild(row);
+                    }
+                    app.appendChild(card);
+                }
+            }
+        }
+
+        // Request a change (customer admins / SUNET admins only)
+        if (isCustomerAdmin) {
+            app.appendChild(slbl("Request a change"));
+            app.appendChild(renderClusterRequestPanel(slug, cluster, requests));
+        }
+
+        // Request history
+        app.appendChild(slbl("Request history", requests.length));
+        if (!requests.length) {
+            app.appendChild(emptyState("No requests yet."));
+        } else {
+            for (const r of requests) {
+                app.appendChild(h("div", { className: "card" },
+                    h("div", { className: "card-head" },
+                        h("h3", {}, formatRequestSummary(r)),
+                        statusBadge(r.status),
+                    ),
+                    h("div", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDay(r.requested_at)}`),
+                    r.applied_at ? h("div", { className: "meta" },
+                        `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub || "?"} on ${fmtDay(r.applied_at)}`) : null,
+                    r.note ? h("div", { className: "meta" }, `Note: ${r.note}`) : null,
+                ));
+            }
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+function renderClusterRequestPanel(slug, cluster, requests) {
+    const panel = h("div", { className: "card" });
+    const pendingByType = (type, predicate = () => true) =>
+        (requests || []).some(r => r.status === "pending" && r.request_type === type && predicate(r.payload || {}));
+
+    // JupyterHub addon
+    const jhActive = cluster.active_addons.includes("jupyterhub");
+    const jhPending = pendingByType("addon", p => p.addon_type === "jupyterhub");
+    const jhDisabled = jhActive || jhPending;
+    const jhBtn = h("button", {
+        className: "btn ghost sm", disabled: jhDisabled || undefined,
+        onclick: async () => {
+            if (!confirm("Request JupyterHub addon? SUNET ops will be notified by email.")) return;
+            try {
+                await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                    request_type: "addon",
+                    payload: { action: "enable", addon_type: "jupyterhub" },
+                })});
+                renderClusterDetail(slug);
+            } catch (err) { showAlert(err.message); }
+        },
+    }, jhActive ? "JupyterHub already enabled" : (jhPending ? "JupyterHub request pending" : "Request JupyterHub addon"));
+    panel.appendChild(h("div", { style: "padding:6px 0" }, jhBtn));
+
+    // Resize
+    const resizePending = pendingByType("resize");
+    const resizeRow = h("div", { style: "display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap" },
+        h("div", { className: "meta", style: "min-width:0;flex:1" },
+            `Resize cluster (current: ${cluster.worker_groups} worker groups, ${3 * cluster.worker_groups} workers)`),
+        h("input", {
+            name: "resize_target", type: "number",
+            min: cluster.worker_groups + 1,
+            placeholder: `> ${cluster.worker_groups}`,
+            disabled: resizePending || undefined,
+            style: "width:120px;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit",
+        }),
+        h("button", {
+            className: "btn ghost sm", disabled: resizePending || undefined,
+            onclick: async () => {
+                const input = panel.querySelector('[name="resize_target"]');
+                const target = parseInt(input.value, 10);
+                if (!target || target <= cluster.worker_groups) {
+                    showAlert("Target must be greater than current."); return;
+                }
+                if (!confirm(`Request resize to ${target} worker groups (${3 + 3 * target} servers total)?`)) return;
+                try {
+                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                        request_type: "resize",
+                        payload: { target_worker_groups: target },
+                    })});
+                    renderClusterDetail(slug);
+                } catch (err) { showAlert(err.message); }
+            },
+        }, resizePending ? "Resize request pending" : "Request resize"),
+    );
+    panel.appendChild(resizeRow);
+
+    // Backup
+    const backupEnabled = !!cluster.backup_project_resource_name;
+    const backupPending = pendingByType("backup");
+    const backupBtn = h("button", {
+        className: "btn ghost sm", disabled: backupPending || undefined,
+        onclick: async () => {
+            const action = backupEnabled ? "disable" : "enable";
+            if (!confirm(`Request to ${action} backup?`)) return;
+            try {
+                await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                    request_type: "backup",
+                    payload: { action },
+                })});
+                renderClusterDetail(slug);
+            } catch (err) { showAlert(err.message); }
+        },
+    }, backupPending ? "Backup request pending" : (backupEnabled ? "Request to disable backup" : "Request to enable backup"));
+    panel.appendChild(h("div", { style: "padding:6px 0" }, backupBtn));
+
+    return panel;
+}
+
+function showIssuedKubeconfig(issued) {
+    const overlay = h("div", {
+        style: "position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:100",
+    });
+    const close = () => overlay.remove();
+    const blob = new Blob([issued.kubeconfig], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const dialog = h("div", { className: "card", style: "max-width:640px;width:92%;max-height:90vh;overflow:auto" },
+        h("div", { className: "card-head" }, h("h3", {}, "Kubeconfig issued")),
+        h("div", { className: "meta" }, `Label: ${issued.label} · Expires: ${fmtDay(issued.expires_at)}`),
+        h("div", { className: "meta", style: "margin-top:8px" },
+            "Save the file below — it is shown only once and not retrievable later."),
+        h("textarea", {
+            readonly: true, value: issued.kubeconfig,
+            style: "width:100%;height:200px;font-family:var(--mono);font-size:12px;margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:6px",
+        }),
+        h("div", { className: "btn-row" },
+            h("a", { className: "btn primary sm",
+                href: url, download: `kubeconfig-${issued.cluster_slug}-${issued.label}.yaml` }, "Download"),
+            h("button", { className: "btn ghost sm", onclick: close }, "Close"),
+        ),
+    );
+    overlay.appendChild(dialog);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.body.appendChild(overlay);
+}
+
+async function renderClusterUsers(slug) {
+    clear(app); app.className = "page";
+    try {
+        const cluster = await api(`/api/clusters/${slug}`);
+        const users = await api(`/api/clusters/${slug}/users`);
+        const isSunetAdmin = cluster.caller_role === "sunet_admin";
+        const cn = encodeURIComponent(cluster.contract_number || "");
+
+        app.appendChild(bc(
+            { label: "Contracts", hash: "/contracts" },
+            { label: cluster.contract_number, hash: `/contracts/${cn}/projects` },
+            { label: slug, hash: `/clusters/${encodeURIComponent(slug)}` },
+            { label: "Users" },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Cluster · users",
+            title: "Cluster users",
+            lead: "Customer admins manage their team members. SUNET admins can also mint other customer admins.",
+        }));
+
+        for (const u of users) {
+            const canRemove = u.role !== "customer_admin" || isSunetAdmin;
+            const card = h("div", { className: "card" },
+                h("div", { className: "card-head" },
+                    h("h3", {}, u.user_sub),
+                    badge(u.role, "neutral"),
+                ),
+                h("div", { className: "meta" }, `Granted by ${u.granted_by_sub} on ${fmtDay(u.created_at)}`),
+            );
+            if (canRemove) {
+                card.appendChild(h("div", { className: "btn-row" },
+                    h("button", { className: "btn danger tiny",
+                        onclick: async () => {
+                            if (!confirm(`Remove ${u.user_sub}? All their kubeconfigs on this cluster will also be revoked.`)) return;
+                            try {
+                                await api(`/api/clusters/${slug}/users/${encodeURIComponent(u.user_sub)}`, { method: "DELETE" });
+                                renderClusterUsers(slug);
+                            } catch (err) { showAlert(err.message); }
+                        }}, "Remove"),
+                ));
+            }
+            app.appendChild(card);
+        }
+
+        app.appendChild(slbl("Add user"));
+        const form = h("form", { className: "card",
+            onsubmit: async (e) => {
+                e.preventDefault();
+                const user_sub = e.target.querySelector('[name="user_sub"]').value.trim();
+                const role = e.target.querySelector('[name="role"]').value;
+                try {
+                    await api(`/api/clusters/${slug}/users`, { method: "POST", body: JSON.stringify({ user_sub, role }) });
+                    renderClusterUsers(slug);
+                } catch (err) { showAlert(err.message); }
+            }},
+            h("div", { className: "meta" },
+                h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "OIDC subject"),
+                h("input", { name: "user_sub", required: true, placeholder: "user@idp",
+                    style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Role"),
+                h("select", { name: "role",
+                    style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)" },
+                    h("option", { value: "user" }, "user"),
+                    isSunetAdmin ? h("option", { value: "customer_admin" }, "customer_admin (SUNET admin only)") : null,
+                ),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Grant access"),
+                ),
+            ),
+        );
+        app.appendChild(form);
+    } catch (e) { showAlert(e.message); }
+}
+
+// ========== Admin landing + clusters + cluster requests + setup guide ==========
+
+function renderAdmin() {
+    clear(app); app.className = "page";
+    app.appendChild(bc({ label: "Admin" }));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Admin",
+        lead: "SUNET-only management surfaces.",
+    }));
+    const tile = (href, title, desc) => h("a", { className: "card link", href },
+        h("div", { className: "card-head" }, h("h3", {}, title)),
+        h("div", { className: "meta" }, desc),
+    );
+    app.appendChild(tile("#/admin/customers", "Customers & Contracts",
+        "Create customer organisations, contracts, and grant user access to contracts."));
+    app.appendChild(tile("#/admin/clusters", "Tenant Clusters",
+        "Register Kubernetes clusters, mark as provisioned, manage admin access. Includes the bootstrap setup guide."));
+    app.appendChild(tile("#/admin/cluster-requests", "Cluster Change Requests",
+        "Review and apply customer-admin requests for addons, resizes, and backup enablement."));
+    app.appendChild(tile("#/admin/billing", "Billing Jobs",
+        "All scheduled billing exports across the platform — read-only view with manual-run support."));
+    app.appendChild(tile("#/admin/pricing", "Pricing",
+        "Per-resource unit prices, per-contract overrides, and rebates. Includes synthetic cluster fees."));
+    app.appendChild(tile("#/admin/pricing/docs", "Pricing Docs",
+        "Reference: how unit prices and conversion factors map to billed line items."));
+}
+
+async function renderAdminClusters() {
+    clear(app); app.className = "page";
+    app.appendChild(bc({ label: "Admin", hash: "/admin" }, { label: "Clusters" }));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Tenant clusters",
+        lead: "All registered tenant clusters across customers.",
+        actions: [
+            h("a", { className: "btn primary sm", href: "#/admin/clusters/new" }, svgPlus(), "New cluster"),
+            h("a", { className: "btn ghost sm", href: "#/admin/clusters/help" }, "Setup guide"),
+        ],
+    }));
+    try {
+        const clusters = await api("/api/admin/clusters");
+        app.appendChild(slbl("Clusters", clusters.length));
+        if (!clusters.length) {
+            app.appendChild(emptyState("No clusters yet."));
+            return;
+        }
+        for (const c of clusters) {
+            app.appendChild(h("a", { className: "card link", href: `#/admin/clusters/${encodeURIComponent(c.slug)}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, c.name),
+                    c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                ),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers · contract ${c.contract_number}`),
+                h("div", { className: "meta mono" }, c.api_url),
+            ));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminCreateCluster() {
+    clear(app); app.className = "page narrow-form";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
+        { label: "New" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Register tenant cluster",
+        lead: "After kubespray finishes, register the cluster here so the portal can mediate kubeconfig issuance and billing.",
+    }));
+
+    let contracts = [];
+    let customersById = {};
+    try {
+        contracts = await api("/api/admin/contracts");
+        const customers = await api("/api/admin/customers");
+        customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
+    } catch (e) { showAlert(e.message); return; }
+
+    if (!contracts.length) {
+        app.appendChild(emptyState("No contracts exist yet. Create a customer + contract first under Admin → Customers."));
+        app.appendChild(h("div", { className: "btn-row" },
+            h("a", { className: "btn ghost sm", href: "#/admin/customers" }, "Go to Customers"),
+        ));
+        return;
+    }
+
+    const inputCss = "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)";
+    const labelCss = "display:block;margin-top:14px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px";
+
+    const form = h("form", { className: "card",
+        onsubmit: async (e) => {
+            e.preventDefault();
+            const data = Object.fromEntries(new FormData(e.target).entries());
+            data.worker_groups = parseInt(data.worker_groups, 10) || 1;
+            try {
+                const created = await api("/api/admin/clusters", {
+                    method: "POST", body: JSON.stringify(data),
+                });
+                navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
+            } catch (err) { showAlert(err.message); }
+        }},
+        h("label", { style: labelCss }, "Contract"),
+        h("select", { name: "contract_number", required: true, style: inputCss },
+            h("option", { value: "" }, "— select contract —"),
+            ...contracts.map(c => {
+                const cust = customersById[c.customer_id];
+                const lbl = cust ? `${c.contract_number} — ${cust.name} (${cust.domain})` : c.contract_number;
+                return h("option", { value: c.contract_number }, lbl);
+            }),
+        ),
+        h("label", { style: labelCss }, "Display name"),
+        h("input", { name: "name", required: true, placeholder: "Acme production cluster", style: inputCss }),
+        h("label", { style: labelCss }, "Slug (used in OpenBao mount path & cert O)"),
+        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "64", placeholder: "acme-prod", style: inputCss }),
+        h("label", { style: labelCss }, "API URL"),
+        h("input", { name: "api_url", required: true, placeholder: "https://k8s.acme.example.org:6443", style: inputCss }),
+        h("label", { style: labelCss }, "CA bundle (PEM)"),
+        h("div", { className: "meta", style: "margin-top:-2px" },
+            "On a control-plane node: ", h("code", {}, "cat /etc/kubernetes/pki/ca.crt"),
+            ". Or from an admin kubeconfig: ", h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"), "."),
+        h("textarea", { name: "ca_bundle", required: true, placeholder: "-----BEGIN CERTIFICATE-----\n...",
+            style: inputCss + ";min-height:130px;font-family:var(--mono);font-size:12px" }),
+        h("div", { className: "meta", style: "margin-top:6px" },
+            "OpenBao mount will be derived as ", h("code", {}, "kubernetes/<slug>"), "."),
+        h("label", { style: labelCss }, "OpenBao role"),
+        h("input", { name: "openbao_role", value: "argocd-rbac-manager", style: inputCss }),
+        h("label", { style: labelCss }, "ArgoCD Role name (in argocd ns)"),
+        h("input", { name: "argocd_role_name", value: "argocd-tenant", style: inputCss }),
+        h("label", { style: labelCss }, "ArgoCD namespace"),
+        h("input", { name: "argocd_namespace", value: "argocd", style: inputCss }),
+        h("label", { style: labelCss }, "Worker groups (3 workers per group)"),
+        h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: true, style: inputCss }),
+        h("div", { className: "btn-row" },
+            h("a", { className: "btn ghost sm", href: "#/admin/clusters" }, "Cancel"),
+            h("button", { type: "submit", className: "btn primary sm" }, "Create cluster"),
+        ),
+    );
+    app.appendChild(form);
+}
+
+async function renderAdminClusterDetail(slug) {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
+        { label: slug },
+    ));
+    try {
+        const c = await api(`/api/admin/clusters/${slug}`);
+        app.appendChild(phead({
+            eyebrow: `Cluster · ${c.size_label}`,
+            title: c.name,
+            lead: c.provisioned_at ? "Provisioned and live." : "Not yet provisioned.",
+            actions: [
+                !c.provisioned_at ? h("button", { className: "btn primary sm",
+                    onclick: async () => {
+                        if (!confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) return;
+                        try {
+                            await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
+                            renderAdminClusterDetail(slug);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Mark provisioned") : null,
+                h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
+                h("button", { className: "btn danger sm",
+                    onclick: async () => {
+                        if (!confirm(`Delete cluster ${c.name}? This deletes the management/backup OpenStack projects and revokes all credentials. Cannot be undone.`)) return;
+                        try {
+                            await api(`/api/admin/clusters/${slug}`, { method: "DELETE" });
+                            navigate("/admin/clusters");
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Delete cluster"),
+            ].filter(Boolean),
+        }));
+
+        app.appendChild(h("div", { className: "slbl first" }, "Cluster"));
+        app.appendChild(kv(
+            kvRowMono("Slug", c.slug),
+            kvRow("Size", `${c.size_label} (${c.total_servers} servers)`),
+            kvRowMono("API", c.api_url),
+            kvRow("Contract", c.contract_number),
+            kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
+            kvRow("Management project", c.management_project_resource_name || "—"),
+            kvRow("Backup project", c.backup_project_resource_name || "—"),
+        ));
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminClusterRequests() {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Cluster requests" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Pending cluster requests",
+        lead: "Review and apply customer-admin requests across clusters. Apply triggers state changes (addon enable, resize bump, backup project create) and the next billing run reflects them.",
+    }));
+    try {
+        const pending = await api("/api/admin/cluster-requests?status=pending");
+        app.appendChild(slbl("Pending", pending.length));
+        if (!pending.length) {
+            app.appendChild(emptyState("No pending requests."));
+        }
+        for (const r of pending) {
+            const card = h("div", { className: "card" },
+                h("div", { className: "card-head" },
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("div", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDay(r.requested_at)}`),
+                h("textarea", { name: `note-${r.id}`, placeholder: "Optional note",
+                    style: "width:100%;height:60px;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                h("div", { className: "btn-row" },
+                    h("button", { className: "btn primary sm",
+                        onclick: async () => {
+                            const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                            try {
+                                await api(`/api/admin/cluster-requests/${r.id}/apply`, {
+                                    method: "POST", body: JSON.stringify({ note: note || null }),
+                                });
+                                renderAdminClusterRequests();
+                            } catch (err) { showAlert(err.message); }
+                        }}, "Apply"),
+                    h("button", { className: "btn danger sm",
+                        onclick: async () => {
+                            const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                            try {
+                                await api(`/api/admin/cluster-requests/${r.id}/deny`, {
+                                    method: "POST", body: JSON.stringify({ note: note || null }),
+                                });
+                                renderAdminClusterRequests();
+                            } catch (err) { showAlert(err.message); }
+                        }}, "Deny"),
+                ),
+            );
+            app.appendChild(card);
+        }
+
+        const all = await api("/api/admin/cluster-requests");
+        const recent = all.filter(x => x.status !== "pending").slice(0, 20);
+        app.appendChild(slbl("Recent applied/denied", recent.length));
+        for (const r of recent) {
+            app.appendChild(h("div", { className: "card" },
+                h("div", { className: "card-head" },
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("div", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub} on ${fmtDay(r.applied_at)}`),
+                r.note ? h("div", { className: "meta" }, `Note: ${r.note}`) : null,
+            ));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+function renderClusterSetupHelp() {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
+        { label: "Setup guide" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Tenant cluster setup guide",
+        lead: "Walks through every manual step needed to onboard a fresh tenant cluster. Run prerequisite steps once for the platform, then the per-cluster steps for each cluster you onboard.",
+    }));
+
+    const codeBlock = (txt) => h("pre", { className: "help-code" }, h("code", {}, txt));
+    const sect = (text) => h("div", { className: "slbl" }, text);
+    const sub = (text) => h("h4", { style: "margin-top:18px;margin-bottom:6px;font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:1px" }, text);
+
+    app.appendChild(sect("Prerequisites (one-time, platform-wide)"));
+    app.appendChild(h("p", { className: "hint" },
+        "Done once on the platform side. Skip if these are already in place from a previous cluster onboarding."));
+
+    app.appendChild(sub("1. OpenBao Kubernetes auth method"));
+    app.appendChild(h("p", {},
+        "If ", h("code", {}, "auth/kubernetes/"), " is not yet enabled in OpenBao, enable it and point it at the platform K8s API:"));
+    app.appendChild(codeBlock(
+        "bao auth enable kubernetes\n" +
+        "bao write auth/kubernetes/config \\\n" +
+        "    kubernetes_host=https://kubernetes.default.svc \\\n" +
+        "    kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    ));
+
+    app.appendChild(sub("2. Portal Vault policy + role"));
+    app.appendChild(h("p", {},
+        "Allows the portal pod to mint short-lived ephemeral SA tokens from any per-tenant secrets engine."));
+    app.appendChild(codeBlock(
+        "cat > /tmp/customer-portal.hcl <<'EOF'\n" +
+        "path \"kubernetes/+/creds/argocd-rbac-manager\" {\n" +
+        "  capabilities = [\"update\"]\n" +
+        "}\n" +
+        "EOF\n" +
+        "bao policy write customer-portal /tmp/customer-portal.hcl\n\n" +
+        "bao write auth/kubernetes/role/customer-portal \\\n" +
+        "    bound_service_account_names=customer-portal \\\n" +
+        "    bound_service_account_namespaces=customer-portal \\\n" +
+        "    policies=customer-portal \\\n" +
+        "    ttl=1h"
+    ));
+    app.appendChild(h("p", { className: "hint" },
+        "The capability is ", h("code", {}, "update"),
+        " (not ", h("code", {}, "read"),
+        "): the kubernetes secrets engine generates credentials via POST, which Vault/OpenBao maps to ",
+        h("code", {}, "update"), " — using ", h("code", {}, "read"),
+        " yields a 403 permission-denied at credential mint time."));
+
+    app.appendChild(sub("3. Portal records"));
+    app.appendChild(h("p", {},
+        "The cluster will be tied to a contract under a customer. Create both first under ",
+        h("a", { className: "link", href: "#/admin/customers" }, "Admin → Customers"),
+        " if they don't exist yet."));
+
+    app.appendChild(sect("Per-cluster bootstrap"));
+    app.appendChild(h("p", { className: "hint" },
+        "Run these every time you onboard a new tenant cluster. ",
+        h("code", {}, "<slug>"), " must match the slug entered in the Register Tenant Cluster form."));
+
+    app.appendChild(sub("1. Provision the cluster"));
+    app.appendChild(h("p", {},
+        "Spin up the K8s cluster with kubespray and install ArgoCD into the ",
+        h("code", {}, "argocd"), " namespace as usual. This guide picks up after that."));
+
+    app.appendChild(sub("2. Apply RBAC inside the tenant cluster"));
+    app.appendChild(h("p", {},
+        "Creates the Role customer kubeconfigs are bound to (",
+        h("code", {}, "argocd-tenant"), " in the ",
+        h("code", {}, "argocd"), " namespace), and the SA + ClusterRole that OpenBao authenticates as to mint per-issuance RoleBindings and CSRs."));
+    app.appendChild(codeBlock(
+        "cat > /tmp/tenant-bootstrap.yaml <<'EOF'\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: ClusterRole\n" +
+        "metadata:\n" +
+        "  name: argocd-rbac-manager\n" +
+        "rules:\n" +
+        "  - apiGroups: [\"rbac.authorization.k8s.io\"]\n" +
+        "    resources: [\"rolebindings\"]\n" +
+        "    verbs: [\"create\", \"get\", \"list\", \"delete\"]\n" +
+        "  - apiGroups: [\"rbac.authorization.k8s.io\"]\n" +
+        "    resources: [\"roles\"]\n" +
+        "    resourceNames: [\"argocd-tenant\"]\n" +
+        "    verbs: [\"bind\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"certificatesigningrequests\"]\n" +
+        "    verbs: [\"create\", \"get\", \"delete\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"certificatesigningrequests/approval\"]\n" +
+        "    verbs: [\"update\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"signers\"]\n" +
+        "    resourceNames: [\"kubernetes.io/kube-apiserver-client\"]\n" +
+        "    verbs: [\"approve\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"serviceaccounts\"]\n" +
+        "    resourceNames: [\"openbao-rbac-manager\"]\n" +
+        "    verbs: [\"get\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"serviceaccounts/token\"]\n" +
+        "    resourceNames: [\"openbao-rbac-manager\"]\n" +
+        "    verbs: [\"create\"]\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: Role\n" +
+        "metadata:\n" +
+        "  name: argocd-tenant\n" +
+        "  namespace: argocd\n" +
+        "rules:\n" +
+        "  - apiGroups: [\"argoproj.io\"]\n" +
+        "    resources: [\"applications\", \"appprojects\", \"applicationsets\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"configmaps\", \"secrets\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"events\", \"pods\", \"pods/log\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\"]\n" +
+        "---\n" +
+        "apiVersion: v1\n" +
+        "kind: ServiceAccount\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager\n" +
+        "  namespace: kube-system\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: ClusterRoleBinding\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager\n" +
+        "roleRef:\n" +
+        "  apiGroup: rbac.authorization.k8s.io\n" +
+        "  kind: ClusterRole\n" +
+        "  name: argocd-rbac-manager\n" +
+        "subjects:\n" +
+        "  - kind: ServiceAccount\n" +
+        "    name: openbao-rbac-manager\n" +
+        "    namespace: kube-system\n" +
+        "---\n" +
+        "apiVersion: v1\n" +
+        "kind: Secret\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager-token\n" +
+        "  namespace: kube-system\n" +
+        "  annotations:\n" +
+        "    kubernetes.io/service-account.name: openbao-rbac-manager\n" +
+        "type: kubernetes.io/service-account-token\n" +
+        "EOF\n" +
+        "kubectl --context <tenant-cluster> apply -f /tmp/tenant-bootstrap.yaml"
+    ));
+
+    app.appendChild(sub("3. Configure OpenBao secrets engine for the cluster"));
+    app.appendChild(codeBlock(
+        "JWT=$(kubectl --context <tenant-cluster> -n kube-system get secret openbao-rbac-manager-token \\\n" +
+        "        -o jsonpath='{.data.token}' | base64 -d)\n" +
+        "CA=$(kubectl --context <tenant-cluster> config view --raw --minify \\\n" +
+        "        -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d)\n" +
+        "APIURL=$(kubectl --context <tenant-cluster> config view --raw --minify \\\n" +
+        "        -o jsonpath='{.clusters[0].cluster.server}')\n\n" +
+        "bao secrets enable -path=kubernetes/<slug> kubernetes\n" +
+        "bao write kubernetes/<slug>/config \\\n" +
+        "    kubernetes_host=\"$APIURL\" \\\n" +
+        "    kubernetes_ca_cert=\"$CA\" \\\n" +
+        "    service_account_jwt=\"$JWT\"\n" +
+        "bao write kubernetes/<slug>/roles/argocd-rbac-manager \\\n" +
+        "    allowed_kubernetes_namespaces=kube-system \\\n" +
+        "    service_account_name=openbao-rbac-manager \\\n" +
+        "    token_default_ttl=600s \\\n" +
+        "    token_max_ttl=600s"
+    ));
+    app.appendChild(h("p", { className: "hint" },
+        "Single ", h("code", {}, "allowed_kubernetes_namespaces"),
+        " (only ", h("code", {}, "kube-system"),
+        ") because that's where ", h("code", {}, "openbao-rbac-manager"),
+        " lives. TTL 600s is the K8s TokenRequest minimum; the portal uses the token only briefly per issuance."));
+
+    app.appendChild(sub("4. Register the cluster in the portal"));
+    app.appendChild(h("p", {},
+        "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
+        ". Slug must match ", h("code", {}, "<slug>"), " from step 3."));
+
+    app.appendChild(sub("5. Mark the cluster provisioned"));
+    app.appendChild(h("p", {},
+        "Click ", h("strong", {}, "Mark provisioned"), " on the cluster's admin detail page. Sets ",
+        h("code", {}, "provisioned_at"), " and unlocks credential issuance for users + initial setup-fee billing."));
+
+    app.appendChild(sub("6. Grant the first customer admin"));
+    app.appendChild(h("p", {},
+        "Open the cluster's user-facing detail page, click ",
+        h("strong", {}, "Manage users"),
+        ", add a user with role ", h("code", {}, "customer_admin"),
+        ". They can then add their team."));
 }
 
 // ---------- Init ----------

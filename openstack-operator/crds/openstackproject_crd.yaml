@@ -71,6 +71,16 @@ spec:
                   description: "Contract number for billing"
                   pattern: "^[A-Za-z0-9-]+$"
 
+                managed:
+                  type: boolean
+                  description: >-
+                    Marks this project as fully SUNET-managed (e.g. the
+                    OpenStack project that hosts a tenant Kubernetes cluster's
+                    VMs/storage). The customer-portal blocks customer-admin
+                    mutation on managed projects; downstream the operator may
+                    assign customer admins a read-only Keystone role.
+                  default: false
+
                 quotas:
                   type: object
                   description: "Resource quotas for the project"

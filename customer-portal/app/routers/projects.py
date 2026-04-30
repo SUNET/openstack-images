@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth import get_current_user
+from app.auth import get_current_user, is_sunet_admin
+from app.config import Settings, get_settings
 from app.db import get_session
-from app.git_backend import GitBackend, _sanitize_name
+from app.git_backend import GitBackend
 from app.k8s import get_project_status
 from app.models import Contract, ContractAccess
 from app.schemas import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
@@ -21,9 +22,28 @@ router = APIRouter(prefix="/api/contracts", tags=["projects"])
 
 
 async def _require_contract_access(
-    contract_number: str, user_sub: str, session: AsyncSession
+    contract_number: str,
+    user_sub: str,
+    session: AsyncSession,
+    settings: Settings | None = None,
 ) -> Contract:
-    """Verify user has access to the contract. Returns the contract with customer loaded."""
+    """Verify user has access to the contract. Returns the contract with customer loaded.
+
+    SUNET admins bypass the ContractAccess check — they're the ultimate
+    fallback for any project (especially managed ones the customer can't
+    mutate themselves) and have no separate endpoint for project mutation.
+    """
+    if settings is not None and is_sunet_admin(user_sub, settings):
+        result = await session.execute(
+            select(Contract)
+            .where(Contract.contract_number == contract_number)
+            .options(selectinload(Contract.customer))
+        )
+        contract = result.scalar_one_or_none()
+        if not contract:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return contract
+
     result = await session.execute(
         select(Contract)
         .join(ContractAccess)
@@ -49,6 +69,7 @@ def _enrich_project(proj: dict) -> ProjectResponse:
         contract_number=proj["contract_number"],
         users=proj["users"],
         phase=status.get("phase") if status else "Pending (not synced)",
+        managed=proj.get("managed", False),
     )
 
 
@@ -57,9 +78,10 @@ async def list_projects(
     contract_number: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
     projects = git_backend.list_projects(contract_number)
@@ -72,9 +94,10 @@ async def get_project(
     resource_name: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
     proj = git_backend.get_project(resource_name)
@@ -90,9 +113,10 @@ async def create_project(
     req: CreateProjectRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    contract = await _require_contract_access(contract_number, user["sub"], session)
+    contract = await _require_contract_access(contract_number, user["sub"], session, settings)
 
     # Qualify project name with customer domain
     qualified_name = f"{req.name}.{contract.customer.domain}"
@@ -128,16 +152,21 @@ async def update_project(
     req: UpdateProjectRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
 
-    # Verify project exists and belongs to this contract
     existing = git_backend.get_project(resource_name)
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
+        raise HTTPException(
+            status_code=403, detail="This project is SUNET-managed and read-only"
+        )
 
     try:
         updated = git_backend.update_project(
@@ -157,16 +186,21 @@ async def delete_project(
     resource_name: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
 
-    # Verify project exists and belongs to this contract
     existing = git_backend.get_project(resource_name)
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
+        raise HTTPException(
+            status_code=403, detail="This project is SUNET-managed and read-only"
+        )
 
     try:
         git_backend.delete_project(resource_name)

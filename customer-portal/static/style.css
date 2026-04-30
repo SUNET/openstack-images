@@ -252,11 +252,28 @@ button { font-family: inherit; }
   white-space: nowrap; flex-shrink: 0;
   display: inline-block;
 }
-.badge.ready, .badge.success { background: var(--ok-soft); color: var(--ok); }
-.badge.pending, .badge.running { background: var(--warn-soft); color: var(--warn); }
-.badge.error, .badge.fail { background: var(--err-soft); color: var(--err); }
+.badge.ready, .badge.success, .badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.pending, .badge.running, .badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.error, .badge.fail, .badge.err { background: var(--err-soft); color: var(--err); }
 .badge.neutral { background: var(--paper); color: var(--ink-2); border: 1px solid var(--line); }
 .badge.active { background: var(--orange-soft); color: var(--orange); }
+.badge.managed { background: #eef2ff; color: #4338ca; }
+
+/* Setup help: code blocks */
+.help-code {
+  background: var(--ink);
+  color: #f5f5f5;
+  padding: 14px 16px;
+  border-radius: 10px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin: 8px 0 14px;
+}
+.help-code code {
+  font-family: var(--mono);
+  white-space: pre;
+}
 
 /* Key-value panel */
 .kv {

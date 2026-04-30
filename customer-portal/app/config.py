@@ -1,7 +1,7 @@
 """Application configuration from environment variables."""
 
-from dataclasses import dataclass, field
 import os
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,32 @@ class Settings:
     )
     openstack_cloud: str = field(
         default_factory=lambda: os.environ.get("OPENSTACK_CLOUD", "openstack")
+    )
+
+    # OpenBao (for tenant cluster ephemeral RBAC creds)
+    openbao_addr: str = field(
+        default_factory=lambda: os.environ.get(
+            "OPENBAO_ADDR", "http://openbao.openbao.svc.cluster.local:8200"
+        )
+    )
+    openbao_k8s_auth_role: str = field(
+        default_factory=lambda: os.environ.get("OPENBAO_K8S_AUTH_ROLE", "customer-portal")
+    )
+    openbao_sa_token_path: str = field(
+        default_factory=lambda: os.environ.get(
+            "OPENBAO_SA_TOKEN_PATH",
+            "/var/run/secrets/kubernetes.io/serviceaccount/token",
+        )
+    )
+
+    # Tenant kubeconfig
+    default_kubeconfig_ttl_days: int = field(
+        default_factory=lambda: int(os.environ.get("DEFAULT_KUBECONFIG_TTL_DAYS", "365"))
+    )
+
+    # Cluster-request notifications
+    sunet_ops_email: str = field(
+        default_factory=lambda: os.environ.get("SUNET_OPS_EMAIL", "drift@sunet.se")
     )
 
 
