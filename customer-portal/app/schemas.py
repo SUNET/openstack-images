@@ -232,7 +232,7 @@ class CreateClusterRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     api_url: str = Field(min_length=1, max_length=512)
     ca_bundle: str = Field(min_length=1)
-    openbao_mount: str = Field(min_length=1, max_length=255)
+    # openbao_mount is implicit: f"kubernetes/{slug}" — set server-side.
     openbao_role: str = Field(default="argocd-rbac-manager", max_length=255)
     argocd_role_name: str = Field(default="argocd-tenant", max_length=255)
     argocd_namespace: str = Field(default="argocd", max_length=63)
@@ -240,10 +240,10 @@ class CreateClusterRequest(BaseModel):
 
 
 class UpdateClusterRequest(BaseModel):
+    # openbao_mount is tied to the (immutable) slug, so it can't be patched.
     name: str | None = Field(default=None, min_length=1, max_length=255)
     api_url: str | None = Field(default=None, min_length=1, max_length=512)
     ca_bundle: str | None = None
-    openbao_mount: str | None = Field(default=None, min_length=1, max_length=255)
     openbao_role: str | None = Field(default=None, max_length=255)
     argocd_role_name: str | None = Field(default=None, max_length=255)
     argocd_namespace: str | None = Field(default=None, max_length=63)
