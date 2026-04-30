@@ -1628,7 +1628,7 @@ async function renderAdminClusters() {
     } catch (e) { showAlert(e.message); }
 }
 
-function renderAdminCreateCluster() {
+async function renderAdminCreateCluster() {
     clear(app);
     app.appendChild(breadcrumbs(
         { label: "Admin" },
@@ -1636,6 +1636,31 @@ function renderAdminCreateCluster() {
         { label: "New" },
     ));
     app.appendChild(h("h2", {}, "Register Tenant Cluster"));
+
+    let contracts = [];
+    let customersById = {};
+    try {
+        contracts = await api("/api/admin/contracts");
+        const customers = await api("/api/admin/customers");
+        customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
+    } catch (e) { showAlert(e.message); return; }
+
+    if (!contracts.length) {
+        app.appendChild(h("p", { className: "empty" }, "No contracts exist yet. Create a customer + contract first under Admin → Customers."));
+        app.appendChild(h("a", { href: "#/admin", className: "btn btn-secondary btn-small", style: "display:inline-block;margin-top:12px;text-decoration:none" }, "Go to Customers"));
+        return;
+    }
+
+    const contractOptions = [
+        h("option", { value: "" }, "— select contract —"),
+        ...contracts.map(c => {
+            const customer = customersById[c.customer_id];
+            const label = customer
+                ? `${c.contract_number} — ${customer.name} (${customer.domain})`
+                : c.contract_number;
+            return h("option", { value: c.contract_number }, label);
+        }),
+    ];
 
     const form = h("form", { className: "form-card", onsubmit: async (e) => {
         e.preventDefault();
@@ -1648,8 +1673,8 @@ function renderAdminCreateCluster() {
             navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
         } catch (err) { showAlert(err.message); }
     }},
-        h("label", {}, "Contract number"),
-        h("input", { name: "contract_number", required: "true", placeholder: "CO-001" }),
+        h("label", {}, "Contract"),
+        h("select", { name: "contract_number", required: "true" }, ...contractOptions),
         h("label", {}, "Display name"),
         h("input", { name: "name", required: "true", placeholder: "Acme production cluster" }),
         h("label", {}, "Slug (used in OpenBao mount path & cert O)"),
