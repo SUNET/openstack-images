@@ -72,23 +72,31 @@ class OpenBaoClient:
             return await self._login()
 
     async def get_k8s_creds(self, mount: str, role: str) -> dict:
-        """Read /v1/<mount>/creds/<role> using the cached portal token.
+        """Mint a fresh ephemeral SA token at /v1/<mount>/creds/<role>.
 
-        Returns the OpenBao `data` block, which for the kubernetes secrets engine
-        includes at minimum `service_account_token`. Caller is responsible for
-        not logging the token.
+        The kubernetes secrets engine generates credentials via a POST (it
+        accepts optional override parameters in the body); a GET returns
+        405 "unsupported operation". Caller is responsible for not logging
+        the returned token.
+
+        Returns the OpenBao `data` block, which for this engine includes at
+        minimum `service_account_token`.
         """
         token = await self._token_or_login()
         path = f"{self._addr}/v1/{mount.strip('/')}/creds/{role}"
-        resp = await self._http.get(path, headers={"X-Vault-Token": token})
+        resp = await self._http.post(
+            path, headers={"X-Vault-Token": token}, json={}
+        )
         if resp.status_code == 403:
             # Token may have expired; re-login once and retry.
             self._token = None
             token = await self._token_or_login()
-            resp = await self._http.get(path, headers={"X-Vault-Token": token})
-        if resp.status_code != 200:
+            resp = await self._http.post(
+                path, headers={"X-Vault-Token": token}, json={}
+            )
+        if resp.status_code not in (200, 201):
             raise OpenBaoError(
-                f"OpenBao read {mount}/creds/{role} failed: "
+                f"OpenBao mint {mount}/creds/{role} failed: "
                 f"{resp.status_code} {resp.text}"
             )
         body = resp.json()
