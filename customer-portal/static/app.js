@@ -1276,6 +1276,32 @@ function daysUntil(iso) {
     return Math.floor(ms / (1000 * 60 * 60 * 24));
 }
 
+const ADDON_DISPLAY_NAMES = { jupyterhub: "JupyterHub" };
+
+function formatRequestSummary(r) {
+    const p = r.payload || {};
+    if (r.request_type === "addon") {
+        const verb = p.action === "enable" ? "Enable" : "Disable";
+        const name = ADDON_DISPLAY_NAMES[p.addon_type] || p.addon_type || "addon";
+        return `${verb} ${name} addon`;
+    }
+    if (r.request_type === "resize") {
+        const tgt = p.target_worker_groups;
+        const before = p.before_worker_groups;
+        if (before != null && tgt != null) {
+            return `Resize from ${before} to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+        }
+        if (tgt != null) {
+            return `Resize to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+        }
+        return "Resize";
+    }
+    if (r.request_type === "backup") {
+        return p.action === "enable" ? "Enable backup" : "Disable backup";
+    }
+    return r.request_type;
+}
+
 async function renderClusters() {
     clear(app);
     app.appendChild(breadcrumbs({ label: "My Clusters" }));
@@ -1432,13 +1458,15 @@ async function renderClusterDetail(slug) {
             }
         }
 
+        // Load requests early so we can use them to disable conflicting buttons.
+        const requests = await api(`/api/clusters/${slug}/requests`);
+
         // Cluster requests (request-a-change panel + history)
         if (isCustomerAdmin) {
             app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request a change"));
-            app.appendChild(renderClusterRequestPanel(slug, cluster));
+            app.appendChild(renderClusterRequestPanel(slug, cluster, requests));
         }
 
-        const requests = await api(`/api/clusters/${slug}/requests`);
         app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request history"));
         if (!requests.length) {
             app.appendChild(h("p", { className: "empty" }, "No requests yet."));
@@ -1446,7 +1474,7 @@ async function renderClusterDetail(slug) {
             for (const r of requests) {
                 app.appendChild(h("div", { className: "card" },
                     h("div", { className: "card-header" },
-                        h("h3", {}, `${r.request_type} — ${JSON.stringify(r.payload)}`),
+                        h("h3", {}, formatRequestSummary(r)),
                         statusBadge(r.status),
                     ),
                     h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
@@ -1458,14 +1486,20 @@ async function renderClusterDetail(slug) {
     } catch (e) { showAlert(e.message); }
 }
 
-function renderClusterRequestPanel(slug, cluster) {
+function renderClusterRequestPanel(slug, cluster, requests) {
     const panel = h("div", { className: "form-card" });
-    // Request JupyterHub
-    panel.appendChild(h("div", { style: "margin-bottom:12px" },
-        h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
-            if (cluster.active_addons.includes("jupyterhub")) {
-                showAlert("JupyterHub is already enabled.", "error"); return;
-            }
+    const pendingByType = (type, predicate = () => true) =>
+        (requests || []).some(r =>
+            r.status === "pending" && r.request_type === type && predicate(r.payload || {})
+        );
+
+    // --- JupyterHub addon ---
+    const jhActive = cluster.active_addons.includes("jupyterhub");
+    const jhPending = pendingByType("addon", p => p.addon_type === "jupyterhub");
+    const jhDisabled = jhActive || jhPending;
+    const jhAttrs = {
+        className: "btn btn-secondary btn-small",
+        onclick: async () => {
             if (confirm("Request JupyterHub addon? SUNET ops will be notified by email.")) {
                 try {
                     await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
@@ -1475,35 +1509,59 @@ function renderClusterRequestPanel(slug, cluster) {
                     renderClusterDetail(slug);
                 } catch (err) { showAlert(err.message); }
             }
-        }}, "Request JupyterHub addon"),
-    ));
-    // Request resize
+        },
+    };
+    if (jhDisabled) jhAttrs.disabled = "true";
+    const jhLabel = jhActive
+        ? "JupyterHub already enabled"
+        : jhPending
+            ? "JupyterHub request pending"
+            : "Request JupyterHub addon";
+    panel.appendChild(h("div", { style: "margin-bottom:12px" }, h("button", jhAttrs, jhLabel)));
+
+    // --- Resize ---
+    const resizePending = pendingByType("resize");
+    const resizeBtnAttrs = {
+        className: "btn btn-secondary btn-small",
+        onclick: async () => {
+            const input = panel.querySelector('[name="resize_target"]');
+            const target = parseInt(input.value, 10);
+            if (!target || target <= cluster.worker_groups) {
+                showAlert("Target must be greater than current."); return;
+            }
+            if (confirm(`Request resize to ${target} worker groups (${3 + 3 * target} servers total)?`)) {
+                try {
+                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                        request_type: "resize",
+                        payload: { target_worker_groups: target },
+                    })});
+                    renderClusterDetail(slug);
+                } catch (err) { showAlert(err.message); }
+            }
+        },
+    };
+    if (resizePending) resizeBtnAttrs.disabled = "true";
+    const resizeInputAttrs = {
+        name: "resize_target", type: "number",
+        min: cluster.worker_groups + 1,
+        placeholder: `> ${cluster.worker_groups}`,
+        style: "width:120px",
+    };
+    if (resizePending) resizeInputAttrs.disabled = "true";
     panel.appendChild(h("div", { style: "margin-bottom:12px" },
         h("label", {}, `Resize cluster (current: ${cluster.worker_groups} worker groups, ${3 * cluster.worker_groups} workers)`),
         h("div", { style: "display:flex;gap:8px" },
-            h("input", { name: "resize_target", type: "number", min: cluster.worker_groups + 1, placeholder: `> ${cluster.worker_groups}`, style: "width:120px" }),
-            h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
-                const input = panel.querySelector('[name="resize_target"]');
-                const target = parseInt(input.value, 10);
-                if (!target || target <= cluster.worker_groups) {
-                    showAlert("Target must be greater than current."); return;
-                }
-                if (confirm(`Request resize to ${target} worker groups (${3 * target} workers)?`)) {
-                    try {
-                        await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
-                            request_type: "resize",
-                            payload: { target_worker_groups: target },
-                        })});
-                        renderClusterDetail(slug);
-                    } catch (err) { showAlert(err.message); }
-                }
-            }}, "Request resize"),
+            h("input", resizeInputAttrs),
+            h("button", resizeBtnAttrs, resizePending ? "Resize request pending" : "Request resize"),
         ),
     ));
-    // Request backup
+
+    // --- Backup ---
     const backupEnabled = !!cluster.backup_project_resource_name;
-    panel.appendChild(h("div", {},
-        h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
+    const backupPending = pendingByType("backup");
+    const backupBtnAttrs = {
+        className: "btn btn-secondary btn-small",
+        onclick: async () => {
             const action = backupEnabled ? "disable" : "enable";
             if (confirm(`Request to ${action} backup?`)) {
                 try {
@@ -1514,8 +1572,16 @@ function renderClusterRequestPanel(slug, cluster) {
                     renderClusterDetail(slug);
                 } catch (err) { showAlert(err.message); }
             }
-        }}, backupEnabled ? "Request to disable backup" : "Request to enable backup"),
-    ));
+        },
+    };
+    if (backupPending) backupBtnAttrs.disabled = "true";
+    const backupLabel = backupPending
+        ? "Backup request pending"
+        : backupEnabled
+            ? "Request to disable backup"
+            : "Request to enable backup";
+    panel.appendChild(h("div", {}, h("button", backupBtnAttrs, backupLabel)));
+
     return panel;
 }
 
@@ -1760,11 +1826,10 @@ async function renderAdminClusterRequests() {
         for (const r of requests) {
             const card = h("div", { className: "card" },
                 h("div", { className: "card-header" },
-                    h("h3", {}, `${r.request_type} on ${r.cluster_slug}`),
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
                     statusBadge(r.status),
                 ),
                 h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
-                h("p", {}, h("code", {}, JSON.stringify(r.payload))),
                 h("textarea", { name: `note-${r.id}`, placeholder: "Optional note", style: "width:100%;height:60px;margin-top:8px" }),
                 h("div", { className: "btn-row" },
                     h("button", { className: "btn btn-primary btn-small", onclick: async () => {
@@ -1795,7 +1860,7 @@ async function renderAdminClusterRequests() {
         for (const r of all.filter(x => x.status !== "pending").slice(0, 20)) {
             app.appendChild(h("div", { className: "card" },
                 h("div", { className: "card-header" },
-                    h("h3", {}, `${r.request_type} on ${r.cluster_slug}`),
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
                     statusBadge(r.status),
                 ),
                 h("p", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub} on ${fmtDate(r.applied_at)}`),
