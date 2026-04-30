@@ -7,16 +7,20 @@
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <header>
-        <h1>SUNET Cloud Portal</h1>
-        <nav id="nav"></nav>
-    </header>
-    <main id="app">
-        <div class="login-prompt">
-            <p>Sign in to manage your cloud projects.</p>
-            <a href="/auth/login" class="btn btn-primary">Sign in with SSO</a>
+    <header class="topbar" id="topbar" hidden>
+        <div class="brand">
+            <span class="mark">S</span>
+            <span>SUNET&nbsp;Cloud</span>
         </div>
-    </main>
+        <button class="mobile-toggle" aria-label="Menu" type="button" onclick="document.getElementById('topbar').classList.toggle('open')">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+        <nav id="nav"></nav>
+        <div class="spacer"></div>
+        <div class="user" id="user-block" hidden></div>
+        <a href="/auth/logout" class="signout" id="signout-link" hidden>Sign out</a>
+    </header>
+    <main id="app"></main>
     <script src="/app.js"></script>
 </body>
 </html>

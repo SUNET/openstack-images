@@ -1,16 +1,70 @@
-/* SUNET Cloud Portal — vanilla JS SPA with hash routing */
+/* SUNET Cloud Portal — vanilla JS SPA on the eduID design system */
 
 const $ = (sel) => document.querySelector(sel);
 const app = $("#app");
 const nav = $("#nav");
+const topbar = $("#topbar");
+const userBlock = $("#user-block");
+const signoutLink = $("#signout-link");
 
 let currentUser = null;
 
-// --- Router ---
+// ---------- DOM helpers ----------
+
+function h(tag, attrs = {}, ...children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+        if (v == null || v === false) continue;
+        if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+        else if (k === "className") el.className = v;
+        else if (k === "htmlFor") el.setAttribute("for", v);
+        else if (k === "dataset") for (const [dk, dv] of Object.entries(v)) el.dataset[dk] = dv;
+        else if (v === true) el.setAttribute(k, "");
+        else el.setAttribute(k, v);
+    }
+    for (const child of children.flat()) {
+        if (child == null || child === false) continue;
+        if (typeof child === "string" || typeof child === "number")
+            el.appendChild(document.createTextNode(String(child)));
+        else el.appendChild(child);
+    }
+    return el;
+}
+
+const clear = (el) => { el.innerHTML = ""; return el; };
+
+function svgPlus() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", "12"); svg.setAttribute("height", "12");
+    svg.setAttribute("viewBox", "0 0 12 12"); svg.setAttribute("fill", "none");
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", "M6 2v8M2 6h8");
+    p.setAttribute("stroke", "currentColor"); p.setAttribute("stroke-width", "2");
+    p.setAttribute("stroke-linecap", "round");
+    svg.appendChild(p);
+    return svg;
+}
+
+function svgArrow() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", "14"); svg.setAttribute("height", "14");
+    svg.setAttribute("viewBox", "0 0 14 14"); svg.setAttribute("fill", "none");
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", "M3 7h8M7 3l4 4-4 4");
+    p.setAttribute("stroke", "currentColor"); p.setAttribute("stroke-width", "2");
+    p.setAttribute("stroke-linecap", "round"); p.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(p);
+    return svg;
+}
+
+// ---------- Router ----------
 
 function navigate(hash) {
-    if (location.hash === "#" + hash) route();
-    else location.hash = hash;
+    const target = hash.startsWith("#") ? hash : "#" + hash;
+    if (location.hash === target) route();
+    else location.hash = target;
 }
 
 function currentRoute() { return location.hash.replace(/^#\/?/, ""); }
@@ -20,45 +74,15 @@ async function route() {
         try {
             currentUser = await api("/api/me");
             if (!currentUser) { renderLogin(); return; }
-            renderNav();
         } catch {
             renderLogin();
             return;
         }
     }
+    renderShell();
 
     const path = currentRoute();
     const parts = path.split("/").filter(Boolean);
-
-    // Customer routes
-    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3] === "new")
-        return renderCreateProject(decodeURIComponent(parts[1]));
-    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3] === "edit" && parts[4])
-        return renderEditProject(decodeURIComponent(parts[1]), decodeURIComponent(parts[4]));
-    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3])
-        return renderProjectDetail(decodeURIComponent(parts[1]), decodeURIComponent(parts[3]));
-    if (parts[0] === "contracts" && parts[2] === "projects")
-        return renderContractProjects(decodeURIComponent(parts[1]));
-    if (parts[0] === "contracts" || !path)
-        return renderContracts();
-
-    // Cluster routes (member-facing)
-    if (parts[0] === "clusters" && parts[1] && parts[2] === "users")
-        return renderClusterUsers(decodeURIComponent(parts[1]));
-    if (parts[0] === "clusters" && parts[1])
-        return renderClusterDetail(decodeURIComponent(parts[1]));
-    if (parts[0] === "clusters")
-        return renderClusters();
-
-    // Billing routes
-    if (parts[0] === "billing" && parts[1] === "new")
-        return renderCreateBillingJob();
-    if (parts[0] === "billing" && parts[1] && parts[2] === "edit")
-        return renderEditBillingJob(parts[1]);
-    if (parts[0] === "billing" && parts[1])
-        return renderBillingJobDetail(parts[1]);
-    if (parts[0] === "billing")
-        return renderBillingJobs();
 
     // Admin routes
     if (parts[0] === "admin" && parts[1] === "pricing" && parts[2] === "docs")
@@ -90,12 +114,40 @@ async function route() {
     if (parts[0] === "admin")
         return renderAdmin();
 
-    renderContracts();
+    // Billing routes
+    if (parts[0] === "billing" && parts[1] === "new")
+        return renderCreateBillingJob();
+    if (parts[0] === "billing" && parts[1] && parts[2] === "edit")
+        return renderEditBillingJob(parts[1]);
+    if (parts[0] === "billing" && parts[1])
+        return renderBillingJobDetail(parts[1]);
+    if (parts[0] === "billing")
+        return renderBillingJobs();
+
+    // Cluster routes (member-facing)
+    if (parts[0] === "clusters" && parts[1] && parts[2] === "users")
+        return renderClusterUsers(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters" && parts[1])
+        return renderClusterDetail(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters")
+        return renderClusters();
+
+    // Customer routes
+    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3] === "new")
+        return renderCreateProject(decodeURIComponent(parts[1]));
+    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3] === "edit" && parts[4])
+        return renderEditProject(decodeURIComponent(parts[1]), decodeURIComponent(parts[4]));
+    if (parts[0] === "contracts" && parts[2] === "projects" && parts[3])
+        return renderProjectDetail(decodeURIComponent(parts[1]), decodeURIComponent(parts[3]));
+    if (parts[0] === "contracts" && parts[2] === "projects")
+        return renderContractProjects(decodeURIComponent(parts[1]));
+
+    return renderContracts();
 }
 
 window.addEventListener("hashchange", route);
 
-// --- API helpers ---
+// ---------- API ----------
 
 async function api(path, opts = {}) {
     const resp = await fetch(path, {
@@ -111,619 +163,324 @@ async function api(path, opts = {}) {
     return resp.json();
 }
 
-// --- Rendering helpers ---
+// ---------- Shell ----------
 
-function h(tag, attrs = {}, ...children) {
-    const el = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs)) {
-        if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
-        else if (k === "className") el.className = v;
-        else if (k === "htmlFor") el.setAttribute("for", v);
-        else el.setAttribute(k, v);
-    }
-    for (const child of children) {
-        if (typeof child === "string") el.appendChild(document.createTextNode(child));
-        else if (child) el.appendChild(child);
-    }
-    return el;
+function navKeyFromHash() {
+    const parts = currentRoute().split("/").filter(Boolean);
+    if (parts[0] === "admin") return "admin";
+    if (parts[0] === "billing") return "billing";
+    if (parts[0] === "clusters" || parts[0] === "contracts" || !parts[0]) return "contracts";
+    return "";
 }
 
-function clear(el) { el.innerHTML = ""; return el; }
+function renderShell() {
+    if (!currentUser) {
+        topbar.hidden = true;
+        return;
+    }
+    topbar.hidden = false;
+    const isAdmin = !!currentUser.is_admin;
+    const active = navKeyFromHash();
 
-function breadcrumbs(...items) {
-    const bc = h("nav", { className: "breadcrumbs" });
+    clear(nav);
+    const links = [
+        { key: "contracts", label: "My Contracts", hash: "#/contracts" },
+        { key: "billing", label: "Billing", hash: "#/billing" },
+    ];
+    if (isAdmin) links.push({ key: "admin", label: "Admin", hash: "#/admin" });
+    for (const l of links) {
+        nav.appendChild(h("a", {
+            href: l.hash,
+            className: l.key === active ? "on" : "",
+            dataset: { key: l.key },
+        }, l.label));
+    }
+
+    clear(userBlock);
+    userBlock.hidden = false;
+    const display = currentUser.name || currentUser.email || currentUser.sub;
+    const initials = (display || "??").split(/[\s@.]+/).filter(Boolean).slice(0, 2).map(s => s[0]).join("") || "U";
+    userBlock.appendChild(h("div", { className: "avatar" }, initials));
+    userBlock.appendChild(h("div", {},
+        h("div", {}, display),
+        h("div", { className: "sub" }, isAdmin ? "Operator" : (currentUser.email || currentUser.sub)),
+    ));
+    signoutLink.hidden = false;
+}
+
+// ---------- Common building blocks ----------
+
+function bc(...items) {
+    const wrap = h("nav", { className: "bc" });
     items.forEach((item, i) => {
-        if (i > 0) bc.appendChild(h("span", { className: "sep" }, "/"));
-        if (i < items.length - 1 && item.hash)
-            bc.appendChild(h("a", { href: "#/" + item.hash }, item.label));
+        if (i > 0) wrap.appendChild(h("span", { className: "sep" }, "/"));
+        if (item.hash && i < items.length - 1)
+            wrap.appendChild(h("a", { href: "#" + item.hash }, item.label));
         else
-            bc.appendChild(h("span", { className: "current" }, item.label));
+            wrap.appendChild(h("span", { className: "cur" }, item.label));
     });
-    return bc;
+    return wrap;
 }
+
+function phead({ eyebrow, title, lead, actions } = {}) {
+    const wrap = h("div", { className: "phead" });
+    const inner = h("div", actions ? { className: "phead-row" } : {});
+    const titleBlock = h("div", {});
+    if (eyebrow) titleBlock.appendChild(h("div", { className: "eyebrow" }, eyebrow));
+    if (title) titleBlock.appendChild(h("h1", {}, title));
+    if (lead) titleBlock.appendChild(h("p", { className: "lead" }, lead));
+    inner.appendChild(titleBlock);
+    if (actions) inner.appendChild(h("div", { className: "phead-actions" }, ...actions));
+    wrap.appendChild(inner);
+    return wrap;
+}
+
+function slbl(text, count, { help } = {}) {
+    const wrap = h("div", { className: "slbl" });
+    wrap.appendChild(document.createTextNode(text));
+    if (count != null) wrap.appendChild(h("span", { className: "count" }, "· " + count));
+    if (help) {
+        const a = h("a", { className: "help", onclick: (e) => { e.preventDefault(); help.onClick && help.onClick(); } }, help.label);
+        if (help.href) a.setAttribute("href", help.href);
+        wrap.appendChild(a);
+    }
+    return wrap;
+}
+
+function kvRow(k, v) {
+    return h("div", { className: "row" },
+        h("div", { className: "k" }, k),
+        v instanceof Node ? h("div", { className: "v" }, v) : h("div", { className: "v" }, v ?? "—"),
+    );
+}
+
+function kvRowMono(k, v) {
+    return h("div", { className: "row" },
+        h("div", { className: "k" }, k),
+        h("div", { className: "v mono" }, v ?? "—"),
+    );
+}
+
+function kv(...rows) {
+    return h("div", { className: "kv" }, ...rows);
+}
+
+function badge(text, kind) { return h("span", { className: "badge " + (kind || "neutral") }, text); }
 
 function phaseBadge(phase) {
-    if (!phase) return h("span", { className: "badge badge-pending" }, "Unknown");
-    if (phase === "Ready") return h("span", { className: "badge badge-ready" }, "Ready");
-    if (phase.includes("Error")) return h("span", { className: "badge badge-error" }, phase);
-    return h("span", { className: "badge badge-pending" }, phase);
+    if (!phase) return badge("Unknown", "pending");
+    if (phase === "Ready") return badge("Ready", "ready");
+    if (phase === "Provisioning" || phase === "Pending") return badge(phase, "pending");
+    if (phase.toLowerCase().includes("error") || phase.toLowerCase().includes("failed")) return badge(phase, "error");
+    return badge(phase, "pending");
 }
 
 function showAlert(msg, type = "error") {
     const existing = app.querySelector(".alert");
     if (existing) existing.remove();
-    app.prepend(h("div", { className: `alert alert-${type}` }, msg));
+    app.prepend(h("div", { className: `alert ${type}` }, msg));
+    if (type === "success") setTimeout(() => app.querySelector(".alert.success")?.remove(), 4000);
 }
 
-// --- Navigation ---
-
-function renderNav() {
-    clear(nav);
-    if (!currentUser) return;
-    nav.appendChild(h("a", { href: "#/contracts" }, "My Contracts"));
-    nav.appendChild(h("a", { href: "#/billing" }, "Billing"));
-    if (currentUser.is_admin) {
-        nav.appendChild(h("a", { href: "#/admin" }, "Admin"));
-    }
-    nav.appendChild(h("a", { href: "#", className: "nav-user" }, currentUser.sub));
-    nav.appendChild(h("a", { href: "/auth/logout", className: "nav-logout" }, "Sign out"));
+function emptyState(text) {
+    return h("div", { className: "empty" }, text);
 }
 
-// --- Login ---
+function fmtDate(s) {
+    if (!s) return "—";
+    try {
+        return new Date(s).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    } catch { return s; }
+}
+
+function fmtDay(s) {
+    if (!s) return "—";
+    try { return new Date(s).toLocaleDateString(undefined, { dateStyle: "medium" }); }
+    catch { return s; }
+}
+
+// ---------- Login ----------
 
 function renderLogin() {
-    renderNav();
-    clear(app).appendChild(
-        h("div", { className: "login-prompt" },
-            h("h2", {}, "SUNET Cloud Portal"),
-            h("p", {}, "Sign in to manage your cloud projects."),
-            h("a", { href: "/auth/login", className: "btn btn-primary" }, "Sign in with SSO"),
-        )
-    );
+    topbar.hidden = true;
+    clear(app);
+    app.className = "login-page";
+    app.appendChild(h("div", { className: "login-card" },
+        h("div", { className: "mark" }, "S"),
+        h("h1", {}, "Sign in"),
+        h("p", { className: "lead" }, "Use your federated identity to manage your contracts, projects and billing exports."),
+        h("a", { href: "/auth/login", className: "btn primary" }, "Continue with SWAMID", svgArrow()),
+        h("p", { className: "tag" }, "single sign-on · sunet"),
+    ));
 }
 
-// ========== CUSTOMER VIEWS ==========
+// ---------- Customer: Contracts list ----------
 
 async function renderContracts() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "My Contracts" }));
-    app.appendChild(h("h2", {}, "My Contracts"));
-    app.appendChild(h("p", { className: "page-desc" }, "Select a contract to view and manage its projects."));
-    try {
-        const user = await api("/api/me");
-        if (!user) return;
-        currentUser = user;
-        renderNav();
-        if (!user.contracts.length) {
-            app.appendChild(h("p", { className: "empty" }, "You don't have access to any contracts yet. Ask an administrator to grant you access."));
-            return;
-        }
-        for (const c of user.contracts) {
-            const cn = encodeURIComponent(c.contract_number);
-            app.appendChild(
-                h("a", { href: `#/contracts/${cn}/projects`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, c.contract_number),
-                        h("span", { className: "badge badge-neutral" }, c.customer.domain),
-                    ),
-                    h("p", { className: "meta" }, c.customer.name + (c.description ? " — " + c.description : "")),
-                )
-            );
-        }
-    } catch (e) { showAlert(e.message); }
+    app.className = "page";
+    app.appendChild(phead({
+        eyebrow: "Customer",
+        title: "Your contracts",
+        lead: "Choose a contract to manage its cloud projects, members and billing.",
+    }));
+
+    const contracts = currentUser.contracts || [];
+    if (!contracts.length) {
+        app.appendChild(slbl("Active contracts", 0));
+        app.appendChild(emptyState("You don't have access to any contracts yet. Ask an administrator to grant you access."));
+        return;
+    }
+
+    app.appendChild(slbl("Active contracts", contracts.length));
+    const grid = h("div", { className: "grid" });
+    for (const c of contracts) {
+        const cn = encodeURIComponent(c.contract_number);
+        grid.appendChild(h("a", { className: "card link", href: `#/contracts/${cn}/projects` },
+            h("div", { className: "card-head" },
+                h("h3", {}, c.contract_number),
+                badge(c.customer.domain, "active"),
+            ),
+            h("div", { className: "meta" }, c.customer.name + (c.description ? " — " + c.description : "")),
+        ));
+    }
+    app.appendChild(grid);
+
+    app.appendChild(h("p", { className: "hint", style: "margin-top:18px" },
+        "Don't see a contract you expected? Ask your contract administrator to grant you access."));
 }
+
+// ---------- Customer: Projects in one contract ----------
 
 async function renderContractProjects(contractNumber) {
     clear(app);
+    app.className = "page";
     const contractInfo = currentUser.contracts.find(c => c.contract_number === contractNumber);
     const customerName = contractInfo ? contractInfo.customer.name : "";
     const cn = encodeURIComponent(contractNumber);
 
-    app.appendChild(breadcrumbs(
-        { label: "My Contracts", hash: "contracts" },
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
         { label: contractNumber },
     ));
-    app.appendChild(h("h2", {}, contractNumber));
-    app.appendChild(h("p", { className: "page-desc" }, customerName));
-
-    // --- Projects section ---
-    app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Projects"));
-    app.appendChild(h("a", { href: `#/contracts/${cn}/projects/new`, className: "btn btn-primary btn-small", style: "display:inline-block;margin-bottom:16px;text-decoration:none" }, "+ New Project"));
+    app.appendChild(phead({
+        eyebrow: "Contract",
+        title: contractNumber,
+        lead: customerName + (contractInfo?.description ? " — " + contractInfo.description : ""),
+        actions: [
+            h("a", { className: "btn primary", href: `#/contracts/${cn}/projects/new` }, svgPlus(), "New project"),
+        ],
+    }));
 
     try {
         const projects = await api(`/api/contracts/${contractNumber}/projects`);
+        app.appendChild(slbl("Projects", projects.length));
         if (!projects.length) {
-            app.appendChild(h("p", { className: "empty" }, "No projects yet. Create one to get started."));
+            app.appendChild(emptyState("No projects yet. Create one to get started."));
         } else {
             for (const p of projects) {
                 const rn = encodeURIComponent(p.resource_name);
-                const headerChildren = [
+                const head = h("div", { className: "card-head" },
                     h("h3", {}, p.name),
                     phaseBadge(p.phase),
-                ];
-                if (p.managed) {
-                    headerChildren.push(
-                        h("span", { className: "badge badge-managed", title: "Managed by SUNET" }, "managed-by-sunet"),
-                    );
-                }
-                app.appendChild(
-                    h("a", { href: `#/contracts/${cn}/projects/${rn}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                        h("div", { className: "card-header" }, ...headerChildren),
-                        p.description ? h("p", { className: "meta" }, p.description) : null,
-                        h("p", { className: "meta" }, "Users: " + (p.users.length ? p.users.join(", ") : "(SUNET-managed)")),
-                    )
                 );
+                if (p.managed) head.appendChild(badge("managed-by-sunet", "managed"));
+                app.appendChild(h("a", { className: "card link", href: `#/contracts/${cn}/projects/${rn}` },
+                    head,
+                    p.description ? h("div", { className: "meta" }, p.description) : null,
+                    h("div", { className: "meta mono" },
+                        (p.managed
+                            ? "SUNET-managed"
+                            : `${p.users.length} member${p.users.length === 1 ? "" : "s"}`)
+                        + ` · ${p.resource_name}`),
+                ));
             }
         }
 
-        // --- Clusters section ---
-        app.appendChild(h("h3", { style: "margin-top:32px;margin-bottom:8px" }, "Clusters"));
+        // Clusters belonging to this contract.
         const allClusters = await api("/api/clusters");
-        const clusters = allClusters.filter(c => c.contract_number === contractNumber);
+        const clusters = (allClusters || []).filter(c => c.contract_number === contractNumber);
+        app.appendChild(slbl("Clusters", clusters.length));
         if (!clusters.length) {
-            app.appendChild(h("p", { className: "empty" }, "No clusters on this contract. Clusters are provisioned by SUNET — contact ops to request one."));
+            app.appendChild(emptyState("No clusters on this contract. SUNET ops provisions clusters — contact them to request one."));
         } else {
             for (const c of clusters) {
-                app.appendChild(
-                    h("a", { href: `#/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                        h("div", { className: "card-header" },
-                            h("h3", {}, c.name),
-                            c.provisioned_at
-                                ? h("span", { className: "badge badge-ready" }, "provisioned")
-                                : h("span", { className: "badge badge-pending" }, "pending"),
-                        ),
-                        h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
-                        h("p", { className: "meta" }, `Your role: ${c.caller_role || "?"}` + (c.active_addons.length ? " · Addons: " + c.active_addons.join(", ") : "")),
-                    )
-                );
+                const slug = encodeURIComponent(c.slug);
+                app.appendChild(h("a", { className: "card link", href: `#/clusters/${slug}` },
+                    h("div", { className: "card-head" },
+                        h("h3", {}, c.name),
+                        c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                    ),
+                    h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                    h("div", { className: "meta mono" },
+                        `Your role: ${c.caller_role || "?"}` +
+                        (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
+                ));
             }
         }
     } catch (e) { showAlert(e.message); }
 }
 
+// ---------- Customer: Project detail ----------
+
 async function renderProjectDetail(contractNumber, resourceName) {
     clear(app);
+    app.className = "page";
     const cn = encodeURIComponent(contractNumber);
     const rn = encodeURIComponent(resourceName);
 
-    app.appendChild(breadcrumbs(
-        { label: "My Contracts", hash: "contracts" },
-        { label: contractNumber, hash: `contracts/${cn}/projects` },
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
+        { label: contractNumber, hash: `/contracts/${cn}/projects` },
         { label: resourceName },
     ));
 
     try {
         const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
-        const titleRow = [h("h2", {}, p.name)];
-        if (p.managed) {
-            titleRow.push(
-                h("span", {
-                    className: "badge badge-managed",
-                    style: "margin-left:8px;vertical-align:middle",
-                    title: "Managed by SUNET — read-only for customer admins"
-                }, "managed-by-sunet")
-            );
-        }
-        app.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" }, ...titleRow));
-        app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" },
-            h("div", { className: "card-header" },
-                h("div", { className: "section-label", style: "margin:0" }, "Status"),
-                phaseBadge(p.phase),
-            ),
-        ));
-
-        app.appendChild(h("div", { className: "card" },
-            h("div", { className: "section-label", style: "margin-top:0" }, "Description"),
-            h("p", {}, p.description || "(none)"),
-            h("div", { className: "section-label" }, "Users"),
-            ...p.users.map(u => h("p", {}, u)),
-            p.users.length === 0 ? h("p", { className: "meta" }, p.managed ? "(SUNET-managed)" : "(none)") : null,
-            h("div", { className: "section-label" }, "Contract"),
-            h("p", {}, p.contract_number),
-        ));
-
-        // Customer admins on managed projects can view but not edit/delete.
         const canMutate = !p.managed || (currentUser && currentUser.is_admin);
+        const actions = [];
         if (canMutate) {
-            app.appendChild(h("div", { className: "btn-row", style: "margin-top:16px" },
-                h("a", { href: `#/contracts/${cn}/projects/edit/${rn}`, className: "btn btn-primary btn-small", style: "text-decoration:none" }, "Edit Project"),
-                h("button", { className: "btn btn-danger", onclick: async () => {
-                    if (confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources. This cannot be undone.`)) {
-                        try {
-                            await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
-                            navigate(`/contracts/${cn}/projects`);
-                        } catch (err) { showAlert(err.message); }
-                    }
-                }}, "Delete Project"),
-            ));
-        } else {
-            app.appendChild(h("p", { className: "meta", style: "margin-top:16px" },
-                "This project is SUNET-managed and read-only. Use the cluster page to request changes."));
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-function renderCreateProject(contractNumber) {
-    clear(app);
-    const contractInfo = currentUser.contracts.find(c => c.contract_number === contractNumber);
-    const customerDomain = contractInfo ? contractInfo.customer.domain : "";
-    const cn = encodeURIComponent(contractNumber);
-
-    app.appendChild(breadcrumbs(
-        { label: "My Contracts", hash: "contracts" },
-        { label: contractNumber, hash: `contracts/${cn}/projects` },
-        { label: "New Project" },
-    ));
-    app.appendChild(h("h2", {}, "New Project"));
-
-    const form = h("form", { className: "form-card", onsubmit: async (e) => {
-        e.preventDefault();
-        const name = form.querySelector('[name="name"]').value.trim();
-        const description = form.querySelector('[name="description"]').value.trim();
-        const usersRaw = form.querySelector('[name="users"]').value.trim();
-        const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
-        try {
-            await api(`/api/contracts/${contractNumber}/projects`, {
-                method: "POST", body: JSON.stringify({ name, description, users }),
-            });
-            navigate(`/contracts/${cn}/projects`);
-        } catch (err) { showAlert(err.message); }
-    }},
-        h("label", {}, "Project name"),
-        h("div", { className: "input-with-suffix" },
-            h("input", { name: "name", required: "true", maxlength: "64", placeholder: "my-project", pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?" }),
-            customerDomain ? h("span", { className: "input-suffix" }, "." + customerDomain) : null,
-        ),
-        h("label", {}, "Description"),
-        h("input", { name: "description", placeholder: "Optional description" }),
-        h("label", {}, "Users (one identifier per line)"),
-        h("textarea", { name: "users", placeholder: "user1@idp\nuser2@idp" }),
-        h("div", { className: "btn-row" },
-            h("a", { href: `#/contracts/${cn}/projects`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-            h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Create Project"),
-        ),
-    );
-    app.appendChild(form);
-}
-
-async function renderEditProject(contractNumber, resourceName) {
-    clear(app);
-    const cn = encodeURIComponent(contractNumber);
-    const rn = encodeURIComponent(resourceName);
-
-    app.appendChild(breadcrumbs(
-        { label: "My Contracts", hash: "contracts" },
-        { label: contractNumber, hash: `contracts/${cn}/projects` },
-        { label: resourceName, hash: `contracts/${cn}/projects/${rn}` },
-        { label: "Edit" },
-    ));
-    app.appendChild(h("h2", {}, "Edit Project"));
-
-    try {
-        const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
-        const form = h("form", { className: "form-card", onsubmit: async (e) => {
-            e.preventDefault();
-            const description = form.querySelector('[name="description"]').value.trim();
-            const usersRaw = form.querySelector('[name="users"]').value.trim();
-            const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
-            try {
-                await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
-                    method: "PATCH", body: JSON.stringify({ description, users }),
-                });
-                navigate(`/contracts/${cn}/projects/${rn}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("label", {}, "Project name"),
-            h("input", { value: p.name, disabled: "true" }),
-            h("label", {}, "Description"),
-            h("input", { name: "description", value: p.description, placeholder: "Optional description" }),
-            h("label", {}, "Users (one identifier per line)"),
-            h("textarea", { name: "users" }, p.users.join("\n")),
-            h("div", { className: "btn-row" },
-                h("a", { href: `#/contracts/${cn}/projects/${rn}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Save Changes"),
-            ),
-        );
-        app.appendChild(form);
-    } catch (e) { showAlert(e.message); }
-}
-
-// ========== ADMIN VIEWS ==========
-
-function renderAdmin() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }));
-    app.appendChild(h("h2", {}, "Admin"));
-    app.appendChild(h("p", { className: "page-desc" },
-        "SUNET-only management surfaces."));
-
-    const tile = (href, title, desc) =>
-        h("a", { href, className: "card card-clickable",
-                  style: "display:block;text-decoration:none;color:inherit;margin-bottom:12px" },
-            h("div", { className: "card-header" }, h("h3", {}, title)),
-            h("p", { className: "meta" }, desc),
-        );
-
-    app.appendChild(tile("#/admin/customers", "Customers & Contracts",
-        "Create customer organisations, contracts, and grant user access to contracts."));
-    app.appendChild(tile("#/admin/clusters", "Tenant Clusters",
-        "Register Kubernetes clusters, mark as provisioned, manage admin access. Includes the bootstrap setup guide."));
-    app.appendChild(tile("#/admin/cluster-requests", "Cluster Change Requests",
-        "Review and apply customer-admin requests for addons (JupyterHub), resizes, and backup enablement."));
-    app.appendChild(tile("#/admin/billing", "Billing Jobs",
-        "All scheduled billing exports across the platform — read-only view with manual-run support."));
-    app.appendChild(tile("#/admin/pricing", "Pricing",
-        "Per-resource unit prices, per-contract overrides, and rebates. Includes synthetic cluster fees."));
-}
-
-async function renderAdminCustomers() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" }, { label: "Customers" }));
-    app.appendChild(h("h2", {}, "Customers"));
-    app.appendChild(h("p", { className: "page-desc" }, "Manage customer organisations and their contracts."));
-
-    const form = h("form", { onsubmit: async (e) => {
-        e.preventDefault();
-        const name = form.querySelector('[name="name"]').value.trim();
-        const domain = form.querySelector('[name="domain"]').value.trim();
-        const description = form.querySelector('[name="description"]').value.trim();
-        try {
-            await api("/api/admin/customers", { method: "POST", body: JSON.stringify({ name, domain, description }) });
-            navigate("/admin");
-        } catch (err) { showAlert(err.message); }
-    }},
-        h("div", { className: "form-card" },
-            h("h3", {}, "Add Customer"),
-            h("div", { className: "form-row" },
-                h("div", {}, h("label", {}, "Name"), h("input", { name: "name", required: "true", placeholder: "Organisation name" })),
-                h("div", {}, h("label", {}, "Domain"), h("input", { name: "domain", required: "true", placeholder: "example.se", pattern: "[a-z0-9.-]+" })),
-            ),
-            h("label", {}, "Description"),
-            h("input", { name: "description", placeholder: "Optional" }),
-            h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Add Customer"),
-        ),
-    );
-    app.appendChild(form);
-    app.appendChild(h("div", { className: "section-label" }, "Existing Customers"));
-
-    try {
-        const customers = await api("/api/admin/customers");
-        if (!customers.length) { app.appendChild(h("p", { className: "empty" }, "No customers yet.")); return; }
-        for (const c of customers) {
-            app.appendChild(
-                h("a", { href: `#/admin/customers/${c.id}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" }, h("h3", {}, c.name), h("span", { className: "badge badge-neutral" }, c.domain)),
-                    c.description ? h("p", { className: "meta" }, c.description) : null,
-                )
-            );
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderAdminCustomerDetail(customerId) {
-    clear(app);
-    try {
-        const customer = await api(`/api/admin/customers/${customerId}`);
-        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: customer.name }));
-        app.appendChild(h("h2", {}, customer.name));
-        const descParts = [customer.domain];
-        if (customer.description) descParts.push(customer.description);
-        app.appendChild(h("p", { className: "page-desc" }, descParts.join(" — ")));
-
-        app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:20px" },
-            h("a", { href: `#/admin/customers/edit/${customerId}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Edit Customer"),
-            h("button", { className: "btn btn-danger", onclick: async () => {
-                if (confirm(`Delete customer ${customer.name}? All contracts must be deleted first.`)) {
-                    try { await api(`/api/admin/customers/${customerId}`, { method: "DELETE" }); navigate("/admin"); }
-                    catch (err) { showAlert(err.message); }
-                }
-            }}, "Delete Customer"),
-        ));
-
-        app.appendChild(h("div", { className: "section-label" }, "Add Contract"));
-        const form = h("form", { onsubmit: async (e) => {
-            e.preventDefault();
-            const cn = form.querySelector('[name="contract_number"]').value.trim();
-            const desc = form.querySelector('[name="description"]').value.trim();
-            try {
-                await api("/api/admin/contracts", { method: "POST", body: JSON.stringify({ customer_id: customerId, contract_number: cn, description: desc }) });
-                navigate(`/admin/customers/${customerId}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("div", { className: "form-card" },
-                h("div", { className: "form-row" },
-                    h("div", {}, h("label", {}, "Contract Number"), h("input", { name: "contract_number", required: "true", placeholder: "SD-123-a", pattern: "[A-Za-z0-9-]+" })),
-                    h("div", {}, h("label", {}, "Description"), h("input", { name: "description", placeholder: "Optional" })),
-                ),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Add Contract"),
-            ),
-        );
-        app.appendChild(form);
-
-        app.appendChild(h("div", { className: "section-label" }, "Contracts"));
-        if (!customer.contracts.length) app.appendChild(h("p", { className: "empty" }, "No contracts yet."));
-        for (const c of customer.contracts) {
-            app.appendChild(
-                h("a", { href: `#/admin/contracts/${c.id}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" }, h("h3", {}, c.contract_number)),
-                    c.description ? h("p", { className: "meta" }, c.description) : null,
-                )
-            );
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderAdminEditCustomer(customerId) {
-    clear(app);
-    try {
-        const customer = await api(`/api/admin/customers/${customerId}`);
-        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: customer.name, hash: `admin/customers/${customerId}` }, { label: "Edit" }));
-        app.appendChild(h("h2", {}, "Edit Customer"));
-
-        const form = h("form", { className: "form-card", onsubmit: async (e) => {
-            e.preventDefault();
-            const name = form.querySelector('[name="name"]').value.trim();
-            const domain = form.querySelector('[name="domain"]').value.trim();
-            const description = form.querySelector('[name="description"]').value.trim();
-            try {
-                await api(`/api/admin/customers/${customerId}`, { method: "PATCH", body: JSON.stringify({ name, domain, description }) });
-                navigate(`/admin/customers/${customerId}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("label", {}, "Name"),
-            h("input", { name: "name", required: "true", value: customer.name }),
-            h("label", {}, "Domain"),
-            h("input", { name: "domain", required: "true", value: customer.domain, pattern: "[a-z0-9.-]+" }),
-            h("label", {}, "Description"),
-            h("input", { name: "description", value: customer.description }),
-            h("div", { className: "btn-row" },
-                h("a", { href: `#/admin/customers/${customerId}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Save Changes"),
-            ),
-        );
-        app.appendChild(form);
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderAdminContractDetail(contractId) {
-    clear(app);
-    try {
-        const contract = await api(`/api/admin/contracts/${contractId}`);
-        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number }));
-        app.appendChild(h("h2", {}, contract.contract_number));
-        const descParts = [contract.customer.name, contract.customer.domain];
-        if (contract.description) descParts.push(contract.description);
-        app.appendChild(h("p", { className: "page-desc" }, descParts.join(" — ")));
-
-        app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:20px" },
-            h("a", { href: `#/admin/contracts/edit/${contractId}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Edit Contract"),
-            h("button", { className: "btn btn-danger", onclick: async () => {
-                if (confirm(`Delete contract ${contract.contract_number}? All projects must be deleted first.`)) {
-                    try { await api(`/api/admin/contracts/${contractId}`, { method: "DELETE" }); navigate(`/admin/customers/${contract.customer.id}`); }
-                    catch (err) { showAlert(err.message); }
-                }
-            }}, "Delete Contract"),
-        ));
-
-        // Rebate
-        app.appendChild(h("div", { className: "section-label" }, "Rebate"));
-        const rebateForm = h("form", { className: "form-card", onsubmit: async (e) => {
-            e.preventDefault();
-            const pct = rebateForm.querySelector('[name="rebate"]').value.trim();
-            try {
-                await api(`/api/admin/contracts/${contractId}/rebate`, { method: "PUT", body: JSON.stringify({ rebate_percent: parseFloat(pct) }) });
-                navigate(`/admin/contracts/${contractId}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("div", { className: "form-row" },
-                h("div", {},
-                    h("label", {}, "Rebate (%)"),
-                    h("input", { name: "rebate", type: "number", min: "0", max: "100", step: "0.01", value: contract.rebate_percent != null ? contract.rebate_percent : "" }),
-                ),
-                h("div", { style: "display:flex;align-items:flex-end;gap:8px;padding-bottom:12px" },
-                    h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Set Rebate"),
-                    contract.rebate_percent != null ? h("button", { type: "button", className: "btn btn-danger", onclick: async () => {
-                        try { await api(`/api/admin/contracts/${contractId}/rebate`, { method: "DELETE" }); navigate(`/admin/contracts/${contractId}`); }
-                        catch (err) { showAlert(err.message); }
-                    }}, "Remove") : null,
-                ),
-            ),
-        );
-        app.appendChild(rebateForm);
-
-        // Price overrides
-        app.appendChild(h("div", { className: "section-label" },
-            "Price Overrides ",
-            h("a", { href: "#/admin/pricing/docs", className: "help-link", style: "text-transform:none;letter-spacing:normal;font-weight:normal" }, "(how does pricing work?)"),
-        ));
-        try {
-            const overrides = await api(`/api/admin/contracts/${contractId}/pricing`);
-            if (overrides.length) {
-                const ul = h("ul", { className: "user-list" });
-                for (const o of overrides) {
-                    ul.appendChild(h("li", {},
-                        h("span", { className: "user-sub" }, `${o.resource_type}: ${o.unit_price} SEK`),
-                        h("button", { className: "btn btn-danger", onclick: async () => {
-                            await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(o.resource_type)}`, { method: "DELETE" });
-                            navigate(`/admin/contracts/${contractId}`);
-                        }}, "Remove"),
-                    ));
-                }
-                app.appendChild(ul);
-            } else {
-                app.appendChild(h("p", { className: "meta", style: "margin-bottom:8px" }, "Using global default prices."));
-            }
-        } catch (e) { /* ignore */ }
-
-        // Fetch global prices for the dropdown
-        let globalPrices = [];
-        try { globalPrices = await api("/api/admin/pricing"); } catch (e) { /* ignore */ }
-
-        if (globalPrices.length) {
-            const select = h("select", { name: "resource_type", required: "true" },
-                h("option", { value: "" }, "-- Select resource type --"),
-                ...globalPrices.map(p => h("option", { value: p.resource_type }, `${p.resource_type} (${p.unit_price} SEK / ${p.unit})`)),
-            );
-            const priceForm = h("form", { className: "form-card", onsubmit: async (e) => {
-                e.preventDefault();
-                const rt = priceForm.querySelector('[name="resource_type"]').value;
-                const price = priceForm.querySelector('[name="unit_price"]').value.trim();
-                if (!rt) return;
+            actions.push(h("a", { className: "btn ghost sm", href: `#/contracts/${cn}/projects/edit/${rn}` }, "Edit"));
+            actions.push(h("button", { className: "btn danger sm", onclick: async () => {
+                if (!confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources.`)) return;
                 try {
-                    await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(rt)}`, {
-                        method: "PUT", body: JSON.stringify({ resource_type: rt, unit_price: parseFloat(price) }),
-                    });
-                    navigate(`/admin/contracts/${contractId}`);
+                    await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
+                    navigate(`/contracts/${cn}/projects`);
                 } catch (err) { showAlert(err.message); }
-            }},
-                h("div", { className: "form-row" },
-                    h("div", {}, h("label", {}, "Resource type"), select),
-                    h("div", {}, h("label", {}, "Override price (SEK)"), h("input", { name: "unit_price", type: "number", min: "0", step: "0.01", required: "true" })),
-                ),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Add Override"),
-            );
-            app.appendChild(priceForm);
-        } else {
-            app.appendChild(h("p", { className: "meta" }, "Configure global prices first (Admin > Pricing) before adding overrides."));
+            }}, "Delete"));
+        }
+        app.appendChild(phead({
+            eyebrow: p.managed ? "Project · managed-by-sunet" : "Project",
+            title: p.name,
+            lead: p.description || null,
+            actions: actions.length ? actions : null,
+        }));
+
+        if (p.managed && !canMutate) {
+            const note = h("p", { className: "hint", style: "margin-bottom:16px" },
+                "This project is SUNET-managed and read-only. Use the cluster page to request changes.");
+            app.appendChild(note);
         }
 
-        // Grant access
-        app.appendChild(h("div", { className: "section-label" }, "Grant Access"));
-        const accessForm = h("form", { onsubmit: async (e) => {
-            e.preventDefault();
-            const sub = accessForm.querySelector('[name="user_sub"]').value.trim();
-            try {
-                await api(`/api/admin/contracts/${contractId}/users`, { method: "POST", body: JSON.stringify({ user_sub: sub }) });
-                navigate(`/admin/contracts/${contractId}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("div", { className: "form-card" },
-                h("div", { className: "form-row" },
-                    h("div", {}, h("label", {}, "User identifier"), h("input", { name: "user_sub", required: "true", placeholder: "username@idp" })),
-                    h("div", { style: "display:flex;align-items:flex-end;padding-bottom:12px" },
-                        h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Grant Access"),
-                    ),
-                ),
-            ),
-        );
-        app.appendChild(accessForm);
+        app.appendChild(h("div", { className: "slbl first" }, "Status"));
+        app.appendChild(kv(
+            kvRow("Phase", phaseBadge(p.phase)),
+            kvRowMono("Resource name", p.resource_name),
+            kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, p.contract_number)),
+            p.managed ? kvRow("Ownership", badge("managed-by-sunet", "managed")) : null,
+        ));
 
-        // Authorized users
-        app.appendChild(h("div", { className: "section-label" }, "Authorized Users"));
-        if (!contract.users.length) {
-            app.appendChild(h("p", { className: "empty" }, "No users have access yet."));
+        app.appendChild(slbl("Members", p.users.length));
+        if (!p.users.length) {
+            app.appendChild(emptyState(p.managed
+                ? "SUNET-managed: customer admins of the linked cluster get Keystone reader on this project automatically."
+                : "No members yet. Add one via Edit."));
         } else {
-            const ul = h("ul", { className: "user-list" });
-            for (const userSub of contract.users) {
+            const ul = h("ul", { className: "ilist" });
+            for (const u of p.users) {
                 ul.appendChild(h("li", {},
-                    h("span", { className: "user-sub" }, userSub),
-                    h("button", { className: "btn btn-danger", onclick: async (e) => {
-                        e.stopPropagation();
-                        if (confirm(`Revoke access for ${userSub}?`)) {
-                            await api(`/api/admin/contracts/${contractId}/users/${encodeURIComponent(userSub)}`, { method: "DELETE" });
-                            navigate(`/admin/contracts/${contractId}`);
-                        }
-                    }}, "Revoke"),
+                    h("span", {}, u),
+                    h("span", { className: "meta" }, p.managed ? "reader" : "member"),
                 ));
             }
             app.appendChild(ul);
@@ -731,14 +488,803 @@ async function renderAdminContractDetail(contractId) {
     } catch (e) { showAlert(e.message); }
 }
 
-async function renderAdminEditContract(contractId) {
+// ---------- Customer: Create project ----------
+
+function renderCreateProject(contractNumber) {
     clear(app);
+    app.className = "page narrow-form";
+    const contractInfo = currentUser.contracts.find(c => c.contract_number === contractNumber);
+    const cn = encodeURIComponent(contractNumber);
+
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
+        { label: contractNumber, hash: `/contracts/${cn}/projects` },
+        { label: "New project" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "New project",
+        title: "Create a project",
+        lead: "Projects map to a Kubernetes namespace and a billing scope. Choose a name and grant initial members access.",
+    }));
+
+    const identity = h("form", { className: "form", id: "identity-form" },
+        h("h3", {}, "Identity"),
+        h("label", { htmlFor: "name" }, "Project name"),
+        h("input", { id: "name", name: "name", type: "text", required: true, maxlength: "64", pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", placeholder: "my-project", className: "mono" }),
+        h("p", { className: "hint" }, "Lowercase, digits and hyphens only — must start and end with a letter or digit. Max 64 characters. Cannot be changed later."),
+        h("label", { htmlFor: "desc" }, "Description"),
+        h("textarea", { id: "desc", name: "description", className: "sans", placeholder: "What is this project for?" }),
+        h("label", { htmlFor: "contract" }, "Contract"),
+        (() => {
+            const sel = h("select", { id: "contract", disabled: true });
+            sel.appendChild(h("option", {}, contractNumber + (contractInfo ? " — " + contractInfo.customer.name : "")));
+            return sel;
+        })(),
+        h("p", { className: "hint" }, "Set from the contract you came from."),
+    );
+
+    const access = h("form", { className: "form", style: "margin-top:14px", id: "access-form" },
+        h("h3", {}, "Access"),
+        h("label", { htmlFor: "members" }, "Members (one per line)"),
+        h("textarea", { id: "members", name: "users", style: "min-height:140px", placeholder: "user1@idp\nuser2@idp" }),
+        h("p", { className: "hint" }, "Add the SWAMID identifiers of users who can manage the project. You can update this anytime."),
+    );
+
+    const actions = h("div", { className: "btn-row" },
+        h("button", { className: "btn primary", onclick: async (e) => {
+            e.preventDefault();
+            const name = identity.querySelector('[name="name"]').value.trim();
+            const description = identity.querySelector('[name="description"]').value.trim();
+            const usersRaw = access.querySelector('[name="users"]').value.trim();
+            const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+            try {
+                await api(`/api/contracts/${contractNumber}/projects`, {
+                    method: "POST", body: JSON.stringify({ name, description, users }),
+                });
+                navigate(`/contracts/${cn}/projects`);
+            } catch (err) { showAlert(err.message); }
+        }}, "Create project"),
+        h("a", { className: "btn ghost", href: `#/contracts/${cn}/projects` }, "Cancel"),
+    );
+
+    app.appendChild(identity);
+    app.appendChild(access);
+    app.appendChild(actions);
+}
+
+// ---------- Customer: Edit project ----------
+
+async function renderEditProject(contractNumber, resourceName) {
+    clear(app);
+    app.className = "page narrow-form";
+    const cn = encodeURIComponent(contractNumber);
+    const rn = encodeURIComponent(resourceName);
+
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
+        { label: contractNumber, hash: `/contracts/${cn}/projects` },
+        { label: resourceName, hash: `/contracts/${cn}/projects/${rn}` },
+        { label: "Edit" },
+    ));
+
+    try {
+        const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
+        app.appendChild(phead({ eyebrow: "Edit project", title: p.name }));
+
+        const identity = h("form", { className: "form" },
+            h("h3", {}, "Identity"),
+            h("label", {}, "Project name"),
+            h("input", { value: p.name, disabled: true, className: "mono" }),
+            h("label", { htmlFor: "desc" }, "Description"),
+            (() => {
+                const t = h("textarea", { id: "desc", name: "description", className: "sans" });
+                t.value = p.description || "";
+                return t;
+            })(),
+        );
+        const access = h("form", { className: "form", style: "margin-top:14px" },
+            h("h3", {}, "Access"),
+            h("label", { htmlFor: "members" }, "Members (one per line)"),
+            (() => {
+                const t = h("textarea", { id: "members", name: "users", style: "min-height:140px" });
+                t.value = (p.users || []).join("\n");
+                return t;
+            })(),
+        );
+        const actions = h("div", { className: "btn-row" },
+            h("button", { className: "btn primary", onclick: async (e) => {
+                e.preventDefault();
+                const description = identity.querySelector('[name="description"]').value.trim();
+                const usersRaw = access.querySelector('[name="users"]').value.trim();
+                const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+                try {
+                    await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
+                        method: "PATCH", body: JSON.stringify({ description, users }),
+                    });
+                    navigate(`/contracts/${cn}/projects/${rn}`);
+                } catch (err) { showAlert(err.message); }
+            }}, "Save changes"),
+            h("a", { className: "btn ghost", href: `#/contracts/${cn}/projects/${rn}` }, "Cancel"),
+        );
+
+        app.appendChild(identity);
+        app.appendChild(access);
+        app.appendChild(actions);
+    } catch (e) { showAlert(e.message); }
+}
+
+// ---------- Billing: list ----------
+
+async function renderBillingJobs() {
+    clear(app);
+    app.className = "page";
+    app.appendChild(phead({
+        eyebrow: "Billing",
+        title: "Billing export jobs",
+        lead: "Scheduled exports that deliver monthly billing CSVs to your finance system. Each job covers one or more contracts.",
+        actions: [h("a", { className: "btn primary", href: "#/billing/new" }, svgPlus(), "New job")],
+    }));
+
+    try {
+        const jobs = await api("/api/billing/jobs");
+        const active = jobs.filter(j => j.enabled);
+        const disabled = jobs.filter(j => !j.enabled);
+
+        app.appendChild(slbl("Active jobs", active.length));
+        if (!active.length) app.appendChild(emptyState("No active billing jobs."));
+        for (const j of active) app.appendChild(billingJobCard(j));
+
+        if (disabled.length) {
+            app.appendChild(slbl("Disabled", disabled.length));
+            for (const j of disabled) app.appendChild(billingJobCard(j));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+function billingJobCard(j) {
+    const scope = j.all_contracts ? "All your contracts" : `${j.contract_ids.length} contract${j.contract_ids.length === 1 ? "" : "s"}`;
+    const target = j.delivery_method === "webdav"
+        ? (j.delivery_config?.url ? `WebDAV → ${j.delivery_config.url}` : "WebDAV")
+        : (j.delivery_config?.recipient ? `email → ${j.delivery_config.recipient}` : "email");
+    return h("a", { className: "card link", href: `#/billing/${j.id}` },
+        h("div", { className: "card-head" },
+            h("h3", {}, j.name),
+            j.enabled ? badge("Enabled", "ready") : badge("Disabled", "neutral"),
+        ),
+        h("div", { className: "meta" }, `${scope} · ${j.per_contract ? "per-contract files" : "single file"} · ${target}`),
+        h("div", { className: "meta mono" }, j.schedule),
+    );
+}
+
+// ---------- Billing: detail ----------
+
+async function renderBillingJobDetail(jobId) {
+    clear(app);
+    app.className = "page";
+    try {
+        const job = await api(`/api/billing/jobs/${jobId}`);
+        app.appendChild(bc(
+            { label: "Billing jobs", hash: "/billing" },
+            { label: job.name },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Billing job",
+            title: job.name,
+            lead: `Runs on schedule ${job.schedule} and delivers via ${job.delivery_method}.`,
+            actions: [
+                h("button", { className: "btn ghost sm", onclick: async () => {
+                    try {
+                        const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({}) });
+                        showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
+                        renderBillingJobDetail(jobId);
+                    } catch (err) { showAlert(err.message); }
+                }}, "Run now"),
+                h("a", { className: "btn ghost sm", href: `#/billing/${jobId}/edit` }, "Edit"),
+                h("button", { className: "btn danger sm", onclick: async () => {
+                    if (!confirm(`Delete billing job "${job.name}"?`)) return;
+                    try { await api(`/api/billing/jobs/${jobId}`, { method: "DELETE" }); navigate("/billing"); }
+                    catch (err) { showAlert(err.message); }
+                }}, "Delete"),
+            ],
+        }));
+
+        const deliveryV = job.delivery_method === "webdav"
+            ? h("span", {}, "WebDAV → ", h("span", { className: "mono" }, job.delivery_config?.url || "—"))
+            : h("span", {}, "Email → ", h("span", { className: "mono" }, job.delivery_config?.recipient || "—"));
+
+        app.appendChild(h("div", { className: "slbl first" }, "Configuration"));
+        app.appendChild(kv(
+            kvRow("Status", job.enabled ? badge("Enabled", "ready") : badge("Disabled", "neutral")),
+            kvRowMono("Schedule", job.schedule),
+            kvRow("Scope", job.all_contracts
+                ? "All your accessible contracts"
+                : `${job.contract_ids.length} contract${job.contract_ids.length === 1 ? "" : "s"} selected`),
+            kvRow("Per-contract", job.per_contract ? "Yes — one file per contract per period" : "No — single file per period"),
+            kvRow("Delivery", deliveryV),
+            kvRowMono("Filename template", job.filename_template),
+            kvRow("Owner", job.owner_sub),
+        ));
+
+        // Recent runs
+        app.appendChild(h("div", { className: "slbl" }, "Recent runs"));
+        const runs = await api(`/api/billing/jobs/${jobId}/runs`);
+        if (!runs.length) {
+            app.appendChild(emptyState("No executions yet."));
+        } else {
+            for (const r of runs) {
+                const period = `${r.billing_period_start.substring(0, 7)} · ${r.files_delivered || 0} files delivered`;
+                const row = h("div", { className: "run-row" },
+                    h("div", { className: "when" }, fmtDay(r.started_at)),
+                    h("div", { className: "det" }, period),
+                    r.status === "success"
+                        ? badge("Success", "success")
+                        : r.status === "error" ? badge("Fail", "fail") : badge(r.status, "pending"),
+                );
+                if (r.error_message) row.appendChild(h("div", { className: "err" }, r.error_message));
+                app.appendChild(row);
+            }
+        }
+
+        // Manual run
+        app.appendChild(h("div", { className: "slbl" }, "Manual run"));
+        const now = new Date();
+        const manualForm = h("div", { className: "form" },
+            h("div", { className: "row-2" },
+                h("div", { className: "field" },
+                    h("label", { htmlFor: "year" }, "Year"),
+                    h("input", { id: "year", name: "year", type: "number", value: String(now.getUTCFullYear()) }),
+                ),
+                h("div", { className: "field" },
+                    h("label", { htmlFor: "month" }, "Month"),
+                    h("input", { id: "month", name: "month", type: "number", min: "1", max: "12", value: String(now.getUTCMonth() + 1) }),
+                ),
+            ),
+            h("div", { className: "btn-row" },
+                h("button", { className: "btn primary sm", onclick: async () => {
+                    const y = parseInt(manualForm.querySelector('[name="year"]').value, 10);
+                    const m = parseInt(manualForm.querySelector('[name="month"]').value, 10);
+                    try {
+                        const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({ year: y, month: m }) });
+                        showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
+                        renderBillingJobDetail(jobId);
+                    } catch (err) { showAlert(err.message); }
+                }}, "Run for this period"),
+                h("p", { className: "hint", style: "margin:0;align-self:center" }, "Re-runs are idempotent — same period overwrites the previous file."),
+            ),
+        );
+        app.appendChild(manualForm);
+    } catch (e) { showAlert(e.message); }
+}
+
+// ---------- Billing: create / edit ----------
+
+function billingJobForm(job = null, onSubmit) {
+    const contracts = currentUser.contracts || [];
+    const isEdit = !!job;
+
+    const basics = h("form", { className: "form" },
+        h("h3", {}, "Basics"),
+        h("label", { htmlFor: "name" }, "Job name"),
+        h("input", { id: "name", name: "name", type: "text", required: true, value: job?.name || "" }),
+        h("label", { className: "checkbox" },
+            h("input", { type: "checkbox", name: "enabled", checked: job ? job.enabled : true }),
+            "Enabled",
+        ),
+    );
+
+    const contractSelect = h("select", { name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
+        ...contracts.map(c => {
+            const o = h("option", { value: String(c.id) }, `${c.contract_number} — ${c.customer.name}`);
+            if (job && job.contract_ids?.includes(c.id)) o.setAttribute("selected", "");
+            return o;
+        }),
+    );
+    const scope = h("form", { className: "form", style: "margin-top:14px" },
+        h("h3", {}, "Scope"),
+        h("label", { className: "checkbox" },
+            h("input", { type: "checkbox", name: "all_contracts", checked: job ? job.all_contracts : true }),
+            "Include all contracts you have access to",
+        ),
+        h("label", {}, "Or select specific contracts"),
+        contractSelect,
+        h("label", { className: "checkbox", style: "margin-top:18px" },
+            h("input", { type: "checkbox", name: "per_contract", checked: job ? job.per_contract : false }),
+            "Generate one file per contract",
+        ),
+        h("p", { className: "hint" }, "When unchecked, a single CSV containing all selected contracts is produced."),
+    );
+
+    const schedule = h("form", { className: "form", style: "margin-top:14px" },
+        h("h3", {}, "Schedule"),
+        h("label", { htmlFor: "cron" }, "Cron expression"),
+        h("input", { id: "cron", name: "schedule", type: "text", className: "mono", required: true, value: job?.schedule || "0 6 1 * *", placeholder: "0 6 1 * *" }),
+        h("p", { className: "hint" }, "Five-field cron syntax in UTC. Example: 0 6 1 * * runs at 06:00 on the first of every month."),
+    );
+
+    const dm = job?.delivery_method || "webdav";
+    const dc = job?.delivery_config || {};
+    const webdavWrap = h("div", { id: "webdav-config", style: dm === "webdav" ? "" : "display:none" },
+        h("label", { htmlFor: "wurl" }, "WebDAV URL"),
+        h("input", { id: "wurl", name: "webdav_url", type: "url", className: "mono", value: dc.url || "", placeholder: "https://finance.example.se/webdav/billing/" }),
+        h("div", { className: "row-2" },
+            h("div", { className: "field" },
+                h("label", { htmlFor: "wuser" }, "Username"),
+                h("input", { id: "wuser", name: "webdav_username", type: "text", value: dc.username || "" }),
+            ),
+            h("div", { className: "field" },
+                h("label", { htmlFor: "wpw" }, "Password"),
+                h("input", { id: "wpw", name: "webdav_password", type: "password", placeholder: isEdit ? "Leave blank to keep current" : "" }),
+            ),
+        ),
+    );
+    const emailWrap = h("div", { id: "email-config", style: dm === "email" ? "" : "display:none" },
+        h("label", { htmlFor: "rcpt" }, "Recipient"),
+        h("input", { id: "rcpt", name: "email_recipient", type: "email", value: dc.recipient || "", placeholder: "billing@example.se" }),
+    );
+
+    const dmSelect = h("select", { id: "dm", name: "delivery_method", onchange: (e) => {
+        webdavWrap.style.display = e.target.value === "webdav" ? "block" : "none";
+        emailWrap.style.display = e.target.value === "email" ? "block" : "none";
+    }});
+    const oWeb = h("option", { value: "webdav" }, "WebDAV");
+    const oMail = h("option", { value: "email" }, "Email");
+    if (dm === "webdav") oWeb.setAttribute("selected", "");
+    if (dm === "email") oMail.setAttribute("selected", "");
+    dmSelect.appendChild(oWeb);
+    dmSelect.appendChild(oMail);
+
+    const delivery = h("form", { className: "form", style: "margin-top:14px" },
+        h("h3", {}, "Delivery"),
+        h("label", { htmlFor: "dm" }, "Method"),
+        dmSelect,
+        webdavWrap,
+        emailWrap,
+        h("label", { htmlFor: "tpl" }, "Filename template"),
+        h("input", { id: "tpl", name: "filename_template", type: "text", className: "mono", value: job?.filename_template || "billing-{year}-{month}.csv" }),
+        h("p", { className: "hint" }, "Variables: ",
+            h("code", {}, "{contract}"), " ",
+            h("code", {}, "{year}"), " ",
+            h("code", {}, "{month}"), " ",
+            h("code", {}, "{day}"), " ",
+            h("code", {}, "{date}")),
+    );
+
+    const submitBtn = h("button", { className: "btn primary", onclick: async (e) => {
+        e.preventDefault();
+        const name = basics.querySelector('[name="name"]').value.trim();
+        const enabled = basics.querySelector('[name="enabled"]').checked;
+        const allContracts = scope.querySelector('[name="all_contracts"]').checked;
+        const perContract = scope.querySelector('[name="per_contract"]').checked;
+        const contractIds = Array.from(contractSelect.selectedOptions).map(o => parseInt(o.value, 10));
+        const scheduleVal = schedule.querySelector('[name="schedule"]').value.trim();
+        const deliveryMethod = dmSelect.value;
+        const filenameTemplate = delivery.querySelector('[name="filename_template"]').value.trim();
+        const deliveryConfig = {};
+        if (deliveryMethod === "webdav") {
+            deliveryConfig.url = delivery.querySelector('[name="webdav_url"]').value.trim();
+            deliveryConfig.username = delivery.querySelector('[name="webdav_username"]').value.trim();
+            const pw = delivery.querySelector('[name="webdav_password"]').value;
+            if (pw) deliveryConfig.password = pw;
+            else if (isEdit) deliveryConfig.password = "********";
+        } else {
+            deliveryConfig.recipient = delivery.querySelector('[name="email_recipient"]').value.trim();
+        }
+        try {
+            await onSubmit({
+                name, enabled,
+                all_contracts: allContracts,
+                contract_ids: allContracts ? [] : contractIds,
+                schedule: scheduleVal,
+                delivery_method: deliveryMethod,
+                delivery_config: deliveryConfig,
+                filename_template: filenameTemplate,
+                per_contract: perContract,
+            });
+        } catch (err) { showAlert(err.message); }
+    }}, isEdit ? "Save changes" : "Create job");
+
+    const cancel = h("a", { className: "btn ghost", href: isEdit ? `#/billing/${job.id}` : "#/billing" }, "Cancel");
+
+    return [basics, scope, schedule, delivery, h("div", { className: "btn-row" }, submitBtn, cancel)];
+}
+
+function renderCreateBillingJob() {
+    clear(app);
+    app.className = "page narrow";
+    app.appendChild(bc({ label: "Billing jobs", hash: "/billing" }, { label: "New job" }));
+    app.appendChild(phead({
+        eyebrow: "New billing job",
+        title: "Configure a new export",
+        lead: "Choose the schedule, scope and delivery destination for this billing export.",
+    }));
+    for (const node of billingJobForm(null, async (body) => {
+        await api("/api/billing/jobs", { method: "POST", body: JSON.stringify(body) });
+        navigate("/billing");
+    })) app.appendChild(node);
+}
+
+async function renderEditBillingJob(jobId) {
+    clear(app);
+    app.className = "page narrow";
+    try {
+        const job = await api(`/api/billing/jobs/${jobId}`);
+        app.appendChild(bc(
+            { label: "Billing jobs", hash: "/billing" },
+            { label: job.name, hash: `/billing/${jobId}` },
+            { label: "Edit" },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Edit billing job",
+            title: job.name,
+            lead: "Configure when this job runs, which contracts it covers, and where the CSV is delivered.",
+        }));
+        for (const node of billingJobForm(job, async (body) => {
+            await api(`/api/billing/jobs/${jobId}`, { method: "PATCH", body: JSON.stringify(body) });
+            navigate(`/billing/${jobId}`);
+        })) app.appendChild(node);
+    } catch (e) { showAlert(e.message); }
+}
+
+// ---------- Admin: customers ----------
+
+async function renderAdminCustomers() {
+    clear(app);
+    app.className = "page";
+    app.appendChild(phead({
+        eyebrow: "Admin",
+        title: "Customers",
+        lead: "Organisations with at least one active SUNET Cloud contract.",
+        actions: [h("a", { className: "btn primary", href: "#/admin/customers/edit/new" }, svgPlus(), "New customer")],
+    }));
+
+    try {
+        const customers = await api("/api/admin/customers");
+        app.appendChild(slbl("All customers", customers.length));
+        if (!customers.length) {
+            app.appendChild(emptyState("No customers yet."));
+            return;
+        }
+        for (const c of customers) {
+            app.appendChild(h("a", { className: "card link", href: `#/admin/customers/${c.id}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, c.name),
+                    badge(c.domain, "active"),
+                ),
+                c.description ? h("div", { className: "meta" }, c.description) : null,
+                h("div", { className: "meta mono" }, `since ${fmtDay(c.created_at)}`),
+            ));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminCustomerDetail(customerId) {
+    clear(app);
+    app.className = "page";
+
+    try {
+        const customer = await api(`/api/admin/customers/${customerId}`);
+        app.appendChild(bc(
+            { label: "Customers", hash: "/admin" },
+            { label: customer.name },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Customer",
+            title: customer.name,
+            lead: `${customer.contracts.length} contract${customer.contracts.length === 1 ? "" : "s"} · onboarded ${fmtDay(customer.created_at)}.`,
+            actions: [
+                h("a", { className: "btn ghost sm", href: `#/admin/customers/edit/${customerId}` }, "Edit"),
+                h("button", { className: "btn danger sm", onclick: async () => {
+                    if (!confirm(`Delete customer ${customer.name}? All contracts must be deleted first.`)) return;
+                    try { await api(`/api/admin/customers/${customerId}`, { method: "DELETE" }); navigate("/admin"); }
+                    catch (err) { showAlert(err.message); }
+                }}, "Delete"),
+            ],
+        }));
+
+        app.appendChild(h("div", { className: "slbl first" }, "Identity"));
+        app.appendChild(kv(
+            kvRow("Name", customer.name),
+            kvRowMono("Domain", customer.domain),
+            kvRow("Description", customer.description || "—"),
+            kvRow("Created", fmtDate(customer.created_at)),
+        ));
+
+        // Add contract form
+        app.appendChild(h("div", { className: "slbl" }, "Add contract"));
+        const addForm = h("form", { className: "form", onsubmit: async (e) => {
+            e.preventDefault();
+            const cn = addForm.querySelector('[name="contract_number"]').value.trim();
+            const desc = addForm.querySelector('[name="description"]').value.trim();
+            try {
+                await api("/api/admin/contracts", { method: "POST", body: JSON.stringify({ customer_id: parseInt(customerId, 10), contract_number: cn, description: desc }) });
+                renderAdminCustomerDetail(customerId);
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("div", { className: "row-2" },
+                h("div", { className: "field" },
+                    h("label", { htmlFor: "cn" }, "Contract number"),
+                    h("input", { id: "cn", name: "contract_number", type: "text", required: true, pattern: "[A-Za-z0-9-]+", placeholder: "SUNET-2024-EXAMPLE-01" }),
+                ),
+                h("div", { className: "field" },
+                    h("label", { htmlFor: "cd" }, "Description"),
+                    h("input", { id: "cd", name: "description", type: "text", placeholder: "Optional" }),
+                ),
+            ),
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn primary sm" }, "Add contract"),
+            ),
+        );
+        app.appendChild(addForm);
+
+        app.appendChild(slbl("Contracts", customer.contracts.length));
+        if (!customer.contracts.length) {
+            app.appendChild(emptyState("No contracts yet."));
+        } else {
+            for (const c of customer.contracts) {
+                app.appendChild(h("a", { className: "card link", href: `#/admin/contracts/${c.id}` },
+                    h("div", { className: "card-head" },
+                        h("h3", {}, c.contract_number),
+                        badge(c.description || "active", "active"),
+                    ),
+                    c.description ? h("div", { className: "meta" }, c.description) : null,
+                    h("div", { className: "meta mono" }, `created ${fmtDay(c.created_at)}`),
+                ));
+            }
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminEditCustomer(customerId) {
+    clear(app);
+    app.className = "page narrow-form";
+    const isNew = customerId === "new";
+
+    let customer = { name: "", domain: "", description: "" };
+    if (!isNew) {
+        try { customer = await api(`/api/admin/customers/${customerId}`); }
+        catch (e) { showAlert(e.message); return; }
+    }
+
+    app.appendChild(bc(
+        { label: "Customers", hash: "/admin" },
+        ...(isNew ? [{ label: "New" }] : [{ label: customer.name, hash: `/admin/customers/${customerId}` }, { label: "Edit" }]),
+    ));
+    app.appendChild(phead({
+        eyebrow: isNew ? "New customer" : "Edit customer",
+        title: isNew ? "Onboard a customer" : customer.name,
+    }));
+
+    const form = h("form", { className: "form", onsubmit: async (e) => {
+        e.preventDefault();
+        const name = form.querySelector('[name="name"]').value.trim();
+        const domain = form.querySelector('[name="domain"]').value.trim();
+        const description = form.querySelector('[name="description"]').value.trim();
+        try {
+            if (isNew) {
+                const c = await api("/api/admin/customers", { method: "POST", body: JSON.stringify({ name, domain, description }) });
+                navigate(`/admin/customers/${c.id}`);
+            } else {
+                await api(`/api/admin/customers/${customerId}`, { method: "PATCH", body: JSON.stringify({ name, domain, description }) });
+                navigate(`/admin/customers/${customerId}`);
+            }
+        } catch (err) { showAlert(err.message); }
+    }},
+        h("h3", {}, "Identity"),
+        h("label", { htmlFor: "n" }, "Name"),
+        h("input", { id: "n", name: "name", type: "text", required: true, value: customer.name || "" }),
+        h("label", { htmlFor: "d" }, "Domain"),
+        h("input", { id: "d", name: "domain", type: "text", required: true, pattern: "[a-z0-9.-]+", className: "mono", value: customer.domain || "" }),
+        h("label", { htmlFor: "ds" }, "Description"),
+        h("input", { id: "ds", name: "description", type: "text", value: customer.description || "" }),
+    );
+    app.appendChild(form);
+    app.appendChild(h("div", { className: "btn-row" },
+        h("button", { className: "btn primary", onclick: () => form.requestSubmit() }, isNew ? "Create customer" : "Save changes"),
+        h("a", { className: "btn ghost", href: isNew ? "#/admin" : `#/admin/customers/${customerId}` }, "Cancel"),
+    ));
+}
+
+// ---------- Admin: contract detail ----------
+
+async function renderAdminContractDetail(contractId) {
+    clear(app);
+    app.className = "page";
+
     try {
         const contract = await api(`/api/admin/contracts/${contractId}`);
-        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number, hash: `admin/contracts/${contractId}` }, { label: "Edit" }));
-        app.appendChild(h("h2", {}, "Edit Contract"));
+        app.appendChild(bc(
+            { label: "Customers", hash: "/admin" },
+            { label: contract.customer.name, hash: `/admin/customers/${contract.customer.id}` },
+            { label: contract.contract_number },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Contract",
+            title: contract.contract_number,
+            lead: `${contract.customer.name} · ${contract.users.length} user${contract.users.length === 1 ? "" : "s"} with portal access.`,
+            actions: [
+                h("button", { className: "btn danger sm", onclick: async () => {
+                    if (!confirm(`Delete contract ${contract.contract_number}? All projects must be deleted first.`)) return;
+                    try {
+                        await api(`/api/admin/contracts/${contractId}`, { method: "DELETE" });
+                        navigate(`/admin/customers/${contract.customer.id}`);
+                    } catch (err) { showAlert(err.message); }
+                }}, "Delete"),
+            ],
+        }));
 
-        const form = h("form", { className: "form-card", onsubmit: async (e) => {
+        // Description
+        app.appendChild(h("div", { className: "slbl first" }, "Description"));
+        const descForm = h("form", { className: "form", onsubmit: async (e) => {
+            e.preventDefault();
+            const description = descForm.querySelector('[name="description"]').value.trim();
+            try {
+                await api(`/api/admin/contracts/${contractId}`, { method: "PATCH", body: JSON.stringify({ description }) });
+                showAlert("Description saved", "success");
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("label", { htmlFor: "d" }, "Contract description"),
+            (() => {
+                const t = h("textarea", { id: "d", name: "description", className: "sans", style: "min-height:64px" });
+                t.value = contract.description || "";
+                return t;
+            })(),
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn primary sm" }, "Save description"),
+            ),
+        );
+        app.appendChild(descForm);
+
+        // Rebate
+        app.appendChild(h("div", { className: "slbl" }, "Rebate"));
+        const rebateForm = h("form", { className: "form", onsubmit: async (e) => {
+            e.preventDefault();
+            const v = rebateForm.querySelector('[name="rebate"]').value.trim();
+            try {
+                await api(`/api/admin/contracts/${contractId}/rebate`, { method: "PUT", body: JSON.stringify({ rebate_percent: parseFloat(v) }) });
+                renderAdminContractDetail(contractId);
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("label", { htmlFor: "r" }, "Rebate percent"),
+            h("div", { className: "input-suffix" },
+                h("input", { id: "r", name: "rebate", type: "number", min: "0", max: "100", step: "0.01", value: contract.rebate_percent != null ? String(contract.rebate_percent) : "" }),
+                h("span", { className: "suffix" }, "% off all line items"),
+            ),
+            h("p", { className: "hint" }, "Applied as a flat discount on every billed line for this contract. Set to 0 to remove."),
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn primary sm" }, "Apply rebate"),
+                contract.rebate_percent != null
+                    ? h("button", { type: "button", className: "btn ghost sm", onclick: async () => {
+                        try {
+                            await api(`/api/admin/contracts/${contractId}/rebate`, { method: "DELETE" });
+                            renderAdminContractDetail(contractId);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Remove rebate")
+                    : null,
+            ),
+        );
+        app.appendChild(rebateForm);
+
+        // Price overrides
+        let overrides = [];
+        try { overrides = await api(`/api/admin/contracts/${contractId}/pricing`); } catch {}
+        app.appendChild(slbl("Price overrides", overrides.length, {
+            help: { label: "How does pricing work?", href: "#/admin/pricing/docs" },
+        }));
+        if (!overrides.length) {
+            app.appendChild(h("p", { className: "hint", style: "margin-bottom:10px" }, "Using global default prices."));
+        } else {
+            for (const o of overrides) {
+                app.appendChild(h("div", { className: "pt-row" },
+                    h("div", {},
+                        h("div", { className: "name" }, o.resource_type),
+                        h("div", { className: "meta" }, "Override"),
+                    ),
+                    h("div", { className: "price" }, `${Number(o.unit_price).toFixed(4)} SEK `, h("span", { className: "unit" }, "/ hour")),
+                    h("button", { className: "btn ghost tiny", onclick: async () => {
+                        if (!confirm(`Remove override for ${o.resource_type}?`)) return;
+                        try {
+                            await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(o.resource_type)}`, { method: "DELETE" });
+                            renderAdminContractDetail(contractId);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Remove"),
+                ));
+            }
+        }
+
+        let globalPrices = [];
+        try { globalPrices = await api("/api/admin/pricing"); } catch {}
+        if (globalPrices.length) {
+            const sel = h("select", { id: "rt", name: "resource_type", required: true },
+                h("option", { value: "" }, "— Select resource type —"),
+                ...globalPrices.map(p => h("option", { value: p.resource_type }, `${p.resource_type} (${p.unit_price} SEK / ${p.unit})`)),
+            );
+            const addOverride = h("form", { className: "form", style: "margin-top:14px", onsubmit: async (e) => {
+                e.preventDefault();
+                const rt = sel.value;
+                const price = addOverride.querySelector('[name="unit_price"]').value.trim();
+                if (!rt) return;
+                try {
+                    await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(rt)}`, {
+                        method: "PUT", body: JSON.stringify({ resource_type: rt, unit_price: parseFloat(price) }),
+                    });
+                    renderAdminContractDetail(contractId);
+                } catch (err) { showAlert(err.message); }
+            }},
+                h("h3", {}, "Add override"),
+                h("div", { className: "row-2" },
+                    h("div", { className: "field" },
+                        h("label", { htmlFor: "rt" }, "Resource type"),
+                        sel,
+                    ),
+                    h("div", { className: "field" },
+                        h("label", { htmlFor: "up" }, "Unit price (SEK)"),
+                        h("input", { id: "up", name: "unit_price", type: "number", step: "0.0001", min: "0", required: true, placeholder: "0.00" }),
+                    ),
+                ),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Add override"),
+                ),
+            );
+            app.appendChild(addOverride);
+        } else {
+            app.appendChild(h("p", { className: "hint" }, "Configure global prices first (Admin → Pricing) before adding overrides."));
+        }
+
+        // Portal access
+        app.appendChild(slbl("Portal access", `${contract.users.length} user${contract.users.length === 1 ? "" : "s"}`));
+        if (!contract.users.length) {
+            app.appendChild(emptyState("No users have access yet."));
+        } else {
+            const ul = h("ul", { className: "ilist" });
+            for (const sub of contract.users) {
+                ul.appendChild(h("li", {},
+                    h("span", {}, sub),
+                    h("button", { className: "btn ghost tiny", onclick: async () => {
+                        if (!confirm(`Revoke access for ${sub}?`)) return;
+                        try {
+                            await api(`/api/admin/contracts/${contractId}/users/${encodeURIComponent(sub)}`, { method: "DELETE" });
+                            renderAdminContractDetail(contractId);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Revoke"),
+                ));
+            }
+            app.appendChild(ul);
+        }
+
+        const grant = h("form", { className: "form", style: "margin-top:10px", onsubmit: async (e) => {
+            e.preventDefault();
+            const v = grant.querySelector('[name="user_sub"]').value.trim();
+            if (!v) return;
+            try {
+                await api(`/api/admin/contracts/${contractId}/users`, { method: "POST", body: JSON.stringify({ user_sub: v }) });
+                renderAdminContractDetail(contractId);
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("label", { htmlFor: "u" }, "Grant access to user"),
+            h("div", { className: "input-suffix" },
+                h("input", { id: "u", name: "user_sub", type: "text", required: true, placeholder: "user@idp" }),
+                h("button", { type: "submit", className: "btn primary sm" }, "Grant"),
+            ),
+            h("p", { className: "hint" }, "User is identified by their SWAMID ", h("code", {}, "sub"), " claim — typically their email."),
+        );
+        app.appendChild(grant);
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminEditContract(contractId) {
+    clear(app);
+    app.className = "page narrow-form";
+    try {
+        const contract = await api(`/api/admin/contracts/${contractId}`);
+        app.appendChild(bc(
+            { label: "Customers", hash: "/admin" },
+            { label: contract.customer.name, hash: `/admin/customers/${contract.customer.id}` },
+            { label: contract.contract_number, hash: `/admin/contracts/${contractId}` },
+            { label: "Edit" },
+        ));
+        app.appendChild(phead({ eyebrow: "Edit contract", title: contract.contract_number }));
+
+        const form = h("form", { className: "form", onsubmit: async (e) => {
             e.preventDefault();
             const description = form.querySelector('[name="description"]').value.trim();
             try {
@@ -747,59 +1293,56 @@ async function renderAdminEditContract(contractId) {
             } catch (err) { showAlert(err.message); }
         }},
             h("label", {}, "Contract number"),
-            h("input", { value: contract.contract_number, disabled: "true" }),
-            h("label", {}, "Description"),
-            h("input", { name: "description", value: contract.description }),
-            h("div", { className: "btn-row" },
-                h("a", { href: `#/admin/contracts/${contractId}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Save Changes"),
-            ),
+            h("input", { value: contract.contract_number, disabled: true, className: "mono" }),
+            h("label", { htmlFor: "d" }, "Description"),
+            h("input", { id: "d", name: "description", type: "text", value: contract.description || "" }),
         );
         app.appendChild(form);
+        app.appendChild(h("div", { className: "btn-row" },
+            h("button", { className: "btn primary", onclick: () => form.requestSubmit() }, "Save changes"),
+            h("a", { className: "btn ghost", href: `#/admin/contracts/${contractId}` }, "Cancel"),
+        ));
     } catch (e) { showAlert(e.message); }
 }
 
-// --- Admin: Global Pricing ---
+// ---------- Admin: pricing ----------
 
 async function renderAdminPricing() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Pricing" }));
-    app.appendChild(h("h2", {}, "Global Pricing"));
-    app.appendChild(h("p", { className: "page-desc" },
-        "Set default prices per resource type. Prices can be set per metadata value (e.g. per flavor). Contracts can override these individually. ",
-        h("a", { href: "#/admin/pricing/docs", className: "help-link" }, "How does pricing work?"),
-    ));
+    app.className = "page";
+    app.appendChild(phead({
+        eyebrow: "Admin",
+        title: "Global pricing",
+        lead: "Default unit prices for every billable resource. Contracts may override individual lines on their own configuration page.",
+        actions: [h("a", { className: "btn ghost sm", href: "#/admin/pricing/docs" }, "View pricing docs →")],
+    }));
 
-    try {
-        const prices = await api("/api/admin/pricing");
-        if (prices.length) {
-            const ul = h("ul", { className: "user-list" });
-            for (const p of prices) {
-                let label = p.resource_type;
-                if (p.metadata_field && p.metadata_value)
-                    label += ` [${p.metadata_field}=${p.metadata_value}]`;
-                label += `: ${p.unit_price} SEK / ${p.unit}`;
-
-                ul.appendChild(h("li", {},
-                    h("span", { className: "user-sub" }, label),
-                    h("button", { className: "btn btn-danger", onclick: async () => {
-                        await api(`/api/admin/pricing/${p.id}`, { method: "DELETE" });
-                        navigate("/admin/pricing");
-                    }}, "Remove"),
-                ));
-            }
-            app.appendChild(ul);
-        } else {
-            app.appendChild(h("p", { className: "empty" }, "No prices configured yet."));
+    let prices = [];
+    try { prices = await api("/api/admin/pricing"); } catch (e) { showAlert(e.message); }
+    app.appendChild(slbl("Configured prices", prices.length));
+    if (!prices.length) {
+        app.appendChild(emptyState("No prices configured yet."));
+    } else {
+        for (const p of prices) {
+            const meta = p.metadata_field && p.metadata_value ? `${p.metadata_field} = ${p.metadata_value}` : "Base price";
+            app.appendChild(h("div", { className: "pt-row" },
+                h("div", {},
+                    h("div", { className: "name" }, p.resource_type),
+                    h("div", { className: "meta" }, meta),
+                ),
+                h("div", { className: "price" }, `${Number(p.unit_price).toFixed(6)} SEK `, h("span", { className: "unit" }, "/ " + p.unit)),
+                h("button", { className: "btn ghost tiny", onclick: async () => {
+                    if (!confirm(`Remove price for ${p.resource_type}?`)) return;
+                    try { await api(`/api/admin/pricing/${p.id}`, { method: "DELETE" }); renderAdminPricing(); }
+                    catch (err) { showAlert(err.message); }
+                }}, "Remove"),
+            ));
         }
-    } catch (e) { showAlert(e.message); }
+    }
 
-    app.appendChild(h("div", { className: "section-label" }, "Add Price"));
-
-    // Fetch available metrics from Gnocchi
+    // Add resource price form (Gnocchi-aware)
     let metrics = [];
-    try { metrics = await api("/api/admin/pricing/metrics"); } catch (e) { /* ignore */ }
-
+    try { metrics = await api("/api/admin/pricing/metrics"); } catch {}
     const metricUnits = {};
     const metricMeta = {};
     for (const m of metrics) {
@@ -807,43 +1350,39 @@ async function renderAdminPricing() {
         metricMeta[m.metric_type] = m.metadata_fields || [];
     }
 
-    // Metadata field/value dropdowns (shown when a metric with metadata is selected)
-    const metaFieldContainer = h("div", { id: "meta-fields", style: "display:none" });
+    const metaContainer = h("div", { id: "meta-fields", style: "display:none;margin-top:14px" });
 
     const metricSelect = metrics.length
-        ? h("select", { name: "resource_type", required: "true", onchange: (e) => {
+        ? h("select", { id: "rt", name: "resource_type", required: true, onchange: (e) => {
             const rt = e.target.value;
             const fields = metricMeta[rt] || [];
-            clear(metaFieldContainer);
-            if (fields.length && fields[0].values.length) {
-                const field = fields[0]; // primary metadata field (e.g. flavor_name)
-                metaFieldContainer.style.display = "block";
-                metaFieldContainer.appendChild(h("input", { type: "hidden", name: "metadata_field", value: field.field }));
-                metaFieldContainer.appendChild(h("label", {}, `${field.field} (optional — leave blank for base price)`));
-                metaFieldContainer.appendChild(
-                    h("select", { name: "metadata_value" },
-                        h("option", { value: "" }, "-- All (base price) --"),
-                        ...field.values.map(v => h("option", { value: v }, v)),
-                    )
-                );
+            clear(metaContainer);
+            if (fields.length && fields[0].values?.length) {
+                const field = fields[0];
+                metaContainer.style.display = "block";
+                metaContainer.appendChild(h("input", { type: "hidden", name: "metadata_field", value: field.field }));
+                metaContainer.appendChild(h("label", {}, `${field.field} (optional — leave blank for base price)`));
+                metaContainer.appendChild(h("select", { name: "metadata_value" },
+                    h("option", { value: "" }, "— All (base price) —"),
+                    ...field.values.map(v => h("option", { value: v }, v)),
+                ));
             } else {
-                metaFieldContainer.style.display = "none";
+                metaContainer.style.display = "none";
             }
-          }},
-            h("option", { value: "" }, "-- Select metric --"),
+        }},
+            h("option", { value: "" }, "— Select metric —"),
             ...metrics.map(m => h("option", { value: m.metric_type }, `${m.metric_type} (${m.unit})`)),
-          )
-        : h("input", { name: "resource_type", required: "true", placeholder: "metric type (Gnocchi unavailable)" });
+        )
+        : h("input", { id: "rt", name: "resource_type", type: "text", required: true, placeholder: "metric type (Gnocchi unavailable)" });
 
-    const form = h("form", { className: "form-card", onsubmit: async (e) => {
+    const addForm = h("form", { className: "form", style: "margin-top:18px", onsubmit: async (e) => {
         e.preventDefault();
-        const rt = form.querySelector('[name="resource_type"]').value.trim();
-        const price = form.querySelector('[name="unit_price"]').value.trim();
+        const rt = (addForm.querySelector('[name="resource_type"]').value || "").trim();
+        const price = addForm.querySelector('[name="unit_price"]').value.trim();
         const unit = metricUnits[rt] || "hours";
-        const metaField = form.querySelector('[name="metadata_field"]');
-        const metaValue = form.querySelector('[name="metadata_value"]');
+        const metaField = addForm.querySelector('[name="metadata_field"]');
+        const metaValue = addForm.querySelector('[name="metadata_value"]');
         if (!rt) return;
-
         const body = { resource_type: rt, unit_price: parseFloat(price), unit };
         if (metaField && metaValue && metaValue.value) {
             body.metadata_field = metaField.value;
@@ -851,65 +1390,79 @@ async function renderAdminPricing() {
         }
         try {
             await api("/api/admin/pricing", { method: "POST", body: JSON.stringify(body) });
-            navigate("/admin/pricing");
+            renderAdminPricing();
         } catch (err) { showAlert(err.message); }
     }},
-        h("div", { className: "form-row" },
-            h("div", {}, h("label", {}, "Resource type"), metricSelect),
-            h("div", {}, h("label", {}, "Unit price (SEK per hour)"), h("input", { name: "unit_price", type: "number", min: "0", step: "0.01", required: "true", placeholder: "0.00" })),
+        h("h3", {}, "Add resource price"),
+        h("div", { className: "row-2" },
+            h("div", { className: "field" },
+                h("label", { htmlFor: "rt" }, "Resource type"),
+                metricSelect,
+            ),
+            h("div", { className: "field" },
+                h("label", { htmlFor: "up" }, "Unit price (SEK per hour)"),
+                h("input", { id: "up", name: "unit_price", type: "number", step: "0.000001", min: "0", required: true, placeholder: "0.000000" }),
+            ),
         ),
-        metaFieldContainer,
-        h("p", { className: "meta", style: "margin-bottom:12px" },
-            "The billing system automatically detects the collection interval from Gnocchi and converts to hours."
+        metaContainer,
+        h("p", { className: "hint" }, "The billing system automatically detects the collection interval from Gnocchi and converts to hours."),
+        h("div", { className: "btn-row" },
+            h("button", { type: "submit", className: "btn primary sm" }, "Add price"),
         ),
-        h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Add Price"),
     );
-    app.appendChild(form);
+    app.appendChild(addForm);
 
     if (!metrics.length) {
-        app.appendChild(h("p", { className: "meta" }, "Could not connect to Gnocchi to discover available metrics. You can enter metric types manually."));
+        app.appendChild(h("p", { className: "hint" }, "Could not connect to Gnocchi to discover available metrics. You can enter metric types manually."));
     }
 }
 
-// --- Pricing Documentation ---
+// ---------- Pricing docs ----------
 
 function renderPricingDocs() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Pricing", hash: "admin/pricing" }, { label: "Documentation" }));
-    app.appendChild(h("h2", {}, "How Pricing Works"));
+    app.className = "page narrow";
+    app.appendChild(phead({
+        eyebrow: "Pricing reference",
+        title: "How billing works",
+        lead: "SUNET Cloud bills by metered resource consumption per project, rolled up to the project's contract.",
+    }));
 
     const doc = h("div", { className: "doc" });
     doc.innerHTML = `
         <h3>Overview</h3>
         <p>The billing system queries <strong>Gnocchi</strong> (the metrics database) for resource usage data,
         then applies the prices you configure here to calculate costs for each contract.</p>
-
-        <p>The pipeline is: <code>Ceilometer</code> (collects metrics) &rarr; <code>Gnocchi</code> (stores time-series data)
-        &rarr; <code>Portal billing</code> (queries usage, applies prices, generates CSV).</p>
+        <p>The pipeline is: <code>Ceilometer</code> (collects metrics) → <code>Gnocchi</code> (stores time-series data)
+        → <code>Portal billing</code> (queries usage, applies prices, generates CSV).</p>
 
         <h3>How metering works</h3>
         <p>Ceilometer polls OpenStack services at a fixed interval and stores measurements in Gnocchi.
         Each measurement is a <strong>data point</strong> — one sample taken at one point in time.</p>
-
         <p>The billing system <strong>automatically detects</strong> the collection interval by examining
-        the timestamps in Gnocchi's data. This means you don't need to worry about the interval — if
-        it changes, billing adapts automatically. All usage is converted to <strong>hours</strong> before
-        pricing is applied.</p>
+        the timestamps in Gnocchi's data. If the interval changes, billing adapts automatically. All usage
+        is converted to <strong>hours</strong> before pricing is applied.</p>
 
-        <h3>Resource types and metrics</h3>
-        <p>When you add a price, you select a <strong>resource type</strong> from the dropdown. These are the metrics
-        that Gnocchi is collecting. The dropdown also shows available metadata values (like flavor names) so you
-        can set prices at the right granularity.</p>
+        <h3>The four-step calculation</h3>
+        <ol>
+            <li>Each <strong>project</strong> belongs to exactly one <strong>contract</strong>.</li>
+            <li>Every billable <strong>resource</strong> the project consumes is metered hourly.</li>
+            <li>Each metered line is multiplied by the resource's <strong>unit price</strong>. By default this is the global price; if the contract has a price override for that resource, the override wins.</li>
+            <li>The contract's <strong>rebate percent</strong> is applied to the line total. The result appears on the monthly CSV.</li>
+        </ol>
 
+        <h3>Resource types</h3>
         <table>
-            <tr><th>Metric</th><th>What it measures</th><th>Priced per</th></tr>
-            <tr><td>instance</td><td>Virtual machine existence (1 = running)</td><td>hour per instance</td></tr>
-            <tr><td>volume.size</td><td>Block storage volume size</td><td>hour per GB</td></tr>
-            <tr><td>image.size</td><td>Glance image size</td><td>hour per MB</td></tr>
-            <tr><td>ip.floating</td><td>Floating IP allocation</td><td>hour per IP</td></tr>
-            <tr><td>radosgw.objects.size</td><td>S3/object storage usage</td><td>hour per GB</td></tr>
-            <tr><td>network.incoming.bytes.rate</td><td>Inbound network traffic rate</td><td>hour per MB</td></tr>
-            <tr><td>network.outgoing.bytes.rate</td><td>Outbound network traffic rate</td><td>hour per MB</td></tr>
+            <thead><tr><th>Metric</th><th>What it measures</th><th>Priced per</th></tr></thead>
+            <tbody>
+                <tr><td><code>instance</code></td><td>Virtual machine existence</td><td>hour per instance</td></tr>
+                <tr><td><code>volume.size</code></td><td>Block storage volume size</td><td>hour per GB</td></tr>
+                <tr><td><code>image.size</code></td><td>Glance image size</td><td>hour per MB</td></tr>
+                <tr><td><code>ip.floating</code></td><td>Floating IP allocation</td><td>hour per IP</td></tr>
+                <tr><td><code>radosgw.objects.size</code></td><td>S3/object storage usage</td><td>hour per GB</td></tr>
+                <tr><td><code>network.incoming.bytes.rate</code></td><td>Inbound network traffic rate</td><td>hour per MB</td></tr>
+                <tr><td><code>network.outgoing.bytes.rate</code></td><td>Outbound network traffic rate</td><td>hour per MB</td></tr>
+            </tbody>
         </table>
 
         <h3>Metadata-based pricing</h3>
@@ -917,409 +1470,85 @@ function renderPricingDocs() {
         the <code>instance</code> metric includes <code>flavor_name</code>, so you can set different prices
         for different VM sizes. The <code>volume.size</code> metric includes <code>volume_type</code>
         for differentiating fast vs large storage.</p>
-
         <p>When billing, the system matches prices in this order:</p>
-        <ol style="margin:0 0 12px 20px">
-            <li><strong>Specific price</strong> — matches both the metric type AND the metadata value (e.g. instance where flavor_name = b2.c4r8)</li>
-            <li><strong>Base price</strong> — matches just the metric type (e.g. instance with no metadata filter, used as fallback)</li>
+        <ol>
+            <li><strong>Specific price</strong> — matches both the metric type AND the metadata value.</li>
+            <li><strong>Base price</strong> — matches just the metric type, used as fallback.</li>
         </ol>
 
-        <p>This means you can set a base price for all instances, then set specific prices for individual flavors.</p>
-
-        <h3>Setting prices</h3>
-        <p>All prices are in <strong>SEK per hour</strong>. If your published price list uses monthly rates,
-        divide by 730 (average hours per month) to get the hourly rate.</p>
-
+        <h3>Worked example</h3>
         <div class="example">
             <p><strong>Example: VM flavor b2.c4r8 at 1,095 SEK/month</strong></p>
-            <p>1. Hourly rate: 1,095 &divide; 730 = <strong>1.50 SEK/hour</strong></p>
-            <p>2. Select resource type: <code>instance</code></p>
-            <p>3. Select flavor_name: <code>b2.c4r8</code></p>
-            <p>4. Set unit price: <code>1.50</code></p>
-            <p>5. Result: an instance running all month = 730 &times; 1.50 = 1,095 SEK</p>
-        </div>
-
-        <div class="example">
-            <p><strong>Example: Block storage (large) at 1.73 SEK/GB/month</strong></p>
-            <p>1. Hourly rate: 1.73 &divide; 730 = <strong>0.00237 SEK/GB/hour</strong></p>
-            <p>2. Select resource type: <code>volume.size</code></p>
-            <p>3. Set unit price: <code>0.00237</code></p>
-            <p>4. Result: 100 GB for a full month = 100 &times; 730 &times; 0.00237 = 173 SEK</p>
-        </div>
-
-        <div class="example">
-            <p><strong>Example: S3 storage at 0.36 SEK/GB/month</strong></p>
-            <p>1. Hourly rate: 0.36 &divide; 730 = <strong>0.000493 SEK/GB/hour</strong></p>
-            <p>2. Select resource type: <code>radosgw.objects.size</code></p>
-            <p>3. Set unit price: <code>0.000493</code></p>
+            <p>1. Hourly rate: 1,095 ÷ 730 = <strong>1.50 SEK/hour</strong></p>
+            <p>2. Resource type: <code>instance</code></p>
+            <p>3. Metadata: <code>flavor_name = b2.c4r8</code></p>
+            <p>4. Unit price: <code>1.50</code></p>
+            <p>5. An instance running all month = 730 × 1.50 = 1,095 SEK</p>
         </div>
 
         <h3>Contract overrides and rebates</h3>
-        <p><strong>Price overrides</strong> let you set a different hourly price for a specific contract,
-        overriding the global default. This is useful for customers with negotiated rates.</p>
+        <p><strong>Price overrides</strong> let you set a different hourly price for a specific contract.</p>
+        <p><strong>Rebates</strong> are a percentage discount applied after the price calculation:
+        <code>hours × unit_price × (1 − rebate%/100) = cost</code></p>
 
-        <p><strong>Rebates</strong> are a percentage discount applied after the price calculation.
-        A 10% rebate on a 1,000 SEK charge results in 900 SEK.</p>
+        <h3>Delivery</h3>
+        <p>Billing exports run as scheduled <strong>billing jobs</strong>. A job covers one or more contracts,
+        runs on a cron schedule, and delivers CSVs by WebDAV or email. Filenames support <code>{contract}</code>,
+        <code>{year}</code> and <code>{month}</code> tokens.</p>
 
-        <p>The calculation: <code>hours &times; unit_price &times; (1 - rebate%/100) = cost</code></p>
+        <h3>Re-runs</h3>
+        <p>Manual runs of past periods are idempotent — they overwrite the previous CSV in place. Use this
+        to correct a delivery that failed or to re-issue with updated pricing.</p>
     `;
     app.appendChild(doc);
-
-    app.appendChild(h("div", { style: "margin-top:24px" },
-        h("a", { href: "#/admin/pricing", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Back to Pricing"),
-    ));
 }
 
-// ========== BILLING VIEWS ==========
-
-async function renderBillingJobs() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Billing" }));
-    app.appendChild(h("h2", {}, "Billing Jobs"));
-    app.appendChild(h("p", { className: "page-desc" }, "Automated billing exports delivered to WebDAV or email on a schedule."));
-    app.appendChild(h("a", { href: "#/billing/new", className: "btn btn-primary btn-small", style: "display:inline-block;margin-bottom:16px;text-decoration:none" }, "+ New Billing Job"));
-
-    try {
-        const jobs = await api("/api/billing/jobs");
-        if (!jobs.length) {
-            app.appendChild(h("p", { className: "empty" }, "No billing jobs configured yet."));
-            return;
-        }
-        for (const j of jobs) {
-            app.appendChild(
-                h("a", { href: `#/billing/${j.id}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, j.name),
-                        h("span", { className: j.enabled ? "badge badge-ready" : "badge badge-neutral" }, j.enabled ? "Enabled" : "Disabled"),
-                    ),
-                    h("p", { className: "meta" }, `${j.delivery_method} — ${j.schedule} — ${j.all_contracts ? "all contracts" : j.contract_ids.length + " contracts"}`),
-                )
-            );
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderBillingJobDetail(jobId) {
-    clear(app);
-    try {
-        const job = await api(`/api/billing/jobs/${jobId}`);
-        app.appendChild(breadcrumbs({ label: "Billing", hash: "billing" }, { label: job.name }));
-        app.appendChild(h("h2", {}, job.name));
-
-        app.appendChild(h("div", { className: "card" },
-            h("div", { className: "card-header" },
-                h("div", { className: "section-label", style: "margin:0" }, "Status"),
-                h("span", { className: job.enabled ? "badge badge-ready" : "badge badge-neutral" }, job.enabled ? "Enabled" : "Disabled"),
-            ),
-            h("div", { className: "section-label" }, "Schedule"),
-            h("p", {}, job.schedule),
-            h("div", { className: "section-label" }, "Delivery"),
-            h("p", {}, job.delivery_method === "webdav" ? `WebDAV: ${job.delivery_config.url || ""}` : `Email: ${job.delivery_config.recipient || ""}`),
-            h("div", { className: "section-label" }, "Filename Template"),
-            h("p", {}, job.filename_template),
-            h("div", { className: "section-label" }, "Output Mode"),
-            h("p", {}, job.per_contract ? "One file per contract" : "Single file"),
-            h("div", { className: "section-label" }, "Contracts"),
-            h("p", {}, job.all_contracts ? "All accessible contracts" : `${job.contract_ids.length} selected`),
-        ));
-
-        app.appendChild(h("div", { className: "btn-row", style: "margin-top:16px;margin-bottom:20px" },
-            h("a", { href: `#/billing/${jobId}/edit`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Edit"),
-            h("button", { className: "btn btn-primary btn-small", onclick: async () => {
-                try {
-                    const run = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({}) });
-                    showAlert(`Run completed: ${run.status}${run.files_delivered ? ", " + run.files_delivered + " files delivered" : ""}`, run.status === "success" ? "success" : "error");
-                    navigate(`/billing/${jobId}`);
-                } catch (err) { showAlert(err.message); }
-            }}, "Run Now"),
-            h("button", { className: "btn btn-danger", onclick: async () => {
-                if (confirm(`Delete billing job "${job.name}"?`)) {
-                    await api(`/api/billing/jobs/${jobId}`, { method: "DELETE" });
-                    navigate("/billing");
-                }
-            }}, "Delete"),
-        ));
-
-        // Execution history
-        app.appendChild(h("div", { className: "section-label" }, "Execution History"));
-        const runs = await api(`/api/billing/jobs/${jobId}/runs`);
-        if (!runs.length) {
-            app.appendChild(h("p", { className: "empty" }, "No executions yet."));
-        } else {
-            for (const r of runs) {
-                const statusClass = r.status === "success" ? "badge-ready" : r.status === "error" ? "badge-error" : "badge-pending";
-                app.appendChild(h("div", { className: "card" },
-                    h("div", { className: "card-header" },
-                        h("span", {}, new Date(r.started_at).toLocaleString()),
-                        h("span", { className: `badge ${statusClass}` }, r.status),
-                    ),
-                    h("p", { className: "meta" },
-                        `Period: ${r.billing_period_start.substring(0, 10)} to ${r.billing_period_end.substring(0, 10)}` +
-                        (r.files_delivered ? ` — ${r.files_delivered} files delivered` : ""),
-                    ),
-                    r.error_message ? h("p", { className: "meta", style: "color:var(--error)" }, r.error_message) : null,
-                ));
-            }
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderCreateBillingJob() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Billing", hash: "billing" }, { label: "New Job" }));
-    app.appendChild(h("h2", {}, "New Billing Job"));
-
-    // Fetch user's contracts for selection
-    const user = currentUser;
-    const contracts = user.contracts || [];
-
-    const form = h("form", { className: "form-card", onsubmit: async (e) => {
-        e.preventDefault();
-        const name = form.querySelector('[name="name"]').value.trim();
-        const schedule = form.querySelector('[name="schedule"]').value.trim();
-        const allContracts = form.querySelector('[name="all_contracts"]').checked;
-        const deliveryMethod = form.querySelector('[name="delivery_method"]').value;
-        const filenameTemplate = form.querySelector('[name="filename_template"]').value.trim();
-        const perContract = form.querySelector('[name="per_contract"]').checked;
-
-        const deliveryConfig = {};
-        if (deliveryMethod === "webdav") {
-            deliveryConfig.url = form.querySelector('[name="webdav_url"]').value.trim();
-            deliveryConfig.username = form.querySelector('[name="webdav_username"]').value.trim();
-            deliveryConfig.password = form.querySelector('[name="webdav_password"]').value;
-        } else {
-            deliveryConfig.recipient = form.querySelector('[name="email_recipient"]').value.trim();
-        }
-
-        const contractIds = [];
-        if (!allContracts) {
-            form.querySelectorAll('[name="contract_id"]:checked').forEach(cb => contractIds.push(parseInt(cb.value)));
-        }
-
-        try {
-            await api("/api/billing/jobs", {
-                method: "POST",
-                body: JSON.stringify({ name, schedule, all_contracts: allContracts, contract_ids: contractIds, delivery_method: deliveryMethod, delivery_config: deliveryConfig, filename_template: filenameTemplate, per_contract: perContract }),
-            });
-            navigate("/billing");
-        } catch (err) { showAlert(err.message); }
-    }},
-        h("label", {}, "Job name"),
-        h("input", { name: "name", required: "true", placeholder: "Monthly billing export" }),
-
-        h("label", {}, "Schedule (cron expression)"),
-        h("input", { name: "schedule", required: "true", placeholder: "0 6 1 * *", value: "0 6 1 * *" }),
-        h("p", { className: "meta", style: "margin-top:-8px;margin-bottom:12px" }, "e.g. 0 6 1 * * = 1st of each month at 06:00 UTC"),
-
-        h("label", {}, "Contracts"),
-        h("div", { style: "margin-bottom:12px" },
-            h("label", { style: "display:inline;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text)" },
-                h("input", { type: "checkbox", name: "all_contracts", checked: "true", style: "width:auto;margin-right:6px" }),
-                "All my contracts",
-            ),
-        ),
-        h("div", { id: "contract-checkboxes", style: "margin-bottom:12px" },
-            ...contracts.map(c =>
-                h("label", { style: "display:block;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text);padding:4px 0" },
-                    h("input", { type: "checkbox", name: "contract_id", value: String(c.id), style: "width:auto;margin-right:6px" }),
-                    c.contract_number + " (" + c.customer.name + ")",
-                )
-            ),
-        ),
-
-        h("label", {}, "Delivery method"),
-        h("select", { name: "delivery_method", onchange: (e) => {
-            const webdav = form.querySelector("#webdav-config");
-            const email = form.querySelector("#email-config");
-            webdav.style.display = e.target.value === "webdav" ? "block" : "none";
-            email.style.display = e.target.value === "email" ? "block" : "none";
-        }},
-            h("option", { value: "webdav" }, "WebDAV"),
-            h("option", { value: "email" }, "Email"),
-        ),
-
-        h("div", { id: "webdav-config" },
-            h("label", {}, "WebDAV URL"),
-            h("input", { name: "webdav_url", placeholder: "https://webdav.example.se/billing/" }),
-            h("div", { className: "form-row" },
-                h("div", {}, h("label", {}, "Username"), h("input", { name: "webdav_username" })),
-                h("div", {}, h("label", {}, "Password"), h("input", { name: "webdav_password", type: "password" })),
-            ),
-        ),
-        h("div", { id: "email-config", style: "display:none" },
-            h("label", {}, "Recipient"),
-            h("input", { name: "email_recipient", placeholder: "billing@example.se" }),
-        ),
-
-        h("label", {}, "Filename template"),
-        h("input", { name: "filename_template", value: "billing-{year}-{month}.csv" }),
-        h("p", { className: "meta", style: "margin-top:-8px;margin-bottom:12px" }, "Variables: {year}, {month}, {day}, {date}, {contract}"),
-
-        h("div", { style: "margin-bottom:16px" },
-            h("label", { style: "display:inline;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text)" },
-                h("input", { type: "checkbox", name: "per_contract", style: "width:auto;margin-right:6px" }),
-                "Generate one file per contract",
-            ),
-        ),
-
-        h("div", { className: "btn-row" },
-            h("a", { href: "#/billing", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-            h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Create Job"),
-        ),
-    );
-    app.appendChild(form);
-}
-
-async function renderEditBillingJob(jobId) {
-    clear(app);
-    try {
-        const job = await api(`/api/billing/jobs/${jobId}`);
-        app.appendChild(breadcrumbs({ label: "Billing", hash: "billing" }, { label: job.name, hash: `billing/${jobId}` }, { label: "Edit" }));
-        app.appendChild(h("h2", {}, "Edit Billing Job"));
-
-        const contracts = currentUser.contracts || [];
-
-        const form = h("form", { className: "form-card", onsubmit: async (e) => {
-            e.preventDefault();
-            const name = form.querySelector('[name="name"]').value.trim();
-            const schedule = form.querySelector('[name="schedule"]').value.trim();
-            const allContracts = form.querySelector('[name="all_contracts"]').checked;
-            const deliveryMethod = form.querySelector('[name="delivery_method"]').value;
-            const filenameTemplate = form.querySelector('[name="filename_template"]').value.trim();
-            const perContract = form.querySelector('[name="per_contract"]').checked;
-            const enabled = form.querySelector('[name="enabled"]').checked;
-
-            const deliveryConfig = {};
-            if (deliveryMethod === "webdav") {
-                deliveryConfig.url = form.querySelector('[name="webdav_url"]').value.trim();
-                deliveryConfig.username = form.querySelector('[name="webdav_username"]').value.trim();
-                deliveryConfig.password = form.querySelector('[name="webdav_password"]').value || "********";
-            } else {
-                deliveryConfig.recipient = form.querySelector('[name="email_recipient"]').value.trim();
-            }
-
-            const contractIds = [];
-            if (!allContracts) {
-                form.querySelectorAll('[name="contract_id"]:checked').forEach(cb => contractIds.push(parseInt(cb.value)));
-            }
-
-            try {
-                await api(`/api/billing/jobs/${jobId}`, {
-                    method: "PATCH",
-                    body: JSON.stringify({ name, schedule, all_contracts: allContracts, contract_ids: contractIds, delivery_method: deliveryMethod, delivery_config: deliveryConfig, filename_template: filenameTemplate, per_contract: perContract, enabled }),
-                });
-                navigate(`/billing/${jobId}`);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("label", {}, "Job name"),
-            h("input", { name: "name", required: "true", value: job.name }),
-
-            h("label", {}, "Schedule (cron expression)"),
-            h("input", { name: "schedule", required: "true", value: job.schedule }),
-
-            h("div", { style: "margin-bottom:12px" },
-                h("label", { style: "display:inline;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text)" },
-                    h("input", { type: "checkbox", name: "all_contracts", style: "width:auto;margin-right:6px", ...(job.all_contracts ? { checked: "true" } : {}) }),
-                    "All my contracts",
-                ),
-            ),
-            h("div", { style: "margin-bottom:12px" },
-                ...contracts.map(c =>
-                    h("label", { style: "display:block;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text);padding:4px 0" },
-                        h("input", { type: "checkbox", name: "contract_id", value: String(c.id), style: "width:auto;margin-right:6px", ...(job.contract_ids.includes(c.id) ? { checked: "true" } : {}) }),
-                        c.contract_number + " (" + c.customer.name + ")",
-                    )
-                ),
-            ),
-
-            h("label", {}, "Delivery method"),
-            h("select", { name: "delivery_method", onchange: (e) => {
-                form.querySelector("#webdav-config").style.display = e.target.value === "webdav" ? "block" : "none";
-                form.querySelector("#email-config").style.display = e.target.value === "email" ? "block" : "none";
-            }},
-                h("option", { value: "webdav", ...(job.delivery_method === "webdav" ? { selected: "true" } : {}) }, "WebDAV"),
-                h("option", { value: "email", ...(job.delivery_method === "email" ? { selected: "true" } : {}) }, "Email"),
-            ),
-
-            h("div", { id: "webdav-config", style: job.delivery_method === "webdav" ? "" : "display:none" },
-                h("label", {}, "WebDAV URL"),
-                h("input", { name: "webdav_url", value: (job.delivery_config.url || "") }),
-                h("div", { className: "form-row" },
-                    h("div", {}, h("label", {}, "Username"), h("input", { name: "webdav_username", value: (job.delivery_config.username || "") })),
-                    h("div", {}, h("label", {}, "Password"), h("input", { name: "webdav_password", type: "password", placeholder: "Leave blank to keep current" })),
-                ),
-            ),
-            h("div", { id: "email-config", style: job.delivery_method === "email" ? "" : "display:none" },
-                h("label", {}, "Recipient"),
-                h("input", { name: "email_recipient", value: (job.delivery_config.recipient || "") }),
-            ),
-
-            h("label", {}, "Filename template"),
-            h("input", { name: "filename_template", value: job.filename_template }),
-
-            h("div", { style: "margin-bottom:12px" },
-                h("label", { style: "display:inline;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text)" },
-                    h("input", { type: "checkbox", name: "per_contract", style: "width:auto;margin-right:6px", ...(job.per_contract ? { checked: "true" } : {}) }),
-                    "One file per contract",
-                ),
-            ),
-            h("div", { style: "margin-bottom:16px" },
-                h("label", { style: "display:inline;font-weight:normal;text-transform:none;letter-spacing:normal;color:var(--text)" },
-                    h("input", { type: "checkbox", name: "enabled", style: "width:auto;margin-right:6px", ...(job.enabled ? { checked: "true" } : {}) }),
-                    "Enabled",
-                ),
-            ),
-
-            h("div", { className: "btn-row" },
-                h("a", { href: `#/billing/${jobId}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Save Changes"),
-            ),
-        );
-        app.appendChild(form);
-    } catch (e) { showAlert(e.message); }
-}
+// ---------- Admin: all billing jobs ----------
 
 async function renderAdminBillingJobs() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Billing Jobs" }));
-    app.appendChild(h("h2", {}, "All Billing Jobs"));
-    app.appendChild(h("p", { className: "page-desc" }, "All billing jobs across all users."));
+    app.className = "page";
+    app.appendChild(phead({
+        eyebrow: "Admin",
+        title: "All billing jobs",
+        lead: "Every billing export configured across all users.",
+    }));
 
     try {
         const jobs = await api("/api/billing/jobs?all=true");
+        app.appendChild(slbl("All jobs", jobs.length));
         if (!jobs.length) {
-            app.appendChild(h("p", { className: "empty" }, "No billing jobs configured."));
+            app.appendChild(emptyState("No billing jobs configured."));
             return;
         }
         for (const j of jobs) {
-            app.appendChild(
-                h("a", { href: `#/billing/${j.id}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, j.name),
-                        h("span", { className: j.enabled ? "badge badge-ready" : "badge badge-neutral" }, j.enabled ? "Enabled" : "Disabled"),
-                    ),
-                    h("p", { className: "meta" }, `Owner: ${j.owner_sub} — ${j.delivery_method} — ${j.schedule}`),
-                )
-            );
+            const target = j.delivery_method === "webdav"
+                ? (j.delivery_config?.url || "WebDAV")
+                : (j.delivery_config?.recipient || "email");
+            app.appendChild(h("a", { className: "card link", href: `#/billing/${j.id}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, j.name),
+                    j.enabled ? badge("Enabled", "ready") : badge("Disabled", "neutral"),
+                ),
+                h("div", { className: "meta" }, `Owner: ${j.owner_sub} · ${j.delivery_method} → ${target}`),
+                h("div", { className: "meta mono" }, j.schedule),
+            ));
         }
     } catch (e) { showAlert(e.message); }
 }
 
-// ========== TENANT CLUSTERS ==========
+// ========== Cluster helpers ==========
+
+const ADDON_DISPLAY_NAMES = { jupyterhub: "JupyterHub" };
 
 function statusBadge(status) {
-    if (status === "active") return h("span", { className: "badge badge-ready" }, "active");
-    if (status === "revoked") return h("span", { className: "badge badge-error" }, "revoked");
-    if (status === "expired") return h("span", { className: "badge badge-pending" }, "expired");
-    if (status === "pending") return h("span", { className: "badge badge-pending" }, "pending");
-    if (status === "applied") return h("span", { className: "badge badge-ready" }, "applied");
-    if (status === "denied") return h("span", { className: "badge badge-error" }, "denied");
-    return h("span", { className: "badge badge-neutral" }, status || "?");
-}
-
-function fmtDate(iso) {
-    if (!iso) return "—";
-    try { return new Date(iso).toISOString().slice(0, 10); } catch { return iso; }
+    if (status === "active") return badge("active", "ok");
+    if (status === "revoked") return badge("revoked", "err");
+    if (status === "expired") return badge("expired", "warn");
+    if (status === "pending") return badge("pending", "warn");
+    if (status === "applied") return badge("applied", "ok");
+    if (status === "denied") return badge("denied", "err");
+    return badge(status || "?", "neutral");
 }
 
 function daysUntil(iso) {
@@ -1327,8 +1556,6 @@ function daysUntil(iso) {
     const ms = new Date(iso).getTime() - Date.now();
     return Math.floor(ms / (1000 * 60 * 60 * 24));
 }
-
-const ADDON_DISPLAY_NAMES = { jupyterhub: "JupyterHub" };
 
 function formatRequestSummary(r) {
     const p = r.payload || {};
@@ -1340,12 +1567,10 @@ function formatRequestSummary(r) {
     if (r.request_type === "resize") {
         const tgt = p.target_worker_groups;
         const before = p.before_worker_groups;
-        if (before != null && tgt != null) {
+        if (before != null && tgt != null)
             return `Resize from ${before} to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
-        }
-        if (tgt != null) {
+        if (tgt != null)
             return `Resize to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
-        }
         return "Resize";
     }
     if (r.request_type === "backup") {
@@ -1354,189 +1579,182 @@ function formatRequestSummary(r) {
     return r.request_type;
 }
 
+// ========== Cluster: member-facing ==========
+
 async function renderClusters() {
-    clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "My Contracts", hash: "contracts" },
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Contracts", hash: "/contracts" },
         { label: "All clusters" },
     ));
-    app.appendChild(h("h2", {}, "All clusters"));
-    app.appendChild(h("p", { className: "page-desc" }, "Tenant Kubernetes clusters you have access to across every contract. Open a contract page from My Contracts to see clusters scoped to that contract."));
+    app.appendChild(phead({
+        eyebrow: "Customer",
+        title: "All clusters",
+        lead: "Tenant Kubernetes clusters you have access to across every contract. Open a contract page from My Contracts to see clusters scoped to that contract.",
+    }));
     try {
         const clusters = await api("/api/clusters");
+        app.appendChild(slbl("Clusters", clusters.length));
         if (!clusters.length) {
-            app.appendChild(h("p", { className: "empty" }, "You don't have access to any clusters yet."));
+            app.appendChild(emptyState("You don't have access to any clusters yet."));
             return;
         }
         for (const c of clusters) {
-            app.appendChild(
-                h("a", { href: `#/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, c.name),
-                        c.provisioned_at
-                            ? h("span", { className: "badge badge-ready" }, "provisioned")
-                            : h("span", { className: "badge badge-pending" }, "pending"),
-                    ),
-                    h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
-                    h("p", { className: "meta" }, `Contract: ${c.contract_number} · Role: ${c.caller_role || "?"}`),
-                    c.active_addons.length ? h("p", { className: "meta" }, "Addons: " + c.active_addons.join(", ")) : null,
-                )
-            );
+            app.appendChild(h("a", { className: "card link", href: `#/clusters/${encodeURIComponent(c.slug)}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, c.name),
+                    c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                ),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                h("div", { className: "meta mono" }, `Contract: ${c.contract_number} · Role: ${c.caller_role || "?"}`
+                    + (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
+            ));
         }
     } catch (e) { showAlert(e.message); }
 }
 
 async function renderClusterDetail(slug) {
-    clear(app);
+    clear(app); app.className = "page";
     try {
         const cluster = await api(`/api/clusters/${slug}`);
         const cn = encodeURIComponent(cluster.contract_number || "");
-        app.appendChild(breadcrumbs(
-            { label: "My Contracts", hash: "contracts" },
-            { label: cluster.contract_number, hash: `contracts/${cn}/projects` },
-            { label: slug },
-        ));
         const isCustomerAdmin = cluster.caller_role === "customer_admin" || cluster.caller_role === "sunet_admin";
 
-        const titleRow = [h("h2", {}, cluster.name)];
-        titleRow.push(h("span", { className: "badge badge-neutral", style: "margin-left:8px;vertical-align:middle" }, cluster.size_label));
-        if (cluster.provisioned_at) {
-            titleRow.push(h("span", { className: "badge badge-ready", style: "margin-left:4px;vertical-align:middle" }, "provisioned"));
-        } else {
-            titleRow.push(h("span", { className: "badge badge-pending", style: "margin-left:4px;vertical-align:middle" }, "not provisioned"));
-        }
-        app.appendChild(h("div", { style: "display:flex;align-items:center;gap:6px;margin-bottom:8px" }, ...titleRow));
+        app.appendChild(bc(
+            { label: "Contracts", hash: "/contracts" },
+            { label: cluster.contract_number, hash: `/contracts/${cn}/projects` },
+            { label: slug },
+        ));
+        app.appendChild(phead({
+            eyebrow: `Cluster · ${cluster.size_label}`,
+            title: cluster.name,
+            lead: cluster.provisioned_at ? "Provisioned and ready." : "Not yet provisioned — credential issuance is disabled.",
+            actions: isCustomerAdmin
+                ? [h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}/users` }, "Manage users")]
+                : null,
+        }));
 
-        // Overview card
-        const overviewChildren = [
-            h("div", { className: "section-label", style: "margin-top:0" }, "Cluster details"),
-            h("p", { className: "meta" }, `Slug: ${cluster.slug}`),
-            h("p", { className: "meta" }, `Servers: 3 controllers + ${3 * cluster.worker_groups} workers (${cluster.total_servers} total)`),
-            h("p", { className: "meta" }, `Contract: ${cluster.contract_number}`),
-            h("p", { className: "meta" }, `Your role: ${cluster.caller_role || "—"}`),
+        // Overview
+        app.appendChild(h("div", { className: "slbl first" }, "Overview"));
+        const overviewRows = [
+            kvRowMono("Slug", cluster.slug),
+            kvRow("Servers", `${cluster.total_servers} (3 controllers + ${3 * cluster.worker_groups} workers)`),
+            kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, cluster.contract_number)),
+            kvRow("Your role", cluster.caller_role || "—"),
         ];
         if (cluster.management_project_resource_name) {
-            overviewChildren.push(
-                h("div", { className: "section-label" }, "Management project (read-only)"),
-                h("p", {},
-                    h("a", { href: `#/contracts/${encodeURIComponent(cluster.contract_number)}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
-                        cluster.management_project_resource_name)
-                ),
-            );
+            overviewRows.push(kvRow("Management project",
+                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
+                    cluster.management_project_resource_name)));
         }
         if (cluster.backup_project_resource_name) {
-            overviewChildren.push(
-                h("div", { className: "section-label" }, "Backup project"),
-                h("p", {},
-                    h("a", { href: `#/contracts/${encodeURIComponent(cluster.contract_number)}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
-                        cluster.backup_project_resource_name)
-                ),
-            );
+            overviewRows.push(kvRow("Backup project",
+                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
+                    cluster.backup_project_resource_name)));
         }
         if (cluster.active_addons.length) {
-            overviewChildren.push(
-                h("div", { className: "section-label" }, "Active addons"),
-                ...cluster.active_addons.map(a => h("p", {}, a)),
-            );
+            overviewRows.push(kvRow("Active addons", cluster.active_addons.join(", ")));
         }
-        app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" }, ...overviewChildren));
+        app.appendChild(kv(...overviewRows));
 
-        if (isCustomerAdmin) {
-            app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:16px" },
-                h("a", { href: `#/clusters/${encodeURIComponent(slug)}/users`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Manage users"),
-            ));
-        }
+        const requests = await api(`/api/clusters/${slug}/requests`);
 
-        // Credentials section
-        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "My credentials"));
+        // Credentials
+        app.appendChild(slbl("My credentials"));
         if (!cluster.provisioned_at) {
-            app.appendChild(h("p", { className: "meta" }, "Cluster is not yet provisioned — credential issuance is disabled."));
+            app.appendChild(emptyState("Cluster is not yet provisioned — credential issuance is disabled."));
         } else {
-            const issueForm = h("form", { className: "form-card", style: "margin-bottom:16px", onsubmit: async (e) => {
-                e.preventDefault();
-                const label = e.target.querySelector('[name="label"]').value.trim();
-                const ttlRaw = e.target.querySelector('[name="ttl_days"]').value.trim();
-                const body = { label };
-                if (ttlRaw) body.ttl_days = parseInt(ttlRaw, 10);
-                try {
-                    const issued = await api(`/api/clusters/${slug}/credentials`, {
-                        method: "POST", body: JSON.stringify(body),
-                    });
-                    showIssuedKubeconfig(issued);
-                    renderClusterDetail(slug);  // refresh list
-                } catch (err) { showAlert(err.message); }
-            }},
-                h("label", {}, "Label (laptop, ci-runner, …)"),
-                h("input", { name: "label", required: "true", maxlength: "128", placeholder: "laptop" }),
-                h("label", {}, "TTL in days (optional, default 365)"),
-                h("input", { name: "ttl_days", type: "number", min: "1", max: "3650" }),
-                h("div", { className: "btn-row" },
-                    h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Issue kubeconfig"),
+            const issueForm = h("form", { className: "card", style: "margin-bottom:12px",
+                onsubmit: async (e) => {
+                    e.preventDefault();
+                    const label = e.target.querySelector('[name="label"]').value.trim();
+                    const ttlRaw = e.target.querySelector('[name="ttl_days"]').value.trim();
+                    const body = { label };
+                    if (ttlRaw) body.ttl_days = parseInt(ttlRaw, 10);
+                    try {
+                        const issued = await api(`/api/clusters/${slug}/credentials`, {
+                            method: "POST", body: JSON.stringify(body),
+                        });
+                        showIssuedKubeconfig(issued);
+                        renderClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }},
+                h("div", { className: "card-head" }, h("h3", {}, "Issue new kubeconfig")),
+                h("div", { className: "meta", style: "margin-top:8px" },
+                    h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Label"),
+                    h("input", { name: "label", required: true, maxlength: "128", placeholder: "laptop", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "TTL in days (optional, default 365)"),
+                    h("input", { name: "ttl_days", type: "number", min: "1", max: "3650", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("div", { className: "btn-row" },
+                        h("button", { type: "submit", className: "btn primary sm" }, "Issue kubeconfig"),
+                    ),
                 ),
             );
             app.appendChild(issueForm);
 
             const creds = await api(`/api/clusters/${slug}/credentials`);
             if (!creds.length) {
-                app.appendChild(h("p", { className: "empty" }, "You haven't issued any credentials yet."));
+                app.appendChild(emptyState("You haven't issued any credentials yet."));
             } else {
                 for (const c of creds) {
                     const expiryDays = daysUntil(c.expires_at);
                     const expiryWarn = c.status === "active" && expiryDays !== null && expiryDays < 30;
-                    app.appendChild(h("div", { className: "card" },
-                        h("div", { className: "card-header" },
+                    const card = h("div", { className: "card" },
+                        h("div", { className: "card-head" },
                             h("h3", {}, c.label),
                             statusBadge(c.status),
                         ),
-                        h("p", { className: "meta" }, `Issued: ${fmtDate(c.created_at)}`),
-                        h("p", { className: "meta" }, `Expires: ${fmtDate(c.expires_at)}` + (expiryWarn ? ` (in ${expiryDays} days)` : "")),
-                        h("p", { className: "meta" }, `Serial: ${c.cert_serial.substring(0, 16)}…`),
-                        c.status === "active" ? h("div", { className: "btn-row" },
-                            h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
-                                if (confirm(`Rotate credential "${c.label}"? The old kubeconfig will stop working.`)) {
+                        h("div", { className: "meta" }, `Issued ${fmtDay(c.created_at)} · expires ${fmtDay(c.expires_at)}` + (expiryWarn ? ` (in ${expiryDays} days)` : "")),
+                        h("div", { className: "meta mono" }, `Serial: ${c.cert_serial.substring(0, 16)}…`),
+                    );
+                    if (c.status === "active") {
+                        const row = h("div", { className: "btn-row" },
+                            h("button", { className: "btn ghost tiny",
+                                onclick: async () => {
+                                    if (!confirm(`Rotate credential "${c.label}"? The old kubeconfig will stop working.`)) return;
                                     try {
                                         const issued = await api(`/api/clusters/${slug}/credentials/${c.id}/rotate`, { method: "POST" });
                                         showIssuedKubeconfig(issued);
                                         renderClusterDetail(slug);
                                     } catch (err) { showAlert(err.message); }
-                                }
-                            }}, "Rotate"),
-                            h("button", { className: "btn btn-danger", onclick: async () => {
-                                if (confirm(`Revoke credential "${c.label}"? This is immediate and cannot be undone.`)) {
+                                }}, "Rotate"),
+                            h("button", { className: "btn danger tiny",
+                                onclick: async () => {
+                                    if (!confirm(`Revoke credential "${c.label}"? Immediate, can't be undone.`)) return;
                                     try {
                                         await api(`/api/clusters/${slug}/credentials/${c.id}`, { method: "DELETE" });
                                         renderClusterDetail(slug);
                                     } catch (err) { showAlert(err.message); }
-                                }
-                            }}, "Revoke"),
-                        ) : null,
-                    ));
+                                }}, "Revoke"),
+                        );
+                        card.appendChild(row);
+                    }
+                    app.appendChild(card);
                 }
             }
         }
 
-        // Load requests early so we can use them to disable conflicting buttons.
-        const requests = await api(`/api/clusters/${slug}/requests`);
-
-        // Cluster requests (request-a-change panel + history)
+        // Request a change (customer admins / SUNET admins only)
         if (isCustomerAdmin) {
-            app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request a change"));
+            app.appendChild(slbl("Request a change"));
             app.appendChild(renderClusterRequestPanel(slug, cluster, requests));
         }
 
-        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request history"));
+        // Request history
+        app.appendChild(slbl("Request history", requests.length));
         if (!requests.length) {
-            app.appendChild(h("p", { className: "empty" }, "No requests yet."));
+            app.appendChild(emptyState("No requests yet."));
         } else {
             for (const r of requests) {
                 app.appendChild(h("div", { className: "card" },
-                    h("div", { className: "card-header" },
+                    h("div", { className: "card-head" },
                         h("h3", {}, formatRequestSummary(r)),
                         statusBadge(r.status),
                     ),
-                    h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
-                    r.applied_at ? h("p", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub || "?"} on ${fmtDate(r.applied_at)}`) : null,
-                    r.note ? h("p", { className: "meta" }, `Note: ${r.note}`) : null,
+                    h("div", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDay(r.requested_at)}`),
+                    r.applied_at ? h("div", { className: "meta" },
+                        `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub || "?"} on ${fmtDay(r.applied_at)}`) : null,
+                    r.note ? h("div", { className: "meta" }, `Note: ${r.note}`) : null,
                 ));
             }
         }
@@ -1544,49 +1762,50 @@ async function renderClusterDetail(slug) {
 }
 
 function renderClusterRequestPanel(slug, cluster, requests) {
-    const panel = h("div", { className: "form-card" });
+    const panel = h("div", { className: "card" });
     const pendingByType = (type, predicate = () => true) =>
-        (requests || []).some(r =>
-            r.status === "pending" && r.request_type === type && predicate(r.payload || {})
-        );
+        (requests || []).some(r => r.status === "pending" && r.request_type === type && predicate(r.payload || {}));
 
-    // --- JupyterHub addon ---
+    // JupyterHub addon
     const jhActive = cluster.active_addons.includes("jupyterhub");
     const jhPending = pendingByType("addon", p => p.addon_type === "jupyterhub");
     const jhDisabled = jhActive || jhPending;
-    const jhAttrs = {
-        className: "btn btn-secondary btn-small",
+    const jhBtn = h("button", {
+        className: "btn ghost sm", disabled: jhDisabled || undefined,
         onclick: async () => {
-            if (confirm("Request JupyterHub addon? SUNET ops will be notified by email.")) {
-                try {
-                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
-                        request_type: "addon",
-                        payload: { action: "enable", addon_type: "jupyterhub" },
-                    })});
-                    renderClusterDetail(slug);
-                } catch (err) { showAlert(err.message); }
-            }
+            if (!confirm("Request JupyterHub addon? SUNET ops will be notified by email.")) return;
+            try {
+                await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                    request_type: "addon",
+                    payload: { action: "enable", addon_type: "jupyterhub" },
+                })});
+                renderClusterDetail(slug);
+            } catch (err) { showAlert(err.message); }
         },
-    };
-    if (jhDisabled) jhAttrs.disabled = "true";
-    const jhLabel = jhActive
-        ? "JupyterHub already enabled"
-        : jhPending
-            ? "JupyterHub request pending"
-            : "Request JupyterHub addon";
-    panel.appendChild(h("div", { style: "margin-bottom:12px" }, h("button", jhAttrs, jhLabel)));
+    }, jhActive ? "JupyterHub already enabled" : (jhPending ? "JupyterHub request pending" : "Request JupyterHub addon"));
+    panel.appendChild(h("div", { style: "padding:6px 0" }, jhBtn));
 
-    // --- Resize ---
+    // Resize
     const resizePending = pendingByType("resize");
-    const resizeBtnAttrs = {
-        className: "btn btn-secondary btn-small",
-        onclick: async () => {
-            const input = panel.querySelector('[name="resize_target"]');
-            const target = parseInt(input.value, 10);
-            if (!target || target <= cluster.worker_groups) {
-                showAlert("Target must be greater than current."); return;
-            }
-            if (confirm(`Request resize to ${target} worker groups (${3 + 3 * target} servers total)?`)) {
+    const resizeRow = h("div", { style: "display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap" },
+        h("div", { className: "meta", style: "min-width:0;flex:1" },
+            `Resize cluster (current: ${cluster.worker_groups} worker groups, ${3 * cluster.worker_groups} workers)`),
+        h("input", {
+            name: "resize_target", type: "number",
+            min: cluster.worker_groups + 1,
+            placeholder: `> ${cluster.worker_groups}`,
+            disabled: resizePending || undefined,
+            style: "width:120px;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit",
+        }),
+        h("button", {
+            className: "btn ghost sm", disabled: resizePending || undefined,
+            onclick: async () => {
+                const input = panel.querySelector('[name="resize_target"]');
+                const target = parseInt(input.value, 10);
+                if (!target || target <= cluster.worker_groups) {
+                    showAlert("Target must be greater than current."); return;
+                }
+                if (!confirm(`Request resize to ${target} worker groups (${3 + 3 * target} servers total)?`)) return;
                 try {
                     await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
                         request_type: "resize",
@@ -1594,67 +1813,53 @@ function renderClusterRequestPanel(slug, cluster, requests) {
                     })});
                     renderClusterDetail(slug);
                 } catch (err) { showAlert(err.message); }
-            }
-        },
-    };
-    if (resizePending) resizeBtnAttrs.disabled = "true";
-    const resizeInputAttrs = {
-        name: "resize_target", type: "number",
-        min: cluster.worker_groups + 1,
-        placeholder: `> ${cluster.worker_groups}`,
-        style: "width:120px",
-    };
-    if (resizePending) resizeInputAttrs.disabled = "true";
-    panel.appendChild(h("div", { style: "margin-bottom:12px" },
-        h("label", {}, `Resize cluster (current: ${cluster.worker_groups} worker groups, ${3 * cluster.worker_groups} workers)`),
-        h("div", { style: "display:flex;gap:8px" },
-            h("input", resizeInputAttrs),
-            h("button", resizeBtnAttrs, resizePending ? "Resize request pending" : "Request resize"),
-        ),
-    ));
+            },
+        }, resizePending ? "Resize request pending" : "Request resize"),
+    );
+    panel.appendChild(resizeRow);
 
-    // --- Backup ---
+    // Backup
     const backupEnabled = !!cluster.backup_project_resource_name;
     const backupPending = pendingByType("backup");
-    const backupBtnAttrs = {
-        className: "btn btn-secondary btn-small",
+    const backupBtn = h("button", {
+        className: "btn ghost sm", disabled: backupPending || undefined,
         onclick: async () => {
             const action = backupEnabled ? "disable" : "enable";
-            if (confirm(`Request to ${action} backup?`)) {
-                try {
-                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
-                        request_type: "backup",
-                        payload: { action },
-                    })});
-                    renderClusterDetail(slug);
-                } catch (err) { showAlert(err.message); }
-            }
+            if (!confirm(`Request to ${action} backup?`)) return;
+            try {
+                await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                    request_type: "backup",
+                    payload: { action },
+                })});
+                renderClusterDetail(slug);
+            } catch (err) { showAlert(err.message); }
         },
-    };
-    if (backupPending) backupBtnAttrs.disabled = "true";
-    const backupLabel = backupPending
-        ? "Backup request pending"
-        : backupEnabled
-            ? "Request to disable backup"
-            : "Request to enable backup";
-    panel.appendChild(h("div", {}, h("button", backupBtnAttrs, backupLabel)));
+    }, backupPending ? "Backup request pending" : (backupEnabled ? "Request to disable backup" : "Request to enable backup"));
+    panel.appendChild(h("div", { style: "padding:6px 0" }, backupBtn));
 
     return panel;
 }
 
 function showIssuedKubeconfig(issued) {
-    const overlay = h("div", { className: "modal-overlay", style: "position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100" });
+    const overlay = h("div", {
+        style: "position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:100",
+    });
     const close = () => overlay.remove();
     const blob = new Blob([issued.kubeconfig], { type: "text/yaml" });
     const url = URL.createObjectURL(blob);
-    const dialog = h("div", { className: "card", style: "max-width:600px;width:90%;max-height:90vh;overflow:auto" },
-        h("h2", {}, "Kubeconfig issued"),
-        h("p", { className: "meta" }, `Label: ${issued.label} · Expires: ${fmtDate(issued.expires_at)}`),
-        h("p", {}, "Save the file below — it is shown only once and not retrievable later."),
-        h("textarea", { readonly: "true", style: "width:100%;height:200px;font-family:monospace;font-size:0.8rem;margin:8px 0" }, issued.kubeconfig),
+    const dialog = h("div", { className: "card", style: "max-width:640px;width:92%;max-height:90vh;overflow:auto" },
+        h("div", { className: "card-head" }, h("h3", {}, "Kubeconfig issued")),
+        h("div", { className: "meta" }, `Label: ${issued.label} · Expires: ${fmtDay(issued.expires_at)}`),
+        h("div", { className: "meta", style: "margin-top:8px" },
+            "Save the file below — it is shown only once and not retrievable later."),
+        h("textarea", {
+            readonly: true, value: issued.kubeconfig,
+            style: "width:100%;height:200px;font-family:var(--mono);font-size:12px;margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:6px",
+        }),
         h("div", { className: "btn-row" },
-            h("a", { href: url, download: `kubeconfig-${issued.cluster_slug}-${issued.label}.yaml`, className: "btn btn-primary btn-small", style: "text-decoration:none" }, "Download"),
-            h("button", { className: "btn btn-secondary btn-small", onclick: close }, "Close"),
+            h("a", { className: "btn primary sm",
+                href: url, download: `kubeconfig-${issued.cluster_slug}-${issued.label}.yaml` }, "Download"),
+            h("button", { className: "btn ghost sm", onclick: close }, "Close"),
         ),
     );
     overlay.appendChild(dialog);
@@ -1663,111 +1868,151 @@ function showIssuedKubeconfig(issued) {
 }
 
 async function renderClusterUsers(slug) {
-    clear(app);
-    app.appendChild(h("h2", {}, "Cluster users"));
+    clear(app); app.className = "page";
     try {
         const cluster = await api(`/api/clusters/${slug}`);
         const users = await api(`/api/clusters/${slug}/users`);
-        const cn = encodeURIComponent(cluster.contract_number || "");
-        // Insert breadcrumbs above the title now that we know the contract.
-        app.insertBefore(
-            breadcrumbs(
-                { label: "My Contracts", hash: "contracts" },
-                { label: cluster.contract_number, hash: `contracts/${cn}/projects` },
-                { label: slug, hash: `clusters/${encodeURIComponent(slug)}` },
-                { label: "Users" },
-            ),
-            app.firstChild,
-        );
         const isSunetAdmin = cluster.caller_role === "sunet_admin";
+        const cn = encodeURIComponent(cluster.contract_number || "");
+
+        app.appendChild(bc(
+            { label: "Contracts", hash: "/contracts" },
+            { label: cluster.contract_number, hash: `/contracts/${cn}/projects` },
+            { label: slug, hash: `/clusters/${encodeURIComponent(slug)}` },
+            { label: "Users" },
+        ));
+        app.appendChild(phead({
+            eyebrow: "Cluster · users",
+            title: "Cluster users",
+            lead: "Customer admins manage their team members. SUNET admins can also mint other customer admins.",
+        }));
 
         for (const u of users) {
-            app.appendChild(h("div", { className: "card" },
-                h("div", { className: "card-header" },
+            const canRemove = u.role !== "customer_admin" || isSunetAdmin;
+            const card = h("div", { className: "card" },
+                h("div", { className: "card-head" },
                     h("h3", {}, u.user_sub),
-                    h("span", { className: "badge badge-neutral" }, u.role),
+                    badge(u.role, "neutral"),
                 ),
-                h("p", { className: "meta" }, `Granted by ${u.granted_by_sub} on ${fmtDate(u.created_at)}`),
-                u.role !== "customer_admin" || isSunetAdmin ? h("div", { className: "btn-row" },
-                    h("button", { className: "btn btn-danger", onclick: async () => {
-                        if (confirm(`Remove ${u.user_sub}? All their kubeconfigs on this cluster will also be revoked.`)) {
+                h("div", { className: "meta" }, `Granted by ${u.granted_by_sub} on ${fmtDay(u.created_at)}`),
+            );
+            if (canRemove) {
+                card.appendChild(h("div", { className: "btn-row" },
+                    h("button", { className: "btn danger tiny",
+                        onclick: async () => {
+                            if (!confirm(`Remove ${u.user_sub}? All their kubeconfigs on this cluster will also be revoked.`)) return;
                             try {
                                 await api(`/api/clusters/${slug}/users/${encodeURIComponent(u.user_sub)}`, { method: "DELETE" });
                                 renderClusterUsers(slug);
                             } catch (err) { showAlert(err.message); }
-                        }
-                    }}, "Remove"),
-                ) : null,
-            ));
+                        }}, "Remove"),
+                ));
+            }
+            app.appendChild(card);
         }
 
-        // Add user form
-        const form = h("form", { className: "form-card", style: "margin-top:16px", onsubmit: async (e) => {
-            e.preventDefault();
-            const user_sub = e.target.querySelector('[name="user_sub"]').value.trim();
-            const role = e.target.querySelector('[name="role"]').value;
-            try {
-                await api(`/api/clusters/${slug}/users`, { method: "POST", body: JSON.stringify({ user_sub, role }) });
-                renderClusterUsers(slug);
-            } catch (err) { showAlert(err.message); }
-        }},
-            h("h3", {}, "Add user"),
-            h("label", {}, "OIDC subject"),
-            h("input", { name: "user_sub", required: "true", placeholder: "user@idp" }),
-            h("label", {}, "Role"),
-            h("select", { name: "role" },
-                h("option", { value: "user" }, "user"),
-                isSunetAdmin ? h("option", { value: "customer_admin" }, "customer_admin (SUNET admin only)") : null,
-            ),
-            h("div", { className: "btn-row" },
-                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Grant access"),
+        app.appendChild(slbl("Add user"));
+        const form = h("form", { className: "card",
+            onsubmit: async (e) => {
+                e.preventDefault();
+                const user_sub = e.target.querySelector('[name="user_sub"]').value.trim();
+                const role = e.target.querySelector('[name="role"]').value;
+                try {
+                    await api(`/api/clusters/${slug}/users`, { method: "POST", body: JSON.stringify({ user_sub, role }) });
+                    renderClusterUsers(slug);
+                } catch (err) { showAlert(err.message); }
+            }},
+            h("div", { className: "meta" },
+                h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "OIDC subject"),
+                h("input", { name: "user_sub", required: true, placeholder: "user@idp",
+                    style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Role"),
+                h("select", { name: "role",
+                    style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)" },
+                    h("option", { value: "user" }, "user"),
+                    isSunetAdmin ? h("option", { value: "customer_admin" }, "customer_admin (SUNET admin only)") : null,
+                ),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Grant access"),
+                ),
             ),
         );
         app.appendChild(form);
     } catch (e) { showAlert(e.message); }
 }
 
-// ========== ADMIN: CLUSTERS ==========
+// ========== Admin landing + clusters + cluster requests + setup guide ==========
+
+function renderAdmin() {
+    clear(app); app.className = "page";
+    app.appendChild(bc({ label: "Admin" }));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Admin",
+        lead: "SUNET-only management surfaces.",
+    }));
+    const tile = (href, title, desc) => h("a", { className: "card link", href },
+        h("div", { className: "card-head" }, h("h3", {}, title)),
+        h("div", { className: "meta" }, desc),
+    );
+    app.appendChild(tile("#/admin/customers", "Customers & Contracts",
+        "Create customer organisations, contracts, and grant user access to contracts."));
+    app.appendChild(tile("#/admin/clusters", "Tenant Clusters",
+        "Register Kubernetes clusters, mark as provisioned, manage admin access. Includes the bootstrap setup guide."));
+    app.appendChild(tile("#/admin/cluster-requests", "Cluster Change Requests",
+        "Review and apply customer-admin requests for addons, resizes, and backup enablement."));
+    app.appendChild(tile("#/admin/billing", "Billing Jobs",
+        "All scheduled billing exports across the platform — read-only view with manual-run support."));
+    app.appendChild(tile("#/admin/pricing", "Pricing",
+        "Per-resource unit prices, per-contract overrides, and rebates. Includes synthetic cluster fees."));
+    app.appendChild(tile("#/admin/pricing/docs", "Pricing Docs",
+        "Reference: how unit prices and conversion factors map to billed line items."));
+}
 
 async function renderAdminClusters() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Clusters" }));
-    app.appendChild(h("h2", {}, "All Tenant Clusters"));
-    app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:16px" },
-        h("a", { href: "#/admin/clusters/new", className: "btn btn-primary btn-small", style: "text-decoration:none" }, "+ New Cluster"),
-        h("a", { href: "#/admin/clusters/help", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Setup guide"),
-    ));
+    clear(app); app.className = "page";
+    app.appendChild(bc({ label: "Admin", hash: "/admin" }, { label: "Clusters" }));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Tenant clusters",
+        lead: "All registered tenant clusters across customers.",
+        actions: [
+            h("a", { className: "btn primary sm", href: "#/admin/clusters/new" }, svgPlus(), "New cluster"),
+            h("a", { className: "btn ghost sm", href: "#/admin/clusters/help" }, "Setup guide"),
+        ],
+    }));
     try {
         const clusters = await api("/api/admin/clusters");
+        app.appendChild(slbl("Clusters", clusters.length));
         if (!clusters.length) {
-            app.appendChild(h("p", { className: "empty" }, "No clusters yet."));
+            app.appendChild(emptyState("No clusters yet."));
             return;
         }
         for (const c of clusters) {
-            app.appendChild(
-                h("a", { href: `#/admin/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, c.name),
-                        c.provisioned_at
-                            ? h("span", { className: "badge badge-ready" }, "provisioned")
-                            : h("span", { className: "badge badge-pending" }, "pending"),
-                    ),
-                    h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers · contract ${c.contract_number}`),
-                    h("p", { className: "meta" }, `${c.api_url}`),
-                )
-            );
+            app.appendChild(h("a", { className: "card link", href: `#/admin/clusters/${encodeURIComponent(c.slug)}` },
+                h("div", { className: "card-head" },
+                    h("h3", {}, c.name),
+                    c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+                ),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers · contract ${c.contract_number}`),
+                h("div", { className: "meta mono" }, c.api_url),
+            ));
         }
     } catch (e) { showAlert(e.message); }
 }
 
 async function renderAdminCreateCluster() {
-    clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "Admin" },
-        { label: "Clusters", hash: "admin/clusters" },
+    clear(app); app.className = "page narrow-form";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
         { label: "New" },
     ));
-    app.appendChild(h("h2", {}, "Register Tenant Cluster"));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Register tenant cluster",
+        lead: "After kubespray finishes, register the cluster here so the portal can mediate kubeconfig issuance and billing.",
+    }));
 
     let contracts = [];
     let customersById = {};
@@ -1778,88 +2023,206 @@ async function renderAdminCreateCluster() {
     } catch (e) { showAlert(e.message); return; }
 
     if (!contracts.length) {
-        app.appendChild(h("p", { className: "empty" }, "No contracts exist yet. Create a customer + contract first under Admin → Customers."));
-        app.appendChild(h("a", { href: "#/admin", className: "btn btn-secondary btn-small", style: "display:inline-block;margin-top:12px;text-decoration:none" }, "Go to Customers"));
+        app.appendChild(emptyState("No contracts exist yet. Create a customer + contract first under Admin → Customers."));
+        app.appendChild(h("div", { className: "btn-row" },
+            h("a", { className: "btn ghost sm", href: "#/admin/customers" }, "Go to Customers"),
+        ));
         return;
     }
 
-    const contractOptions = [
-        h("option", { value: "" }, "— select contract —"),
-        ...contracts.map(c => {
-            const customer = customersById[c.customer_id];
-            const label = customer
-                ? `${c.contract_number} — ${customer.name} (${customer.domain})`
-                : c.contract_number;
-            return h("option", { value: c.contract_number }, label);
-        }),
-    ];
+    const inputCss = "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)";
+    const labelCss = "display:block;margin-top:14px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px";
 
-    const form = h("form", { className: "form-card", onsubmit: async (e) => {
-        e.preventDefault();
-        const data = Object.fromEntries(new FormData(e.target).entries());
-        data.worker_groups = parseInt(data.worker_groups, 10) || 1;
-        try {
-            const created = await api("/api/admin/clusters", {
-                method: "POST", body: JSON.stringify(data),
-            });
-            navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
-        } catch (err) { showAlert(err.message); }
-    }},
-        h("label", {}, "Contract"),
-        h("select", { name: "contract_number", required: "true" }, ...contractOptions),
-        h("label", {}, "Display name"),
-        h("input", { name: "name", required: "true", placeholder: "Acme production cluster" }),
-        h("label", {}, "Slug (used in OpenBao mount path & cert O)"),
-        h("input", { name: "slug", required: "true", pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "64", placeholder: "acme-prod" }),
-        h("label", {}, "API URL"),
-        h("input", { name: "api_url", required: "true", placeholder: "https://k8s.acme.example.org:6443" }),
-        h("label", {}, "CA bundle (PEM)"),
-        h("p", { className: "meta", style: "margin-top:-4px;margin-bottom:4px" },
-            "Kubernetes CA from the tenant cluster. On a control-plane node: ",
-            h("code", {}, "cat /etc/kubernetes/pki/ca.crt"),
-            ". Or from an admin kubeconfig: ",
-            h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"),
-            "."),
-        h("textarea", { name: "ca_bundle", required: "true", placeholder: "-----BEGIN CERTIFICATE-----\n...", style: "min-height:120px;font-family:monospace" }),
-        h("p", { className: "meta", style: "margin-top:-4px" }, "OpenBao mount will be derived as kubernetes/<slug>."),
-        h("label", {}, "OpenBao role"),
-        h("input", { name: "openbao_role", value: "argocd-rbac-manager" }),
-        h("label", {}, "ArgoCD Role name (in argocd ns)"),
-        h("input", { name: "argocd_role_name", value: "argocd-tenant" }),
-        h("label", {}, "ArgoCD namespace"),
-        h("input", { name: "argocd_namespace", value: "argocd" }),
-        h("label", {}, "Worker groups (3 workers per group)"),
-        h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: "true" }),
+    const form = h("form", { className: "card",
+        onsubmit: async (e) => {
+            e.preventDefault();
+            const data = Object.fromEntries(new FormData(e.target).entries());
+            data.worker_groups = parseInt(data.worker_groups, 10) || 1;
+            try {
+                const created = await api("/api/admin/clusters", {
+                    method: "POST", body: JSON.stringify(data),
+                });
+                navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
+            } catch (err) { showAlert(err.message); }
+        }},
+        h("label", { style: labelCss }, "Contract"),
+        h("select", { name: "contract_number", required: true, style: inputCss },
+            h("option", { value: "" }, "— select contract —"),
+            ...contracts.map(c => {
+                const cust = customersById[c.customer_id];
+                const lbl = cust ? `${c.contract_number} — ${cust.name} (${cust.domain})` : c.contract_number;
+                return h("option", { value: c.contract_number }, lbl);
+            }),
+        ),
+        h("label", { style: labelCss }, "Display name"),
+        h("input", { name: "name", required: true, placeholder: "Acme production cluster", style: inputCss }),
+        h("label", { style: labelCss }, "Slug (used in OpenBao mount path & cert O)"),
+        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "64", placeholder: "acme-prod", style: inputCss }),
+        h("label", { style: labelCss }, "API URL"),
+        h("input", { name: "api_url", required: true, placeholder: "https://k8s.acme.example.org:6443", style: inputCss }),
+        h("label", { style: labelCss }, "CA bundle (PEM)"),
+        h("div", { className: "meta", style: "margin-top:-2px" },
+            "On a control-plane node: ", h("code", {}, "cat /etc/kubernetes/pki/ca.crt"),
+            ". Or from an admin kubeconfig: ", h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"), "."),
+        h("textarea", { name: "ca_bundle", required: true, placeholder: "-----BEGIN CERTIFICATE-----\n...",
+            style: inputCss + ";min-height:130px;font-family:var(--mono);font-size:12px" }),
+        h("div", { className: "meta", style: "margin-top:6px" },
+            "OpenBao mount will be derived as ", h("code", {}, "kubernetes/<slug>"), "."),
+        h("label", { style: labelCss }, "OpenBao role"),
+        h("input", { name: "openbao_role", value: "argocd-rbac-manager", style: inputCss }),
+        h("label", { style: labelCss }, "ArgoCD Role name (in argocd ns)"),
+        h("input", { name: "argocd_role_name", value: "argocd-tenant", style: inputCss }),
+        h("label", { style: labelCss }, "ArgoCD namespace"),
+        h("input", { name: "argocd_namespace", value: "argocd", style: inputCss }),
+        h("label", { style: labelCss }, "Worker groups (3 workers per group)"),
+        h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: true, style: inputCss }),
         h("div", { className: "btn-row" },
-            h("a", { href: "#/admin/clusters", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
-            h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Create Cluster"),
+            h("a", { className: "btn ghost sm", href: "#/admin/clusters" }, "Cancel"),
+            h("button", { type: "submit", className: "btn primary sm" }, "Create cluster"),
         ),
     );
     app.appendChild(form);
 }
 
+async function renderAdminClusterDetail(slug) {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
+        { label: slug },
+    ));
+    try {
+        const c = await api(`/api/admin/clusters/${slug}`);
+        app.appendChild(phead({
+            eyebrow: `Cluster · ${c.size_label}`,
+            title: c.name,
+            lead: c.provisioned_at ? "Provisioned and live." : "Not yet provisioned.",
+            actions: [
+                !c.provisioned_at ? h("button", { className: "btn primary sm",
+                    onclick: async () => {
+                        if (!confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) return;
+                        try {
+                            await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
+                            renderAdminClusterDetail(slug);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Mark provisioned") : null,
+                h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
+                h("button", { className: "btn danger sm",
+                    onclick: async () => {
+                        if (!confirm(`Delete cluster ${c.name}? This deletes the management/backup OpenStack projects and revokes all credentials. Cannot be undone.`)) return;
+                        try {
+                            await api(`/api/admin/clusters/${slug}`, { method: "DELETE" });
+                            navigate("/admin/clusters");
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Delete cluster"),
+            ].filter(Boolean),
+        }));
+
+        app.appendChild(h("div", { className: "slbl first" }, "Cluster"));
+        app.appendChild(kv(
+            kvRowMono("Slug", c.slug),
+            kvRow("Size", `${c.size_label} (${c.total_servers} servers)`),
+            kvRowMono("API", c.api_url),
+            kvRow("Contract", c.contract_number),
+            kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
+            kvRow("Management project", c.management_project_resource_name || "—"),
+            kvRow("Backup project", c.backup_project_resource_name || "—"),
+        ));
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminClusterRequests() {
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Cluster requests" },
+    ));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Pending cluster requests",
+        lead: "Review and apply customer-admin requests across clusters. Apply triggers state changes (addon enable, resize bump, backup project create) and the next billing run reflects them.",
+    }));
+    try {
+        const pending = await api("/api/admin/cluster-requests?status=pending");
+        app.appendChild(slbl("Pending", pending.length));
+        if (!pending.length) {
+            app.appendChild(emptyState("No pending requests."));
+        }
+        for (const r of pending) {
+            const card = h("div", { className: "card" },
+                h("div", { className: "card-head" },
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("div", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDay(r.requested_at)}`),
+                h("textarea", { name: `note-${r.id}`, placeholder: "Optional note",
+                    style: "width:100%;height:60px;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                h("div", { className: "btn-row" },
+                    h("button", { className: "btn primary sm",
+                        onclick: async () => {
+                            const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                            try {
+                                await api(`/api/admin/cluster-requests/${r.id}/apply`, {
+                                    method: "POST", body: JSON.stringify({ note: note || null }),
+                                });
+                                renderAdminClusterRequests();
+                            } catch (err) { showAlert(err.message); }
+                        }}, "Apply"),
+                    h("button", { className: "btn danger sm",
+                        onclick: async () => {
+                            const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                            try {
+                                await api(`/api/admin/cluster-requests/${r.id}/deny`, {
+                                    method: "POST", body: JSON.stringify({ note: note || null }),
+                                });
+                                renderAdminClusterRequests();
+                            } catch (err) { showAlert(err.message); }
+                        }}, "Deny"),
+                ),
+            );
+            app.appendChild(card);
+        }
+
+        const all = await api("/api/admin/cluster-requests");
+        const recent = all.filter(x => x.status !== "pending").slice(0, 20);
+        app.appendChild(slbl("Recent applied/denied", recent.length));
+        for (const r of recent) {
+            app.appendChild(h("div", { className: "card" },
+                h("div", { className: "card-head" },
+                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("div", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub} on ${fmtDay(r.applied_at)}`),
+                r.note ? h("div", { className: "meta" }, `Note: ${r.note}`) : null,
+            ));
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
 function renderClusterSetupHelp() {
-    clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "Admin" },
-        { label: "Clusters", hash: "admin/clusters" },
+    clear(app); app.className = "page";
+    app.appendChild(bc(
+        { label: "Admin", hash: "/admin" },
+        { label: "Clusters", hash: "/admin/clusters" },
         { label: "Setup guide" },
     ));
-    app.appendChild(h("h2", {}, "Tenant Cluster Setup Guide"));
-    app.appendChild(h("p", { className: "page-desc" },
-        "Walks through every manual step needed to onboard a fresh tenant cluster. Run prerequisite steps once for the platform, then the per-cluster steps for each cluster you onboard."));
+    app.appendChild(phead({
+        eyebrow: "Operator",
+        title: "Tenant cluster setup guide",
+        lead: "Walks through every manual step needed to onboard a fresh tenant cluster. Run prerequisite steps once for the platform, then the per-cluster steps for each cluster you onboard.",
+    }));
 
     const codeBlock = (txt) => h("pre", { className: "help-code" }, h("code", {}, txt));
-    const section = (title) => h("h3", { style: "margin-top:24px;margin-bottom:8px" }, title);
+    const sect = (text) => h("div", { className: "slbl" }, text);
+    const sub = (text) => h("h4", { style: "margin-top:18px;margin-bottom:6px;font-family:var(--mono);font-size:12px;text-transform:uppercase;letter-spacing:1px" }, text);
 
-    // ---- Platform prerequisites ----
-    app.appendChild(section("Prerequisites (one-time, platform-wide)"));
-    app.appendChild(h("p", {},
+    app.appendChild(sect("Prerequisites (one-time, platform-wide)"));
+    app.appendChild(h("p", { className: "hint" },
         "Done once on the platform side. Skip if these are already in place from a previous cluster onboarding."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "1. OpenBao Kubernetes auth method"));
+    app.appendChild(sub("1. OpenBao Kubernetes auth method"));
     app.appendChild(h("p", {},
-        "If `auth/kubernetes/` is not yet enabled in OpenBao, enable it and point it at the platform K8s API:"));
+        "If ", h("code", {}, "auth/kubernetes/"), " is not yet enabled in OpenBao, enable it and point it at the platform K8s API:"));
     app.appendChild(codeBlock(
         "bao auth enable kubernetes\n" +
         "bao write auth/kubernetes/config \\\n" +
@@ -1867,9 +2230,9 @@ function renderClusterSetupHelp() {
         "    kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
     ));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "2. Portal Vault policy + role"));
+    app.appendChild(sub("2. Portal Vault policy + role"));
     app.appendChild(h("p", {},
-        "Allows the portal pod to read short-lived ephemeral SA tokens from any per-tenant secrets engine."));
+        "Allows the portal pod to mint short-lived ephemeral SA tokens from any per-tenant secrets engine."));
     app.appendChild(codeBlock(
         "cat > /tmp/customer-portal.hcl <<'EOF'\n" +
         "path \"kubernetes/+/creds/argocd-rbac-manager\" {\n" +
@@ -1883,43 +2246,34 @@ function renderClusterSetupHelp() {
         "    policies=customer-portal \\\n" +
         "    ttl=1h"
     ));
-    app.appendChild(h("p", { className: "meta" },
+    app.appendChild(h("p", { className: "hint" },
         "The capability is ", h("code", {}, "update"),
         " (not ", h("code", {}, "read"),
-        "): the kubernetes secrets engine generates credentials via POST,",
-        " which Vault/OpenBao maps to ",
-        h("code", {}, "update"),
-        " — using ", h("code", {}, "read"),
+        "): the kubernetes secrets engine generates credentials via POST, which Vault/OpenBao maps to ",
+        h("code", {}, "update"), " — using ", h("code", {}, "read"),
         " yields a 403 permission-denied at credential mint time."));
-    app.appendChild(h("p", { className: "meta" },
-        "If the portal runs under a different SA name or namespace, adjust the bound_* fields. ttl=1h is how long the portal's Vault session lives between re-logins."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "3. Portal records"));
+    app.appendChild(sub("3. Portal records"));
     app.appendChild(h("p", {},
         "The cluster will be tied to a contract under a customer. Create both first under ",
-        h("a", { href: "#/admin" }, "Admin → Customers"),
+        h("a", { className: "link", href: "#/admin/customers" }, "Admin → Customers"),
         " if they don't exist yet."));
 
-    // ---- Per-cluster ----
-    app.appendChild(section("Per-cluster bootstrap"));
-    app.appendChild(h("p", {},
-        "Run these every time you onboard a new tenant cluster. We use ",
-        h("code", {}, "<slug>"),
-        " as the cluster identifier — it must match the slug you'll enter in the Register Tenant Cluster form."));
+    app.appendChild(sect("Per-cluster bootstrap"));
+    app.appendChild(h("p", { className: "hint" },
+        "Run these every time you onboard a new tenant cluster. ",
+        h("code", {}, "<slug>"), " must match the slug entered in the Register Tenant Cluster form."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "1. Provision the cluster"));
+    app.appendChild(sub("1. Provision the cluster"));
     app.appendChild(h("p", {},
         "Spin up the K8s cluster with kubespray and install ArgoCD into the ",
-        h("code", {}, "argocd"),
-        " namespace as usual. This guide picks up after that."));
+        h("code", {}, "argocd"), " namespace as usual. This guide picks up after that."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "2. Apply RBAC inside the tenant cluster"));
+    app.appendChild(sub("2. Apply RBAC inside the tenant cluster"));
     app.appendChild(h("p", {},
         "Creates the Role customer kubeconfigs are bound to (",
-        h("code", {}, "argocd-tenant"),
-        " in the ",
-        h("code", {}, "argocd"),
-        " namespace), and the SA + ClusterRole that OpenBao authenticates as to mint per-issuance RoleBindings and CSRs."));
+        h("code", {}, "argocd-tenant"), " in the ",
+        h("code", {}, "argocd"), " namespace), and the SA + ClusterRole that OpenBao authenticates as to mint per-issuance RoleBindings and CSRs."));
     app.appendChild(codeBlock(
         "cat > /tmp/tenant-bootstrap.yaml <<'EOF'\n" +
         "---\n" +
@@ -2001,11 +2355,7 @@ function renderClusterSetupHelp() {
         "kubectl --context <tenant-cluster> apply -f /tmp/tenant-bootstrap.yaml"
     ));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "3. Configure OpenBao secrets engine for the cluster"));
-    app.appendChild(h("p", {},
-        "Mount a per-tenant ",
-        h("code", {}, "kubernetes"),
-        " secrets engine and tell it how to authenticate to the tenant cluster's API."));
+    app.appendChild(sub("3. Configure OpenBao secrets engine for the cluster"));
     app.appendChild(codeBlock(
         "JWT=$(kubectl --context <tenant-cluster> -n kube-system get secret openbao-rbac-manager-token \\\n" +
         "        -o jsonpath='{.data.token}' | base64 -d)\n" +
@@ -2024,174 +2374,30 @@ function renderClusterSetupHelp() {
         "    token_default_ttl=600s \\\n" +
         "    token_max_ttl=600s"
     ));
-    app.appendChild(h("p", { className: "meta" },
-        "The path must be ",
-        h("code", {}, "kubernetes/<slug>"),
-        " — the portal derives the mount path from the cluster slug. ",
-        "The role's ", h("code", {}, "allowed_kubernetes_namespaces"),
-        " is a single entry (",
-        h("code", {}, "kube-system"),
-        ") because that's where the ",
-        h("code", {}, "openbao-rbac-manager"),
-        " SA lives. ",
-        "TTL is set to 600s (10 min) because that's K8s's minimum for the ",
-        "TokenRequest API; the portal uses the token only for the duration of a single ",
-        "issuance call (a few seconds), so the actual exposure window is brief regardless."));
+    app.appendChild(h("p", { className: "hint" },
+        "Single ", h("code", {}, "allowed_kubernetes_namespaces"),
+        " (only ", h("code", {}, "kube-system"),
+        ") because that's where ", h("code", {}, "openbao-rbac-manager"),
+        " lives. TTL 600s is the K8s TokenRequest minimum; the portal uses the token only briefly per issuance."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "4. Register the cluster in the portal"));
+    app.appendChild(sub("4. Register the cluster in the portal"));
     app.appendChild(h("p", {},
-        "Open ",
-        h("a", { href: "#/admin/clusters/new" }, "Admin → Clusters → + New Cluster"),
-        ". Fill in the form — slug must match the ",
-        h("code", {}, "<slug>"),
-        " you used in step 3. The CA bundle field accepts the same PEM you passed to ",
-        h("code", {}, "kubernetes_ca_cert"),
-        " above; you can re-extract it with ",
-        h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"),
-        "."));
+        "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
+        ". Slug must match ", h("code", {}, "<slug>"), " from step 3."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "5. Mark the cluster provisioned"));
+    app.appendChild(sub("5. Mark the cluster provisioned"));
     app.appendChild(h("p", {},
-        "On the cluster's admin detail page, click ",
-        h("strong", {}, "Mark provisioned"),
-        ". This sets ",
-        h("code", {}, "provisioned_at"),
-        " and unlocks: (a) credential issuance for users; (b) the initial setup-fee billing line in the next billing run."));
+        "Click ", h("strong", {}, "Mark provisioned"), " on the cluster's admin detail page. Sets ",
+        h("code", {}, "provisioned_at"), " and unlocks credential issuance for users + initial setup-fee billing."));
 
-    app.appendChild(h("h4", { style: "margin-top:16px" }, "6. Grant the first customer admin"));
+    app.appendChild(sub("6. Grant the first customer admin"));
     app.appendChild(h("p", {},
-        "Open the cluster's user-facing detail page (",
-        h("a", { href: "#/clusters" }, "My Clusters"),
-        " — SUNET admins see all), click ",
+        "Open the cluster's user-facing detail page, click ",
         h("strong", {}, "Manage users"),
-        ", and add at least one user with role ",
-        h("code", {}, "customer_admin"),
-        ". They can then add their own team members."));
-
-    // ---- Verification ----
-    app.appendChild(section("Verification"));
-    app.appendChild(h("p", {},
-        "Once the customer admin has issued their first kubeconfig:"));
-    app.appendChild(h("ol", { style: "margin-left:24px" },
-        h("li", {}, h("p", {}, "On the platform: ",
-            h("code", {}, "kubectl --context <tenant-cluster> get csr"),
-            " shows an Approved CSR signed by the cluster CA.")),
-        h("li", {}, h("p", {}, "And: ",
-            h("code", {}, "kubectl --context <tenant-cluster> get rolebindings -n argocd -l sunet.se/oidc-sub=<user-sub>"),
-            " shows one binding per active credential for that user.")),
-        h("li", {}, h("p", {}, "User-side: ",
-            h("code", {}, "KUBECONFIG=./issued.yaml kubectl get applications -n argocd"),
-            " succeeds; ",
-            h("code", {}, "kubectl get pods -n kube-system"),
-            " is forbidden (RBAC scoping confirmed).")),
-    ));
-
-    // ---- Decommissioning ----
-    app.appendChild(section("Decommissioning"));
-    app.appendChild(h("p", {},
-        "To retire a tenant cluster, delete it from the admin clusters list (this also deletes its management/backup OpenStack project CRs and revokes all credentials). Then on the OpenBao side: ",
-        h("code", {}, "bao secrets disable kubernetes/<slug>"),
-        ". The OpenStack project will be torn down by the operator on next reconcile."));
+        ", add a user with role ", h("code", {}, "customer_admin"),
+        ". They can then add their team."));
 }
 
-async function renderAdminClusterDetail(slug) {
-    clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "Admin" },
-        { label: "Clusters", hash: "admin/clusters" },
-        { label: slug },
-    ));
-    try {
-        const c = await api(`/api/admin/clusters/${slug}`);
-        app.appendChild(h("h2", {}, c.name));
-        app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" },
-            h("div", { className: "section-label", style: "margin-top:0" }, "Cluster"),
-            h("p", { className: "meta" }, `Slug: ${c.slug}`),
-            h("p", { className: "meta" }, `Size: ${c.size_label} (${c.total_servers} servers)`),
-            h("p", { className: "meta" }, `API: ${c.api_url}`),
-            h("p", { className: "meta" }, `Contract: ${c.contract_number}`),
-            h("p", { className: "meta" }, `Provisioned: ${c.provisioned_at ? fmtDate(c.provisioned_at) : "(not yet)"}`),
-            h("p", { className: "meta" }, `Management project: ${c.management_project_resource_name || "—"}`),
-            h("p", { className: "meta" }, `Backup project: ${c.backup_project_resource_name || "—"}`),
-        ));
-        app.appendChild(h("div", { className: "btn-row" },
-            !c.provisioned_at ? h("button", { className: "btn btn-primary btn-small", onclick: async () => {
-                if (confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) {
-                    try {
-                        await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
-                        renderAdminClusterDetail(slug);
-                    } catch (err) { showAlert(err.message); }
-                }
-            }}, "Mark provisioned") : null,
-            h("a", { href: `#/clusters/${encodeURIComponent(slug)}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Open as user"),
-            h("button", { className: "btn btn-danger", onclick: async () => {
-                if (confirm(`Delete cluster ${c.name}? This deletes the management/backup OpenStack projects and revokes all credentials. Cannot be undone.`)) {
-                    try {
-                        await api(`/api/admin/clusters/${slug}`, { method: "DELETE" });
-                        navigate("/admin/clusters");
-                    } catch (err) { showAlert(err.message); }
-                }
-            }}, "Delete cluster"),
-        ));
-    } catch (e) { showAlert(e.message); }
-}
-
-async function renderAdminClusterRequests() {
-    clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Cluster Requests" }));
-    app.appendChild(h("h2", {}, "Pending cluster requests"));
-    try {
-        const requests = await api("/api/admin/cluster-requests?status=pending");
-        if (!requests.length) {
-            app.appendChild(h("p", { className: "empty" }, "No pending requests."));
-        }
-        for (const r of requests) {
-            const card = h("div", { className: "card" },
-                h("div", { className: "card-header" },
-                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
-                    statusBadge(r.status),
-                ),
-                h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
-                h("textarea", { name: `note-${r.id}`, placeholder: "Optional note", style: "width:100%;height:60px;margin-top:8px" }),
-                h("div", { className: "btn-row" },
-                    h("button", { className: "btn btn-primary btn-small", onclick: async () => {
-                        const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
-                        try {
-                            await api(`/api/admin/cluster-requests/${r.id}/apply`, {
-                                method: "POST", body: JSON.stringify({ note: note || null }),
-                            });
-                            renderAdminClusterRequests();
-                        } catch (err) { showAlert(err.message); }
-                    }}, "Apply"),
-                    h("button", { className: "btn btn-danger", onclick: async () => {
-                        const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
-                        try {
-                            await api(`/api/admin/cluster-requests/${r.id}/deny`, {
-                                method: "POST", body: JSON.stringify({ note: note || null }),
-                            });
-                            renderAdminClusterRequests();
-                        } catch (err) { showAlert(err.message); }
-                    }}, "Deny"),
-                ),
-            );
-            app.appendChild(card);
-        }
-
-        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Recent applied/denied"));
-        const all = await api("/api/admin/cluster-requests");
-        for (const r of all.filter(x => x.status !== "pending").slice(0, 20)) {
-            app.appendChild(h("div", { className: "card" },
-                h("div", { className: "card-header" },
-                    h("h3", {}, `${formatRequestSummary(r)} — ${r.cluster_slug}`),
-                    statusBadge(r.status),
-                ),
-                h("p", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub} on ${fmtDate(r.applied_at)}`),
-                r.note ? h("p", { className: "meta" }, `Note: ${r.note}`) : null,
-            ));
-        }
-    } catch (e) { showAlert(e.message); }
-}
-
-// --- Init ---
+// ---------- Init ----------
 
 route();
