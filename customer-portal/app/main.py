@@ -1,5 +1,6 @@
 """Customer Portal API — FastAPI application."""
 
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,7 +9,7 @@ from typing import Any
 import git
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.sessions import SessionMiddleware
@@ -145,7 +146,35 @@ async def me(
     )
 
 
-# Serve static frontend — must be last so API routes take precedence
+# Serve static frontend with content-hash cache-busting on the SPA bundle.
+# index.html is rendered once at startup with `?v=<hash>` appended to the
+# `/app.js` and `/style.css` URLs so browsers fetch fresh bundles after a
+# redeploy without users having to hard-reload.
 _static_dir = Path(__file__).parent.parent / "static"
+
+
+def _render_index(static_dir: Path) -> str:
+    index = (static_dir / "index.html").read_text()
+    bundle_parts: list[bytes] = []
+    for asset in ("app.js", "style.css"):
+        path = static_dir / asset
+        if path.is_file():
+            bundle_parts.append(path.read_bytes())
+    digest = hashlib.sha256(b"".join(bundle_parts)).hexdigest()[:12]
+    return (
+        index
+        .replace('href="/style.css"', f'href="/style.css?v={digest}"')
+        .replace('src="/app.js"', f'src="/app.js?v={digest}"')
+    )
+
+
 if _static_dir.is_dir():
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
+    _index_html = _render_index(_static_dir)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        return _index_html
+
+    # Mounted *after* the explicit `/` route so it serves the rest of the
+    # asset paths (`/app.js`, `/style.css`, …) without shadowing index.
+    app.mount("/", StaticFiles(directory=_static_dir, html=False), name="static")
