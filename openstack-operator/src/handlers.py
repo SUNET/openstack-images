@@ -268,11 +268,13 @@ async def _start_notification_listener(transport_url: str) -> None:
             role_bindings = spec.get("roleBindings", [])
             domain = spec.get("domain", "sso-users")
 
+            managed = bool(spec.get("managed", False))
             for binding in role_bindings:
                 if username in binding.get("users", []):
                     try:
                         apply_role_bindings(
-                            client, project_id, group_id, role_bindings, domain
+                            client, project_id, group_id, role_bindings, domain,
+                            managed=managed,
                         )
                         logger.info(
                             "Synced user %s to project %s",
@@ -377,12 +379,18 @@ def create_project(
 
         # 5. Apply role bindings
         role_bindings = spec.get("roleBindings", [])
+        is_managed = bool(spec.get("managed", False))
         if role_bindings:
-            apply_role_bindings(client, project_id, group_id, role_bindings, domain)
+            apply_role_bindings(
+                client, project_id, group_id, role_bindings, domain,
+                managed=is_managed,
+            )
 
-        # 6. Update federation mapping
+        # 6. Update federation mapping (skipped for managed projects — those
+        #    don't propagate users to the project group, so there's no group
+        #    membership to map onto)
         federation_ref = spec.get("federationRef")
-        if federation_ref and role_bindings:
+        if federation_ref and role_bindings and not is_managed:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 _set_patch_condition(patch, "FederationReady", "False", "Configuring", "")
@@ -541,14 +549,17 @@ def update_project(
         # Always apply role bindings and federation to ensure consistency
         # This handles cases where the spec hasn't changed but state needs repair
         role_bindings = spec.get("roleBindings", [])
+        is_managed = bool(spec.get("managed", False))
         if role_bindings:
             apply_role_bindings(
-                client, project_id, group_id, role_bindings, domain
+                client, project_id, group_id, role_bindings, domain,
+                managed=is_managed,
             )
 
-        # Always update federation mapping
+        # Always update federation mapping (managed projects opt out — they
+        # use direct user-role assignments, no project-group propagation)
         federation_ref = spec.get("federationRef")
-        if federation_ref:
+        if federation_ref and not is_managed:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 users = get_users_from_role_bindings(role_bindings)

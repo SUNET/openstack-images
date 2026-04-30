@@ -57,13 +57,21 @@ class StubGitBackend:
             out = [p for p in out if p["contract_number"] == contract_number]
         return out
 
-    def update_project(self, *, resource_name, description=None, users=None):
+    def update_project(
+        self, *, resource_name, description=None, users=None, role_bindings=None
+    ):
         p = self.projects.get(resource_name)
         if not p:
             raise ValueError(f"Project '{resource_name}' not found")
         if description is not None:
             p["description"] = description
-        if users is not None:
+        if role_bindings is not None:
+            p["role_bindings"] = role_bindings
+            extracted: list[str] = []
+            for rb in role_bindings:
+                extracted.extend(rb.get("users", []))
+            p["users"] = extracted
+        elif users is not None:
             p["users"] = list(users)
         return p
 
@@ -513,6 +521,52 @@ async def test_invalid_resize_target_rejected_at_request_time(client, session):
     })
     assert r.status_code == 400
     assert "must be > current" in r.json()["detail"]
+
+
+async def test_customer_admin_grant_syncs_managed_project_readers(client, session, git_backend):
+    """Granting customer_admin must rewrite the management project's
+    roleBindings so the operator can assign Keystone reader to that user."""
+    _, contract = await seed_customer_contract(session)
+    _login_as("admin@test")
+    _require_admin_for({"admin@test"})
+    _is_sunet_admin_for({"admin@test"})
+    await session.commit()
+
+    _ = await client.post("/api/admin/clusters", json={
+        "contract_number": "CO-001", "name": "c", "slug": "c1",
+        "api_url": "https://x", "ca_bundle": "X",
+    })
+
+    rn = "c1-acme"
+    # Initially, no customer_admins → roleBindings on the managed project
+    # should be empty/default.
+    assert git_backend.projects[rn]["users"] == []
+
+    # Grant first customer_admin.
+    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    assert git_backend.projects[rn]["role_bindings"] == [
+        {"role": "reader", "users": ["alice@org"], "userDomain": "sso-users"},
+    ]
+
+    # Grant a second customer_admin → both should appear, sorted.
+    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "bob@org", "role": "customer_admin"})
+    assert git_backend.projects[rn]["role_bindings"] == [
+        {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
+    ]
+
+    # Grant a *regular* user — managed project should NOT change (regular
+    # users only get K8s argocd access, not OpenStack reader).
+    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "charlie@org", "role": "user"})
+    assert git_backend.projects[rn]["role_bindings"] == [
+        {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
+    ]
+
+    # Revoke a customer_admin → that user disappears from the project.
+    r = await client.delete("/api/clusters/c1/users/alice@org")
+    assert r.status_code == 204
+    assert git_backend.projects[rn]["role_bindings"] == [
+        {"role": "reader", "users": ["bob@org"], "userDomain": "sso-users"},
+    ]
 
 
 async def test_managed_project_blocks_customer_admin_mutation(client, session, git_backend):

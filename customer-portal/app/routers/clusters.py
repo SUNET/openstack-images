@@ -56,6 +56,47 @@ async def _active_addons(cluster_id: int, session: AsyncSession) -> list[str]:
     return list(rows)
 
 
+async def _sync_managed_project_admins(
+    cluster: TenantCluster,
+    session: AsyncSession,
+    git_backend: GitBackend,
+    settings: Settings,
+) -> None:
+    """Rewrite the cluster's management OpenstackProject roleBindings so the
+    full list of current customer_admins gets the Keystone `reader` role.
+
+    Called whenever a customer_admin grant/revoke happens on the cluster, so
+    Horizon visibility tracks portal state. No-op if the cluster has no
+    management project linked yet.
+    """
+    if not cluster.management_project_resource_name:
+        return
+    rows = (
+        await session.execute(
+            select(ClusterAccess.user_sub).where(
+                ClusterAccess.cluster_id == cluster.id,
+                ClusterAccess.role == "customer_admin",
+            )
+        )
+    ).scalars().all()
+    user_subs = sorted(rows)
+    role_bindings = [{
+        "role": "reader",
+        "users": user_subs,
+        "userDomain": settings.default_domain,
+    }]
+    try:
+        git_backend.update_project(
+            resource_name=cluster.management_project_resource_name,
+            role_bindings=role_bindings,
+        )
+    except ValueError:
+        logger.warning(
+            "Managed project %s not found in git; skipping admin sync",
+            cluster.management_project_resource_name,
+        )
+
+
 async def _to_response(
     cluster: TenantCluster,
     *,
@@ -333,6 +374,7 @@ async def list_cluster_users(
 async def grant_cluster_access(
     slug: str,
     req: ClusterAccessRequest,
+    request: Request,
     user: dict[str, Any] = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
@@ -365,6 +407,14 @@ async def grant_cluster_access(
         granted_by_sub=user["sub"],
     )
     session.add(grant)
+    await session.flush()
+
+    # Customer admins also get Keystone reader on the management project.
+    if req.role == "customer_admin":
+        await _sync_managed_project_admins(
+            cluster, session, request.app.state.git_backend, settings
+        )
+
     await session.commit()
     return ClusterAccessResponse.model_validate(grant)
 
@@ -373,6 +423,7 @@ async def grant_cluster_access(
 async def revoke_cluster_access(
     slug: str,
     user_sub: str,
+    request: Request,
     user: dict[str, Any] = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
@@ -413,7 +464,15 @@ async def revoke_cluster_access(
             user_sub,
         )
 
+    was_customer_admin = target.role == "customer_admin"
     await session.delete(target)
+    await session.flush()
+
+    if was_customer_admin:
+        await _sync_managed_project_admins(
+            cluster, session, request.app.state.git_backend, settings
+        )
+
     await session.commit()
 
 

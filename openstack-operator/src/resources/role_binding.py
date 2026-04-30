@@ -14,19 +14,32 @@ def apply_role_bindings(
     group_id: str,
     role_bindings: list[dict[str, Any]],
     project_domain: str,
+    *,
+    managed: bool = False,
 ) -> None:
     """Apply role bindings to a project.
 
-    For now, this focuses on ensuring the project's user group has the
-    correct roles assigned. User management is handled via federation
-    mappings, not direct user-role assignments.
+    **Default (managed=False)** behavior — for self-service customer projects:
+    binding.users are added to the project's federation group, the binding's
+    role is assigned to that group. Federation mapping then admits the user
+    on first SSO login.
+
+    **managed=True** behavior — for SUNET-managed projects (e.g. the OpenStack
+    project that hosts a tenant K8s cluster's VMs/storage): roles are assigned
+    *directly* to each user in binding.users via Keystone, with no project-
+    group indirection. This is right for the read-only customer-admin access
+    pattern: customer admins should see the project in Horizon but not be in
+    the project's working group. Users not yet in Keystone (federated users
+    who have never logged in) are skipped and retried on the next reconcile.
 
     Args:
         client: OpenStack client
         project_id: Project ID
-        group_id: Project's user group ID
+        group_id: Project's user group ID (only used when managed=False)
         role_bindings: List of role binding specifications
         project_domain: Domain of the project
+        managed: Whether this is a SUNET-managed project (changes assignment
+            mode to direct user-role rather than via the project group)
     """
     if not role_bindings:
         logger.debug(f"No role bindings specified for project {project_id}")
@@ -39,20 +52,12 @@ def apply_role_bindings(
             logger.warning(f"Role {role_name} not found, skipping")
             continue
 
-        # Always assign the role to the project's user group
-        # This is required for federated users who are placed in this group
-        # via the federation mapping
-        if group_id:
-            client.assign_role_to_group(role.id, group_id, project_id)
-            logger.info(
-                f"Assigned role {role_name} to project group {group_id} "
-                f"on project {project_id}"
-            )
-
-        # Handle additional explicit group bindings
+        users = binding.get("users", [])
+        user_domain = binding.get("userDomain", project_domain)
         groups = binding.get("groups", [])
         group_domain = binding.get("groupDomain", project_domain)
 
+        # Group bindings are applied identically in both modes.
         for group_name in groups:
             group = client.get_group(group_name, group_domain)
             if group:
@@ -66,13 +71,55 @@ def apply_role_bindings(
                     f"Group {group_name} not found in domain {group_domain}"
                 )
 
-        # Sync users to the project group
-        # Users are identified by their OIDC sub claim (used as username)
-        # This is required for features like application credentials
-        users = binding.get("users", [])
-        user_domain = binding.get("userDomain", project_domain)
-        if group_id:
-            _sync_users_to_group(client, users, user_domain, group_id)
+        if managed:
+            # Direct user-role assignment, no project-group involvement.
+            _sync_user_role_assignments(
+                client, role.id, users, user_domain, project_id
+            )
+        else:
+            # Project-group-based: assign role to project group + sync users in.
+            if group_id:
+                client.assign_role_to_group(role.id, group_id, project_id)
+                logger.info(
+                    f"Assigned role {role_name} to project group {group_id} "
+                    f"on project {project_id}"
+                )
+                _sync_users_to_group(client, users, user_domain, group_id)
+
+
+def _sync_user_role_assignments(
+    client: OpenStackClient,
+    role_id: str,
+    desired_users: list[str],
+    user_domain: str,
+    project_id: str,
+) -> None:
+    """Idempotently sync direct user-role assignments on a project.
+
+    Adds assignments for desired users that don't already have it, removes
+    assignments for users no longer in the desired list. Users that don't
+    yet exist in Keystone (e.g. federated users who haven't logged in) are
+    skipped — they'll be picked up on the next reconcile.
+    """
+    desired_user_ids: set[str] = set()
+    for username in desired_users:
+        user = client.get_user(username, user_domain)
+        if user:
+            desired_user_ids.add(user.id)
+        else:
+            logger.debug(
+                f"User {username} not found in domain {user_domain}, "
+                "will be assigned after first SSO login"
+            )
+
+    current_user_ids = set(
+        client.list_user_role_assignments_on_project(project_id, role_id)
+    )
+
+    for uid in desired_user_ids - current_user_ids:
+        client.assign_role_to_user(role_id, uid, project_id)
+    for uid in current_user_ids - desired_user_ids:
+        client.revoke_role_from_user(role_id, uid, project_id)
 
 
 def _sync_users_to_group(

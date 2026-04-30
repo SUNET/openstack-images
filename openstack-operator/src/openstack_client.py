@@ -384,6 +384,62 @@ class OpenStackClient:
         except ResourceNotFound:
             logger.debug("Role %s not assigned to group %s", role_id, group_id)
 
+    @retry_on_error()
+    def assign_role_to_user(
+        self, role_id: str, user_id: str, project_id: str
+    ) -> None:
+        """Assign a role directly to a user on a project (no group indirection).
+
+        Used for managed projects where customer admins get reader access
+        without being added to the project's federation group.
+        """
+        logger.info(
+            "Assigning role %s to user %s on project %s",
+            role_id, user_id, project_id,
+        )
+        try:
+            self.conn.identity.assign_project_role_to_user(
+                project=project_id, user=user_id, role=role_id,
+            )
+        except ConflictException:
+            logger.debug("Role %s already assigned to user %s", role_id, user_id)
+
+    @retry_on_error()
+    def revoke_role_from_user(
+        self, role_id: str, user_id: str, project_id: str
+    ) -> None:
+        """Revoke a direct user role assignment on a project."""
+        logger.info(
+            "Revoking role %s from user %s on project %s",
+            role_id, user_id, project_id,
+        )
+        try:
+            self.conn.identity.unassign_project_role_from_user(
+                project=project_id, user=user_id, role=role_id,
+            )
+        except ResourceNotFound:
+            logger.debug("Role %s not assigned to user %s", role_id, user_id)
+
+    @retry_on_error()
+    def list_user_role_assignments_on_project(
+        self, project_id: str, role_id: str
+    ) -> list[str]:
+        """Return user IDs that have the given role assigned directly (no group)."""
+        # `role_assignments(scope.project.id=..., role.id=...)` returns assignments
+        # for both users and groups; filter to user-scoped only by inspecting the
+        # assignment's `user` field.
+        out: list[str] = []
+        for a in self.conn.identity.role_assignments(
+            scope_project_id=project_id, role_id=role_id
+        ):
+            user = getattr(a, "user", None)
+            if user:
+                # `user` is a dict like {"id": "..."}.
+                uid = user.get("id") if isinstance(user, dict) else getattr(user, "id", None)
+                if uid:
+                    out.append(uid)
+        return out
+
     # -------------------------------------------------------------------------
     # Quota operations
     # -------------------------------------------------------------------------

@@ -243,8 +243,17 @@ class GitBackend:
         resource_name: str,
         description: str | None = None,
         users: list[str] | None = None,
+        *,
+        role_bindings: list[dict] | None = None,
     ) -> dict:
         """Update an existing project YAML, commit, and push.
+
+        - `users` keeps backward compatibility: replaces roleBindings with a
+          single `member` binding for those users (the self-service shape).
+        - `role_bindings` (kwarg) takes a fully-formed list and replaces the
+          existing roleBindings verbatim — used by the cluster admin sync
+          path to set `{role: reader, users: [...customer admins...]}` on
+          managed projects.
 
         Returns the updated project dict.
         """
@@ -263,7 +272,10 @@ class GitBackend:
                 spec["description"] = description
                 changed.append("description")
 
-            if users is not None:
+            if role_bindings is not None:
+                spec["roleBindings"] = role_bindings
+                changed.append("roleBindings")
+            elif users is not None:
                 spec["roleBindings"] = [
                     {
                         "role": "member",
