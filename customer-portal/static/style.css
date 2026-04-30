@@ -242,6 +242,7 @@ h3 { font-size: 1rem; }
 .badge-pending { background: #fffbeb; color: var(--warning); }
 .badge-error { background: #fef2f2; color: var(--error); }
 .badge-neutral { background: var(--bg); color: var(--text-muted); }
+.badge-managed { background: #eef2ff; color: #4338ca; }
 
 /* Meta text */
 

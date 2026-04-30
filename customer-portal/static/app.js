@@ -42,6 +42,14 @@ async function route() {
     if (parts[0] === "contracts" || !path)
         return renderContracts();
 
+    // Cluster routes (member-facing)
+    if (parts[0] === "clusters" && parts[1] && parts[2] === "users")
+        return renderClusterUsers(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters" && parts[1])
+        return renderClusterDetail(decodeURIComponent(parts[1]));
+    if (parts[0] === "clusters")
+        return renderClusters();
+
     // Billing routes
     if (parts[0] === "billing" && parts[1] === "new")
         return renderCreateBillingJob();
@@ -59,6 +67,14 @@ async function route() {
         return renderAdminBillingJobs();
     if (parts[0] === "admin" && parts[1] === "pricing")
         return renderAdminPricing();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2] === "new")
+        return renderAdminCreateCluster();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2])
+        return renderAdminClusterDetail(decodeURIComponent(parts[2]));
+    if (parts[0] === "admin" && parts[1] === "clusters")
+        return renderAdminClusters();
+    if (parts[0] === "admin" && parts[1] === "cluster-requests")
+        return renderAdminClusterRequests();
     if (parts[0] === "admin" && parts[1] === "contracts" && parts[2] === "edit" && parts[3])
         return renderAdminEditContract(parts[3]);
     if (parts[0] === "admin" && parts[1] === "contracts" && parts[2])
@@ -141,9 +157,12 @@ function renderNav() {
     clear(nav);
     if (!currentUser) return;
     nav.appendChild(h("a", { href: "#/contracts" }, "My Contracts"));
+    nav.appendChild(h("a", { href: "#/clusters" }, "My Clusters"));
     nav.appendChild(h("a", { href: "#/billing" }, "Billing"));
     if (currentUser.is_admin) {
         nav.appendChild(h("a", { href: "#/admin" }, "Admin"));
+        nav.appendChild(h("a", { href: "#/admin/clusters" }, "Clusters"));
+        nav.appendChild(h("a", { href: "#/admin/cluster-requests" }, "Requests"));
         nav.appendChild(h("a", { href: "#/admin/pricing" }, "Pricing"));
     }
     nav.appendChild(h("a", { href: "#", className: "nav-user" }, currentUser.sub));
@@ -216,14 +235,20 @@ async function renderContractProjects(contractNumber) {
         }
         for (const p of projects) {
             const rn = encodeURIComponent(p.resource_name);
+            const headerChildren = [
+                h("h3", {}, p.name),
+                phaseBadge(p.phase),
+            ];
+            if (p.managed) {
+                headerChildren.push(
+                    h("span", { className: "badge badge-managed", title: "Managed by SUNET" }, "managed-by-sunet"),
+                );
+            }
             app.appendChild(
                 h("a", { href: `#/contracts/${cn}/projects/${rn}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" },
-                        h("h3", {}, p.name),
-                        phaseBadge(p.phase),
-                    ),
+                    h("div", { className: "card-header" }, ...headerChildren),
                     p.description ? h("p", { className: "meta" }, p.description) : null,
-                    h("p", { className: "meta" }, "Users: " + p.users.join(", ")),
+                    h("p", { className: "meta" }, "Users: " + (p.users.length ? p.users.join(", ") : "(SUNET-managed)")),
                 )
             );
         }
@@ -243,7 +268,17 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
     try {
         const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
-        app.appendChild(h("h2", {}, p.name));
+        const titleRow = [h("h2", {}, p.name)];
+        if (p.managed) {
+            titleRow.push(
+                h("span", {
+                    className: "badge badge-managed",
+                    style: "margin-left:8px;vertical-align:middle",
+                    title: "Managed by SUNET — read-only for customer admins"
+                }, "managed-by-sunet")
+            );
+        }
+        app.appendChild(h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" }, ...titleRow));
         app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" },
             h("div", { className: "card-header" },
                 h("div", { className: "section-label", style: "margin:0" }, "Status"),
@@ -256,22 +291,29 @@ async function renderProjectDetail(contractNumber, resourceName) {
             h("p", {}, p.description || "(none)"),
             h("div", { className: "section-label" }, "Users"),
             ...p.users.map(u => h("p", {}, u)),
-            p.users.length === 0 ? h("p", { className: "meta" }, "(none)") : null,
+            p.users.length === 0 ? h("p", { className: "meta" }, p.managed ? "(SUNET-managed)" : "(none)") : null,
             h("div", { className: "section-label" }, "Contract"),
             h("p", {}, p.contract_number),
         ));
 
-        app.appendChild(h("div", { className: "btn-row", style: "margin-top:16px" },
-            h("a", { href: `#/contracts/${cn}/projects/edit/${rn}`, className: "btn btn-primary btn-small", style: "text-decoration:none" }, "Edit Project"),
-            h("button", { className: "btn btn-danger", onclick: async () => {
-                if (confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources. This cannot be undone.`)) {
-                    try {
-                        await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
-                        navigate(`/contracts/${cn}/projects`);
-                    } catch (err) { showAlert(err.message); }
-                }
-            }}, "Delete Project"),
-        ));
+        // Customer admins on managed projects can view but not edit/delete.
+        const canMutate = !p.managed || (currentUser && currentUser.is_admin);
+        if (canMutate) {
+            app.appendChild(h("div", { className: "btn-row", style: "margin-top:16px" },
+                h("a", { href: `#/contracts/${cn}/projects/edit/${rn}`, className: "btn btn-primary btn-small", style: "text-decoration:none" }, "Edit Project"),
+                h("button", { className: "btn btn-danger", onclick: async () => {
+                    if (confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources. This cannot be undone.`)) {
+                        try {
+                            await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
+                            navigate(`/contracts/${cn}/projects`);
+                        } catch (err) { showAlert(err.message); }
+                    }
+                }}, "Delete Project"),
+            ));
+        } else {
+            app.appendChild(h("p", { className: "meta", style: "margin-top:16px" },
+                "This project is SUNET-managed and read-only. Use the cluster page to request changes."));
+        }
     } catch (e) { showAlert(e.message); }
 }
 
@@ -1207,6 +1249,528 @@ async function renderAdminBillingJobs() {
                     h("p", { className: "meta" }, `Owner: ${j.owner_sub} — ${j.delivery_method} — ${j.schedule}`),
                 )
             );
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+// ========== TENANT CLUSTERS ==========
+
+function statusBadge(status) {
+    if (status === "active") return h("span", { className: "badge badge-ready" }, "active");
+    if (status === "revoked") return h("span", { className: "badge badge-error" }, "revoked");
+    if (status === "expired") return h("span", { className: "badge badge-pending" }, "expired");
+    if (status === "pending") return h("span", { className: "badge badge-pending" }, "pending");
+    if (status === "applied") return h("span", { className: "badge badge-ready" }, "applied");
+    if (status === "denied") return h("span", { className: "badge badge-error" }, "denied");
+    return h("span", { className: "badge badge-neutral" }, status || "?");
+}
+
+function fmtDate(iso) {
+    if (!iso) return "—";
+    try { return new Date(iso).toISOString().slice(0, 10); } catch { return iso; }
+}
+
+function daysUntil(iso) {
+    if (!iso) return null;
+    const ms = new Date(iso).getTime() - Date.now();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+}
+
+async function renderClusters() {
+    clear(app);
+    app.appendChild(breadcrumbs({ label: "My Clusters" }));
+    app.appendChild(h("h2", {}, "My Clusters"));
+    app.appendChild(h("p", { className: "page-desc" }, "Tenant Kubernetes clusters you have access to."));
+    try {
+        const clusters = await api("/api/clusters");
+        if (!clusters.length) {
+            app.appendChild(h("p", { className: "empty" }, "You don't have access to any clusters yet."));
+            return;
+        }
+        for (const c of clusters) {
+            app.appendChild(
+                h("a", { href: `#/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
+                    h("div", { className: "card-header" },
+                        h("h3", {}, c.name),
+                        c.provisioned_at
+                            ? h("span", { className: "badge badge-ready" }, "provisioned")
+                            : h("span", { className: "badge badge-pending" }, "pending"),
+                    ),
+                    h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                    h("p", { className: "meta" }, `Contract: ${c.contract_number} · Role: ${c.caller_role || "?"}`),
+                    c.active_addons.length ? h("p", { className: "meta" }, "Addons: " + c.active_addons.join(", ")) : null,
+                )
+            );
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderClusterDetail(slug) {
+    clear(app);
+    app.appendChild(breadcrumbs(
+        { label: "My Clusters", hash: "clusters" },
+        { label: slug },
+    ));
+    try {
+        const cluster = await api(`/api/clusters/${slug}`);
+        const isCustomerAdmin = cluster.caller_role === "customer_admin" || cluster.caller_role === "sunet_admin";
+
+        const titleRow = [h("h2", {}, cluster.name)];
+        titleRow.push(h("span", { className: "badge badge-neutral", style: "margin-left:8px;vertical-align:middle" }, cluster.size_label));
+        if (cluster.provisioned_at) {
+            titleRow.push(h("span", { className: "badge badge-ready", style: "margin-left:4px;vertical-align:middle" }, "provisioned"));
+        } else {
+            titleRow.push(h("span", { className: "badge badge-pending", style: "margin-left:4px;vertical-align:middle" }, "not provisioned"));
+        }
+        app.appendChild(h("div", { style: "display:flex;align-items:center;gap:6px;margin-bottom:8px" }, ...titleRow));
+
+        // Overview card
+        const overviewChildren = [
+            h("div", { className: "section-label", style: "margin-top:0" }, "Cluster details"),
+            h("p", { className: "meta" }, `Slug: ${cluster.slug}`),
+            h("p", { className: "meta" }, `Servers: 3 controllers + ${3 * cluster.worker_groups} workers (${cluster.total_servers} total)`),
+            h("p", { className: "meta" }, `Contract: ${cluster.contract_number}`),
+            h("p", { className: "meta" }, `Your role: ${cluster.caller_role || "—"}`),
+        ];
+        if (cluster.management_project_resource_name) {
+            overviewChildren.push(
+                h("div", { className: "section-label" }, "Management project (read-only)"),
+                h("p", {},
+                    h("a", { href: `#/contracts/${encodeURIComponent(cluster.contract_number)}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
+                        cluster.management_project_resource_name)
+                ),
+            );
+        }
+        if (cluster.backup_project_resource_name) {
+            overviewChildren.push(
+                h("div", { className: "section-label" }, "Backup project"),
+                h("p", {},
+                    h("a", { href: `#/contracts/${encodeURIComponent(cluster.contract_number)}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
+                        cluster.backup_project_resource_name)
+                ),
+            );
+        }
+        if (cluster.active_addons.length) {
+            overviewChildren.push(
+                h("div", { className: "section-label" }, "Active addons"),
+                ...cluster.active_addons.map(a => h("p", {}, a)),
+            );
+        }
+        app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" }, ...overviewChildren));
+
+        if (isCustomerAdmin) {
+            app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:16px" },
+                h("a", { href: `#/clusters/${encodeURIComponent(slug)}/users`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Manage users"),
+            ));
+        }
+
+        // Credentials section
+        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "My credentials"));
+        if (!cluster.provisioned_at) {
+            app.appendChild(h("p", { className: "meta" }, "Cluster is not yet provisioned — credential issuance is disabled."));
+        } else {
+            const issueForm = h("form", { className: "form-card", style: "margin-bottom:16px", onsubmit: async (e) => {
+                e.preventDefault();
+                const label = e.target.querySelector('[name="label"]').value.trim();
+                const ttlRaw = e.target.querySelector('[name="ttl_days"]').value.trim();
+                const body = { label };
+                if (ttlRaw) body.ttl_days = parseInt(ttlRaw, 10);
+                try {
+                    const issued = await api(`/api/clusters/${slug}/credentials`, {
+                        method: "POST", body: JSON.stringify(body),
+                    });
+                    showIssuedKubeconfig(issued);
+                    renderClusterDetail(slug);  // refresh list
+                } catch (err) { showAlert(err.message); }
+            }},
+                h("label", {}, "Label (laptop, ci-runner, …)"),
+                h("input", { name: "label", required: "true", maxlength: "128", placeholder: "laptop" }),
+                h("label", {}, "TTL in days (optional, default 365)"),
+                h("input", { name: "ttl_days", type: "number", min: "1", max: "3650" }),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Issue kubeconfig"),
+                ),
+            );
+            app.appendChild(issueForm);
+
+            const creds = await api(`/api/clusters/${slug}/credentials`);
+            if (!creds.length) {
+                app.appendChild(h("p", { className: "empty" }, "You haven't issued any credentials yet."));
+            } else {
+                for (const c of creds) {
+                    const expiryDays = daysUntil(c.expires_at);
+                    const expiryWarn = c.status === "active" && expiryDays !== null && expiryDays < 30;
+                    app.appendChild(h("div", { className: "card" },
+                        h("div", { className: "card-header" },
+                            h("h3", {}, c.label),
+                            statusBadge(c.status),
+                        ),
+                        h("p", { className: "meta" }, `Issued: ${fmtDate(c.created_at)}`),
+                        h("p", { className: "meta" }, `Expires: ${fmtDate(c.expires_at)}` + (expiryWarn ? ` (in ${expiryDays} days)` : "")),
+                        h("p", { className: "meta" }, `Serial: ${c.cert_serial.substring(0, 16)}…`),
+                        c.status === "active" ? h("div", { className: "btn-row" },
+                            h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
+                                if (confirm(`Rotate credential "${c.label}"? The old kubeconfig will stop working.`)) {
+                                    try {
+                                        const issued = await api(`/api/clusters/${slug}/credentials/${c.id}/rotate`, { method: "POST" });
+                                        showIssuedKubeconfig(issued);
+                                        renderClusterDetail(slug);
+                                    } catch (err) { showAlert(err.message); }
+                                }
+                            }}, "Rotate"),
+                            h("button", { className: "btn btn-danger", onclick: async () => {
+                                if (confirm(`Revoke credential "${c.label}"? This is immediate and cannot be undone.`)) {
+                                    try {
+                                        await api(`/api/clusters/${slug}/credentials/${c.id}`, { method: "DELETE" });
+                                        renderClusterDetail(slug);
+                                    } catch (err) { showAlert(err.message); }
+                                }
+                            }}, "Revoke"),
+                        ) : null,
+                    ));
+                }
+            }
+        }
+
+        // Cluster requests (request-a-change panel + history)
+        if (isCustomerAdmin) {
+            app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request a change"));
+            app.appendChild(renderClusterRequestPanel(slug, cluster));
+        }
+
+        const requests = await api(`/api/clusters/${slug}/requests`);
+        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Request history"));
+        if (!requests.length) {
+            app.appendChild(h("p", { className: "empty" }, "No requests yet."));
+        } else {
+            for (const r of requests) {
+                app.appendChild(h("div", { className: "card" },
+                    h("div", { className: "card-header" },
+                        h("h3", {}, `${r.request_type} — ${JSON.stringify(r.payload)}`),
+                        statusBadge(r.status),
+                    ),
+                    h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
+                    r.applied_at ? h("p", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub || "?"} on ${fmtDate(r.applied_at)}`) : null,
+                    r.note ? h("p", { className: "meta" }, `Note: ${r.note}`) : null,
+                ));
+            }
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+function renderClusterRequestPanel(slug, cluster) {
+    const panel = h("div", { className: "form-card" });
+    // Request JupyterHub
+    panel.appendChild(h("div", { style: "margin-bottom:12px" },
+        h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
+            if (cluster.active_addons.includes("jupyterhub")) {
+                showAlert("JupyterHub is already enabled.", "error"); return;
+            }
+            if (confirm("Request JupyterHub addon? SUNET ops will be notified by email.")) {
+                try {
+                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                        request_type: "addon",
+                        payload: { action: "enable", addon_type: "jupyterhub" },
+                    })});
+                    renderClusterDetail(slug);
+                } catch (err) { showAlert(err.message); }
+            }
+        }}, "Request JupyterHub addon"),
+    ));
+    // Request resize
+    panel.appendChild(h("div", { style: "margin-bottom:12px" },
+        h("label", {}, `Resize cluster (current: ${cluster.worker_groups} worker groups, ${3 * cluster.worker_groups} workers)`),
+        h("div", { style: "display:flex;gap:8px" },
+            h("input", { name: "resize_target", type: "number", min: cluster.worker_groups + 1, placeholder: `> ${cluster.worker_groups}`, style: "width:120px" }),
+            h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
+                const input = panel.querySelector('[name="resize_target"]');
+                const target = parseInt(input.value, 10);
+                if (!target || target <= cluster.worker_groups) {
+                    showAlert("Target must be greater than current."); return;
+                }
+                if (confirm(`Request resize to ${target} worker groups (${3 * target} workers)?`)) {
+                    try {
+                        await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                            request_type: "resize",
+                            payload: { target_worker_groups: target },
+                        })});
+                        renderClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }
+            }}, "Request resize"),
+        ),
+    ));
+    // Request backup
+    const backupEnabled = !!cluster.backup_project_resource_name;
+    panel.appendChild(h("div", {},
+        h("button", { className: "btn btn-secondary btn-small", onclick: async () => {
+            const action = backupEnabled ? "disable" : "enable";
+            if (confirm(`Request to ${action} backup?`)) {
+                try {
+                    await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
+                        request_type: "backup",
+                        payload: { action },
+                    })});
+                    renderClusterDetail(slug);
+                } catch (err) { showAlert(err.message); }
+            }
+        }}, backupEnabled ? "Request to disable backup" : "Request to enable backup"),
+    ));
+    return panel;
+}
+
+function showIssuedKubeconfig(issued) {
+    const overlay = h("div", { className: "modal-overlay", style: "position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:100" });
+    const close = () => overlay.remove();
+    const blob = new Blob([issued.kubeconfig], { type: "text/yaml" });
+    const url = URL.createObjectURL(blob);
+    const dialog = h("div", { className: "card", style: "max-width:600px;width:90%;max-height:90vh;overflow:auto" },
+        h("h2", {}, "Kubeconfig issued"),
+        h("p", { className: "meta" }, `Label: ${issued.label} · Expires: ${fmtDate(issued.expires_at)}`),
+        h("p", {}, "Save the file below — it is shown only once and not retrievable later."),
+        h("textarea", { readonly: "true", style: "width:100%;height:200px;font-family:monospace;font-size:0.8rem;margin:8px 0" }, issued.kubeconfig),
+        h("div", { className: "btn-row" },
+            h("a", { href: url, download: `kubeconfig-${issued.cluster_slug}-${issued.label}.yaml`, className: "btn btn-primary btn-small", style: "text-decoration:none" }, "Download"),
+            h("button", { className: "btn btn-secondary btn-small", onclick: close }, "Close"),
+        ),
+    );
+    overlay.appendChild(dialog);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.body.appendChild(overlay);
+}
+
+async function renderClusterUsers(slug) {
+    clear(app);
+    app.appendChild(breadcrumbs(
+        { label: "My Clusters", hash: "clusters" },
+        { label: slug, hash: `clusters/${encodeURIComponent(slug)}` },
+        { label: "Users" },
+    ));
+    app.appendChild(h("h2", {}, "Cluster users"));
+    try {
+        const cluster = await api(`/api/clusters/${slug}`);
+        const users = await api(`/api/clusters/${slug}/users`);
+        const isSunetAdmin = cluster.caller_role === "sunet_admin";
+
+        for (const u of users) {
+            app.appendChild(h("div", { className: "card" },
+                h("div", { className: "card-header" },
+                    h("h3", {}, u.user_sub),
+                    h("span", { className: "badge badge-neutral" }, u.role),
+                ),
+                h("p", { className: "meta" }, `Granted by ${u.granted_by_sub} on ${fmtDate(u.created_at)}`),
+                u.role !== "customer_admin" || isSunetAdmin ? h("div", { className: "btn-row" },
+                    h("button", { className: "btn btn-danger", onclick: async () => {
+                        if (confirm(`Remove ${u.user_sub}? All their kubeconfigs on this cluster will also be revoked.`)) {
+                            try {
+                                await api(`/api/clusters/${slug}/users/${encodeURIComponent(u.user_sub)}`, { method: "DELETE" });
+                                renderClusterUsers(slug);
+                            } catch (err) { showAlert(err.message); }
+                        }
+                    }}, "Remove"),
+                ) : null,
+            ));
+        }
+
+        // Add user form
+        const form = h("form", { className: "form-card", style: "margin-top:16px", onsubmit: async (e) => {
+            e.preventDefault();
+            const user_sub = e.target.querySelector('[name="user_sub"]').value.trim();
+            const role = e.target.querySelector('[name="role"]').value;
+            try {
+                await api(`/api/clusters/${slug}/users`, { method: "POST", body: JSON.stringify({ user_sub, role }) });
+                renderClusterUsers(slug);
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("h3", {}, "Add user"),
+            h("label", {}, "OIDC subject"),
+            h("input", { name: "user_sub", required: "true", placeholder: "user@idp" }),
+            h("label", {}, "Role"),
+            h("select", { name: "role" },
+                h("option", { value: "user" }, "user"),
+                isSunetAdmin ? h("option", { value: "customer_admin" }, "customer_admin (SUNET admin only)") : null,
+            ),
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Grant access"),
+            ),
+        );
+        app.appendChild(form);
+    } catch (e) { showAlert(e.message); }
+}
+
+// ========== ADMIN: CLUSTERS ==========
+
+async function renderAdminClusters() {
+    clear(app);
+    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Clusters" }));
+    app.appendChild(h("h2", {}, "All Tenant Clusters"));
+    app.appendChild(h("a", { href: "#/admin/clusters/new", className: "btn btn-primary btn-small", style: "display:inline-block;margin-bottom:16px;text-decoration:none" }, "+ New Cluster"));
+    try {
+        const clusters = await api("/api/admin/clusters");
+        if (!clusters.length) {
+            app.appendChild(h("p", { className: "empty" }, "No clusters yet."));
+            return;
+        }
+        for (const c of clusters) {
+            app.appendChild(
+                h("a", { href: `#/admin/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
+                    h("div", { className: "card-header" },
+                        h("h3", {}, c.name),
+                        c.provisioned_at
+                            ? h("span", { className: "badge badge-ready" }, "provisioned")
+                            : h("span", { className: "badge badge-pending" }, "pending"),
+                    ),
+                    h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers · contract ${c.contract_number}`),
+                    h("p", { className: "meta" }, `${c.api_url}`),
+                )
+            );
+        }
+    } catch (e) { showAlert(e.message); }
+}
+
+function renderAdminCreateCluster() {
+    clear(app);
+    app.appendChild(breadcrumbs(
+        { label: "Admin" },
+        { label: "Clusters", hash: "admin/clusters" },
+        { label: "New" },
+    ));
+    app.appendChild(h("h2", {}, "Register Tenant Cluster"));
+
+    const form = h("form", { className: "form-card", onsubmit: async (e) => {
+        e.preventDefault();
+        const data = Object.fromEntries(new FormData(e.target).entries());
+        data.worker_groups = parseInt(data.worker_groups, 10) || 1;
+        try {
+            const created = await api("/api/admin/clusters", {
+                method: "POST", body: JSON.stringify(data),
+            });
+            navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
+        } catch (err) { showAlert(err.message); }
+    }},
+        h("label", {}, "Contract number"),
+        h("input", { name: "contract_number", required: "true", placeholder: "CO-001" }),
+        h("label", {}, "Display name"),
+        h("input", { name: "name", required: "true", placeholder: "Acme production cluster" }),
+        h("label", {}, "Slug (used in OpenBao mount path & cert O)"),
+        h("input", { name: "slug", required: "true", pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "64", placeholder: "acme-prod" }),
+        h("label", {}, "API URL"),
+        h("input", { name: "api_url", required: "true", placeholder: "https://k8s.acme.example.org:6443" }),
+        h("label", {}, "CA bundle (PEM)"),
+        h("textarea", { name: "ca_bundle", required: "true", placeholder: "-----BEGIN CERTIFICATE-----\n...", style: "min-height:120px;font-family:monospace" }),
+        h("label", {}, "OpenBao mount"),
+        h("input", { name: "openbao_mount", required: "true", placeholder: "kubernetes/tenant-acme-prod" }),
+        h("label", {}, "OpenBao role"),
+        h("input", { name: "openbao_role", value: "argocd-rbac-manager" }),
+        h("label", {}, "ArgoCD Role name (in argocd ns)"),
+        h("input", { name: "argocd_role_name", value: "argocd-tenant" }),
+        h("label", {}, "ArgoCD namespace"),
+        h("input", { name: "argocd_namespace", value: "argocd" }),
+        h("label", {}, "Worker groups (3 workers per group)"),
+        h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: "true" }),
+        h("div", { className: "btn-row" },
+            h("a", { href: "#/admin/clusters", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Cancel"),
+            h("button", { type: "submit", className: "btn btn-primary btn-small" }, "Create Cluster"),
+        ),
+    );
+    app.appendChild(form);
+}
+
+async function renderAdminClusterDetail(slug) {
+    clear(app);
+    app.appendChild(breadcrumbs(
+        { label: "Admin" },
+        { label: "Clusters", hash: "admin/clusters" },
+        { label: slug },
+    ));
+    try {
+        const c = await api(`/api/admin/clusters/${slug}`);
+        app.appendChild(h("h2", {}, c.name));
+        app.appendChild(h("div", { className: "card", style: "margin-bottom:16px" },
+            h("div", { className: "section-label", style: "margin-top:0" }, "Cluster"),
+            h("p", { className: "meta" }, `Slug: ${c.slug}`),
+            h("p", { className: "meta" }, `Size: ${c.size_label} (${c.total_servers} servers)`),
+            h("p", { className: "meta" }, `API: ${c.api_url}`),
+            h("p", { className: "meta" }, `Contract: ${c.contract_number}`),
+            h("p", { className: "meta" }, `Provisioned: ${c.provisioned_at ? fmtDate(c.provisioned_at) : "(not yet)"}`),
+            h("p", { className: "meta" }, `Management project: ${c.management_project_resource_name || "—"}`),
+            h("p", { className: "meta" }, `Backup project: ${c.backup_project_resource_name || "—"}`),
+        ));
+        app.appendChild(h("div", { className: "btn-row" },
+            !c.provisioned_at ? h("button", { className: "btn btn-primary btn-small", onclick: async () => {
+                if (confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) {
+                    try {
+                        await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
+                        renderAdminClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }
+            }}, "Mark provisioned") : null,
+            h("a", { href: `#/clusters/${encodeURIComponent(slug)}`, className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Open as user"),
+            h("button", { className: "btn btn-danger", onclick: async () => {
+                if (confirm(`Delete cluster ${c.name}? This deletes the management/backup OpenStack projects and revokes all credentials. Cannot be undone.`)) {
+                    try {
+                        await api(`/api/admin/clusters/${slug}`, { method: "DELETE" });
+                        navigate("/admin/clusters");
+                    } catch (err) { showAlert(err.message); }
+                }
+            }}, "Delete cluster"),
+        ));
+    } catch (e) { showAlert(e.message); }
+}
+
+async function renderAdminClusterRequests() {
+    clear(app);
+    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Cluster Requests" }));
+    app.appendChild(h("h2", {}, "Pending cluster requests"));
+    try {
+        const requests = await api("/api/admin/cluster-requests?status=pending");
+        if (!requests.length) {
+            app.appendChild(h("p", { className: "empty" }, "No pending requests."));
+        }
+        for (const r of requests) {
+            const card = h("div", { className: "card" },
+                h("div", { className: "card-header" },
+                    h("h3", {}, `${r.request_type} on ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("p", { className: "meta" }, `Requested by ${r.requested_by_sub} on ${fmtDate(r.requested_at)}`),
+                h("p", {}, h("code", {}, JSON.stringify(r.payload))),
+                h("textarea", { name: `note-${r.id}`, placeholder: "Optional note", style: "width:100%;height:60px;margin-top:8px" }),
+                h("div", { className: "btn-row" },
+                    h("button", { className: "btn btn-primary btn-small", onclick: async () => {
+                        const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                        try {
+                            await api(`/api/admin/cluster-requests/${r.id}/apply`, {
+                                method: "POST", body: JSON.stringify({ note: note || null }),
+                            });
+                            renderAdminClusterRequests();
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Apply"),
+                    h("button", { className: "btn btn-danger", onclick: async () => {
+                        const note = card.querySelector(`[name="note-${r.id}"]`).value.trim();
+                        try {
+                            await api(`/api/admin/cluster-requests/${r.id}/deny`, {
+                                method: "POST", body: JSON.stringify({ note: note || null }),
+                            });
+                            renderAdminClusterRequests();
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Deny"),
+                ),
+            );
+            app.appendChild(card);
+        }
+
+        app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Recent applied/denied"));
+        const all = await api("/api/admin/cluster-requests");
+        for (const r of all.filter(x => x.status !== "pending").slice(0, 20)) {
+            app.appendChild(h("div", { className: "card" },
+                h("div", { className: "card-header" },
+                    h("h3", {}, `${r.request_type} on ${r.cluster_slug}`),
+                    statusBadge(r.status),
+                ),
+                h("p", { className: "meta" }, `${r.status === "applied" ? "Applied" : "Denied"} by ${r.applied_by_sub} on ${fmtDate(r.applied_at)}`),
+                r.note ? h("p", { className: "meta" }, `Note: ${r.note}`) : null,
+            ));
         }
     } catch (e) { showAlert(e.message); }
 }

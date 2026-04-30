@@ -14,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import get_current_user, get_user_contracts, init_oauth, oauth
-from app.config import Settings, get_settings
+from app.config import get_settings
+from app.crypto import init_crypto
 from app.db import close_db, get_session, init_db, run_migrations
 from app.git_backend import GitBackend
 from app.k8s import init_k8s
-from app.crypto import init_crypto
-from app.routers import admin, billing, projects
+from app.openbao_client import init_openbao, shutdown_openbao
+from app.routers import admin, billing, cluster_requests, clusters, kubeconfig, projects
 from app.schemas import ContractWithCustomerResponse, UserInfo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -51,12 +52,17 @@ async def lifespan(app: FastAPI):
     # Initialize crypto for credential encryption
     init_crypto(settings.secret_key)
 
+    # Initialize OpenBao client (used by tenant cluster operations)
+    init_openbao(settings)
+    logger.info("OpenBao client configured (%s)", settings.openbao_addr)
+
     # Initialize OIDC
     init_oauth(settings)
     logger.info("OIDC provider configured")
 
     yield
 
+    await shutdown_openbao()
     await close_db()
 
 
@@ -77,6 +83,11 @@ app.add_middleware(
 app.include_router(admin.router)
 app.include_router(projects.router)
 app.include_router(billing.router)
+app.include_router(clusters.admin_router)
+app.include_router(clusters.member_router)
+app.include_router(cluster_requests.admin_router)
+app.include_router(cluster_requests.member_router)
+app.include_router(kubeconfig.router)
 
 
 @app.exception_handler(ValueError)

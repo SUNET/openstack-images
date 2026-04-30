@@ -8,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth import get_current_user
+from app.auth import get_current_user, is_sunet_admin
+from app.config import Settings, get_settings
 from app.db import get_session
-from app.git_backend import GitBackend, _sanitize_name
+from app.git_backend import GitBackend
 from app.k8s import get_project_status
 from app.models import Contract, ContractAccess
 from app.schemas import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
@@ -49,6 +50,7 @@ def _enrich_project(proj: dict) -> ProjectResponse:
         contract_number=proj["contract_number"],
         users=proj["users"],
         phase=status.get("phase") if status else "Pending (not synced)",
+        managed=proj.get("managed", False),
     )
 
 
@@ -128,16 +130,21 @@ async def update_project(
     req: UpdateProjectRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
     await _require_contract_access(contract_number, user["sub"], session)
 
     git_backend: GitBackend = request.app.state.git_backend
 
-    # Verify project exists and belongs to this contract
     existing = git_backend.get_project(resource_name)
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
+        raise HTTPException(
+            status_code=403, detail="This project is SUNET-managed and read-only"
+        )
 
     try:
         updated = git_backend.update_project(
@@ -157,16 +164,21 @@ async def delete_project(
     resource_name: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
     await _require_contract_access(contract_number, user["sub"], session)
 
     git_backend: GitBackend = request.app.state.git_backend
 
-    # Verify project exists and belongs to this contract
     existing = git_backend.get_project(resource_name)
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
+        raise HTTPException(
+            status_code=403, detail="This project is SUNET-managed and read-only"
+        )
 
     try:
         git_backend.delete_project(resource_name)

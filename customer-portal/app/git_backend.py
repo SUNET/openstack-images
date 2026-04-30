@@ -41,6 +41,7 @@ def _parse_project(doc: dict) -> dict:
         "description": spec.get("description", ""),
         "contract_number": spec.get("contractNumber", ""),
         "users": users,
+        "managed": bool(spec.get("managed", False)),
     }
 
 
@@ -121,35 +122,39 @@ class GitBackend:
         project_name: str,
         description: str,
         users: list[str],
+        *,
+        managed: bool = False,
     ) -> dict:
         """Render an OpenstackProject CR as a dict."""
         resource_name = _sanitize_name(project_name)
 
+        spec: dict = {
+            "name": project_name,
+            "domain": self.settings.default_domain,
+            "description": description,
+            "enabled": True,
+            "contractNumber": contract_number,
+            "quotas": DEFAULT_QUOTAS,
+            "roleBindings": [
+                {
+                    "role": "member",
+                    "users": users,
+                    "userDomain": self.settings.default_domain,
+                }
+            ],
+            "federationRef": {
+                "configMapName": self.settings.federation_config_map,
+                "configMapNamespace": self.settings.federation_config_namespace,
+            },
+        }
+        if managed:
+            spec["managed"] = True
+
         return {
             "apiVersion": "sunet.se/v1alpha1",
             "kind": "OpenstackProject",
-            "metadata": {
-                "name": resource_name,
-            },
-            "spec": {
-                "name": project_name,
-                "domain": self.settings.default_domain,
-                "description": description,
-                "enabled": True,
-                "contractNumber": contract_number,
-                "quotas": DEFAULT_QUOTAS,
-                "roleBindings": [
-                    {
-                        "role": "member",
-                        "users": users,
-                        "userDomain": self.settings.default_domain,
-                    }
-                ],
-                "federationRef": {
-                    "configMapName": self.settings.federation_config_map,
-                    "configMapNamespace": self.settings.federation_config_namespace,
-                },
-            },
+            "metadata": {"name": resource_name},
+            "spec": spec,
         }
 
     def _read_yaml(self, resource_name: str) -> tuple[Path, dict] | None:
@@ -204,10 +209,15 @@ class GitBackend:
         project_name: str,
         description: str,
         users: list[str],
+        *,
+        managed: bool = False,
     ) -> str:
         """Create an OpenstackProject YAML file, commit, and push.
 
-        Returns the sanitized resource name.
+        Returns the sanitized resource name. When `managed=True`, the CR is
+        marked SUNET-managed: the operator assigns customer-domain users the
+        Keystone `reader` role rather than `member`, and portal-side mutation
+        endpoints reject non-admin write attempts.
         """
         with self._lock:
             self._pull()
@@ -218,10 +228,13 @@ class GitBackend:
             if file_path.exists():
                 raise ValueError(f"Project '{resource_name}' already exists")
 
-            cr = self._render_project_cr(contract_number, project_name, description, users)
+            cr = self._render_project_cr(
+                contract_number, project_name, description, users, managed=managed
+            )
             self._write_yaml(file_path, cr)
             self._update_kustomization()
-            self._commit_and_push(f"Add project {project_name} (contract {contract_number})")
+            kind = "managed project" if managed else "project"
+            self._commit_and_push(f"Add {kind} {project_name} (contract {contract_number})")
 
             return resource_name
 

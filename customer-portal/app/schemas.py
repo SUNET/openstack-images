@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
-
 # --- Admin: Customers ---
 
 
@@ -138,6 +137,7 @@ class ProjectResponse(BaseModel):
     contract_number: str
     users: list[str]
     phase: str | None = None
+    managed: bool = False
 
 
 # --- Billing Jobs ---
@@ -211,3 +211,141 @@ class UserInfo(BaseModel):
     email: str | None = None
     is_admin: bool = False
     contracts: list[ContractWithCustomerResponse] = []
+
+
+# --- Tenant Clusters ---
+
+
+def _size_label(worker_groups: int) -> str:
+    """1=Liten, 2=Mellan, 3=Stor, 4=XL, N>=4 ⇒ (N−3)*'X' + 'L'."""
+    table = {1: "Liten", 2: "Mellan", 3: "Stor"}
+    if worker_groups in table:
+        return table[worker_groups]
+    if worker_groups < 1:
+        return f"Invalid({worker_groups})"
+    return ("X" * (worker_groups - 3)) + "L"
+
+
+class CreateClusterRequest(BaseModel):
+    contract_number: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=255)
+    slug: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    api_url: str = Field(min_length=1, max_length=512)
+    ca_bundle: str = Field(min_length=1)
+    openbao_mount: str = Field(min_length=1, max_length=255)
+    openbao_role: str = Field(default="argocd-rbac-manager", max_length=255)
+    argocd_role_name: str = Field(default="argocd-tenant", max_length=255)
+    argocd_namespace: str = Field(default="argocd", max_length=63)
+    worker_groups: int = Field(default=1, ge=1)
+
+
+class UpdateClusterRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    api_url: str | None = Field(default=None, min_length=1, max_length=512)
+    ca_bundle: str | None = None
+    openbao_mount: str | None = Field(default=None, min_length=1, max_length=255)
+    openbao_role: str | None = Field(default=None, max_length=255)
+    argocd_role_name: str | None = Field(default=None, max_length=255)
+    argocd_namespace: str | None = Field(default=None, max_length=63)
+
+
+class ClusterResponse(BaseModel):
+    id: int
+    contract_number: str
+    name: str
+    slug: str
+    api_url: str
+    worker_groups: int
+    initial_worker_groups: int
+    size_label: str
+    total_servers: int  # 3 + 3 × worker_groups
+    provisioned_at: datetime | None = None
+    management_project_resource_name: str | None = None
+    backup_project_resource_name: str | None = None
+    argocd_namespace: str
+    created_at: datetime
+    caller_role: str | None = None  # 'sunet_admin' | 'customer_admin' | 'user' | None
+    active_addons: list[str] = []
+
+
+class ClusterAccessRequest(BaseModel):
+    user_sub: str = Field(min_length=1, max_length=255)
+    role: str = Field(pattern=r"^(customer_admin|user)$")
+
+
+class ClusterAccessResponse(BaseModel):
+    user_sub: str
+    role: str
+    granted_by_sub: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --- Kubeconfig issuance ---
+
+
+class IssueKubeconfigRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=128)
+    ttl_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class KubeconfigIssuanceResponse(BaseModel):
+    id: int
+    cluster_slug: str
+    user_sub: str
+    label: str
+    cert_serial: str
+    expires_at: datetime
+    created_at: datetime
+    revoked_at: datetime | None = None
+    revoked_by_sub: str | None = None
+    status: str  # 'active' | 'revoked' | 'expired'
+
+
+class IssuedKubeconfigResponse(KubeconfigIssuanceResponse):
+    """Returned only at issue time; carries the one-shot kubeconfig YAML."""
+
+    kubeconfig: str
+
+
+# --- Cluster requests (addon / resize / backup) ---
+
+
+class AddonRequestPayload(BaseModel):
+    action: str = Field(pattern=r"^(enable|disable)$")
+    addon_type: str = Field(min_length=1, max_length=64)
+
+
+class ResizeRequestPayload(BaseModel):
+    target_worker_groups: int = Field(ge=1)
+
+
+class BackupRequestPayload(BaseModel):
+    action: str = Field(pattern=r"^(enable|disable)$")
+
+
+class CreateClusterRequestRequest(BaseModel):
+    """The HTTP body for POST /api/clusters/{slug}/requests."""
+
+    request_type: str = Field(pattern=r"^(addon|resize|backup)$")
+    # The shape is validated against request_type in the router.
+    payload: dict
+
+
+class ApplyOrDenyRequestRequest(BaseModel):
+    note: str | None = None
+
+
+class ClusterRequestResponse(BaseModel):
+    id: int
+    cluster_id: int
+    cluster_slug: str
+    request_type: str
+    payload: dict
+    status: str
+    requested_by_sub: str
+    requested_at: datetime
+    applied_by_sub: str | None = None
+    applied_at: datetime | None = None
+    note: str | None = None
