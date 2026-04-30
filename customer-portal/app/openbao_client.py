@@ -71,7 +71,9 @@ class OpenBaoClient:
                 return self._token
             return await self._login()
 
-    async def get_k8s_creds(self, mount: str, role: str) -> dict:
+    async def get_k8s_creds(
+        self, mount: str, role: str, *, kubernetes_namespace: str = "kube-system"
+    ) -> dict:
         """Mint a fresh ephemeral SA token at /v1/<mount>/creds/<role>.
 
         The kubernetes secrets engine generates credentials via a POST (it
@@ -79,20 +81,26 @@ class OpenBaoClient:
         405 "unsupported operation". Caller is responsible for not logging
         the returned token.
 
+        `kubernetes_namespace` is the namespace the OpenBao-bound SA lives in
+        (per our bootstrap convention, `kube-system`). Required when the role
+        has more than one entry in `allowed_kubernetes_namespaces`; harmless
+        when it has exactly one.
+
         Returns the OpenBao `data` block, which for this engine includes at
         minimum `service_account_token`.
         """
         token = await self._token_or_login()
         path = f"{self._addr}/v1/{mount.strip('/')}/creds/{role}"
+        body_payload = {"kubernetes_namespace": kubernetes_namespace}
         resp = await self._http.post(
-            path, headers={"X-Vault-Token": token}, json={}
+            path, headers={"X-Vault-Token": token}, json=body_payload
         )
         if resp.status_code == 403:
             # Token may have expired; re-login once and retry.
             self._token = None
             token = await self._token_or_login()
             resp = await self._http.post(
-                path, headers={"X-Vault-Token": token}, json={}
+                path, headers={"X-Vault-Token": token}, json=body_payload
             )
         if resp.status_code not in (200, 201):
             raise OpenBaoError(

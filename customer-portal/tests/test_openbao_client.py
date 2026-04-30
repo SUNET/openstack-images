@@ -83,6 +83,10 @@ async def test_get_k8s_creds_uses_post(settings: Settings):
             req = creds_route.calls.last.request
             assert req.method == "POST"
             assert req.headers["X-Vault-Token"] == "vault.token.abc"
+            # Body must include kubernetes_namespace so multi-namespace roles work.
+            import json as _json
+            sent = _json.loads(req.read().decode())
+            assert sent.get("kubernetes_namespace") == "kube-system"
     finally:
         await client.aclose()
 

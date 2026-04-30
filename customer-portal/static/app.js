@@ -1946,16 +1946,21 @@ function renderClusterSetupHelp() {
         "    kubernetes_ca_cert=\"$CA\" \\\n" +
         "    service_account_jwt=\"$JWT\"\n" +
         "bao write kubernetes/<slug>/roles/argocd-rbac-manager \\\n" +
-        "    allowed_kubernetes_namespaces=argocd,kube-system \\\n" +
+        "    allowed_kubernetes_namespaces=kube-system \\\n" +
         "    service_account_name=openbao-rbac-manager \\\n" +
-        "    kubernetes_namespace=kube-system \\\n" +
         "    token_default_ttl=120s \\\n" +
         "    token_max_ttl=300s"
     ));
     app.appendChild(h("p", { className: "meta" },
         "The path must be ",
         h("code", {}, "kubernetes/<slug>"),
-        " — the portal derives the mount path from the cluster slug. Short token TTLs are intentional: the portal needs cluster admin only briefly per request."));
+        " — the portal derives the mount path from the cluster slug. ",
+        "The role's ", h("code", {}, "allowed_kubernetes_namespaces"),
+        " is a single entry (",
+        h("code", {}, "kube-system"),
+        ") because that's where the ",
+        h("code", {}, "openbao-rbac-manager"),
+        " SA lives. Short token TTLs are intentional: the portal needs cluster admin only briefly per request."));
 
     app.appendChild(h("h4", { style: "margin-top:16px" }, "4. Register the cluster in the portal"));
     app.appendChild(h("p", {},
