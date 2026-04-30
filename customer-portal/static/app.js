@@ -85,8 +85,10 @@ async function route() {
         return renderAdminEditCustomer(parts[3]);
     if (parts[0] === "admin" && parts[1] === "customers" && parts[2])
         return renderAdminCustomerDetail(parts[2]);
-    if (parts[0] === "admin")
+    if (parts[0] === "admin" && parts[1] === "customers")
         return renderAdminCustomers();
+    if (parts[0] === "admin")
+        return renderAdmin();
 
     renderContracts();
 }
@@ -159,13 +161,9 @@ function renderNav() {
     clear(nav);
     if (!currentUser) return;
     nav.appendChild(h("a", { href: "#/contracts" }, "My Contracts"));
-    nav.appendChild(h("a", { href: "#/clusters" }, "My Clusters"));
     nav.appendChild(h("a", { href: "#/billing" }, "Billing"));
     if (currentUser.is_admin) {
         nav.appendChild(h("a", { href: "#/admin" }, "Admin"));
-        nav.appendChild(h("a", { href: "#/admin/clusters" }, "Clusters"));
-        nav.appendChild(h("a", { href: "#/admin/cluster-requests" }, "Requests"));
-        nav.appendChild(h("a", { href: "#/admin/pricing" }, "Pricing"));
     }
     nav.appendChild(h("a", { href: "#", className: "nav-user" }, currentUser.sub));
     nav.appendChild(h("a", { href: "/auth/logout", className: "nav-logout" }, "Sign out"));
@@ -225,34 +223,60 @@ async function renderContractProjects(contractNumber) {
         { label: "My Contracts", hash: "contracts" },
         { label: contractNumber },
     ));
-    app.appendChild(h("h2", {}, "Projects"));
-    app.appendChild(h("p", { className: "page-desc" }, customerName + " — " + contractNumber));
+    app.appendChild(h("h2", {}, contractNumber));
+    app.appendChild(h("p", { className: "page-desc" }, customerName));
+
+    // --- Projects section ---
+    app.appendChild(h("h3", { style: "margin-top:24px;margin-bottom:8px" }, "Projects"));
     app.appendChild(h("a", { href: `#/contracts/${cn}/projects/new`, className: "btn btn-primary btn-small", style: "display:inline-block;margin-bottom:16px;text-decoration:none" }, "+ New Project"));
 
     try {
         const projects = await api(`/api/contracts/${contractNumber}/projects`);
         if (!projects.length) {
             app.appendChild(h("p", { className: "empty" }, "No projects yet. Create one to get started."));
-            return;
-        }
-        for (const p of projects) {
-            const rn = encodeURIComponent(p.resource_name);
-            const headerChildren = [
-                h("h3", {}, p.name),
-                phaseBadge(p.phase),
-            ];
-            if (p.managed) {
-                headerChildren.push(
-                    h("span", { className: "badge badge-managed", title: "Managed by SUNET" }, "managed-by-sunet"),
+        } else {
+            for (const p of projects) {
+                const rn = encodeURIComponent(p.resource_name);
+                const headerChildren = [
+                    h("h3", {}, p.name),
+                    phaseBadge(p.phase),
+                ];
+                if (p.managed) {
+                    headerChildren.push(
+                        h("span", { className: "badge badge-managed", title: "Managed by SUNET" }, "managed-by-sunet"),
+                    );
+                }
+                app.appendChild(
+                    h("a", { href: `#/contracts/${cn}/projects/${rn}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
+                        h("div", { className: "card-header" }, ...headerChildren),
+                        p.description ? h("p", { className: "meta" }, p.description) : null,
+                        h("p", { className: "meta" }, "Users: " + (p.users.length ? p.users.join(", ") : "(SUNET-managed)")),
+                    )
                 );
             }
-            app.appendChild(
-                h("a", { href: `#/contracts/${cn}/projects/${rn}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
-                    h("div", { className: "card-header" }, ...headerChildren),
-                    p.description ? h("p", { className: "meta" }, p.description) : null,
-                    h("p", { className: "meta" }, "Users: " + (p.users.length ? p.users.join(", ") : "(SUNET-managed)")),
-                )
-            );
+        }
+
+        // --- Clusters section ---
+        app.appendChild(h("h3", { style: "margin-top:32px;margin-bottom:8px" }, "Clusters"));
+        const allClusters = await api("/api/clusters");
+        const clusters = allClusters.filter(c => c.contract_number === contractNumber);
+        if (!clusters.length) {
+            app.appendChild(h("p", { className: "empty" }, "No clusters on this contract. Clusters are provisioned by SUNET — contact ops to request one."));
+        } else {
+            for (const c of clusters) {
+                app.appendChild(
+                    h("a", { href: `#/clusters/${encodeURIComponent(c.slug)}`, className: "card card-clickable", style: "display:block;text-decoration:none;color:inherit" },
+                        h("div", { className: "card-header" },
+                            h("h3", {}, c.name),
+                            c.provisioned_at
+                                ? h("span", { className: "badge badge-ready" }, "provisioned")
+                                : h("span", { className: "badge badge-pending" }, "pending"),
+                        ),
+                        h("p", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                        h("p", { className: "meta" }, `Your role: ${c.caller_role || "?"}` + (c.active_addons.length ? " · Addons: " + c.active_addons.join(", ") : "")),
+                    )
+                );
+            }
         }
     } catch (e) { showAlert(e.message); }
 }
@@ -406,9 +430,35 @@ async function renderEditProject(contractNumber, resourceName) {
 
 // ========== ADMIN VIEWS ==========
 
+function renderAdmin() {
+    clear(app);
+    app.appendChild(breadcrumbs({ label: "Admin" }));
+    app.appendChild(h("h2", {}, "Admin"));
+    app.appendChild(h("p", { className: "page-desc" },
+        "SUNET-only management surfaces."));
+
+    const tile = (href, title, desc) =>
+        h("a", { href, className: "card card-clickable",
+                  style: "display:block;text-decoration:none;color:inherit;margin-bottom:12px" },
+            h("div", { className: "card-header" }, h("h3", {}, title)),
+            h("p", { className: "meta" }, desc),
+        );
+
+    app.appendChild(tile("#/admin/customers", "Customers & Contracts",
+        "Create customer organisations, contracts, and grant user access to contracts."));
+    app.appendChild(tile("#/admin/clusters", "Tenant Clusters",
+        "Register Kubernetes clusters, mark as provisioned, manage admin access. Includes the bootstrap setup guide."));
+    app.appendChild(tile("#/admin/cluster-requests", "Cluster Change Requests",
+        "Review and apply customer-admin requests for addons (JupyterHub), resizes, and backup enablement."));
+    app.appendChild(tile("#/admin/billing", "Billing Jobs",
+        "All scheduled billing exports across the platform — read-only view with manual-run support."));
+    app.appendChild(tile("#/admin/pricing", "Pricing",
+        "Per-resource unit prices, per-contract overrides, and rebates. Includes synthetic cluster fees."));
+}
+
 async function renderAdminCustomers() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Customers" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" }, { label: "Customers" }));
     app.appendChild(h("h2", {}, "Customers"));
     app.appendChild(h("p", { className: "page-desc" }, "Manage customer organisations and their contracts."));
 
@@ -454,7 +504,7 @@ async function renderAdminCustomerDetail(customerId) {
     clear(app);
     try {
         const customer = await api(`/api/admin/customers/${customerId}`);
-        app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Customers", hash: "admin" }, { label: customer.name }));
+        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: customer.name }));
         app.appendChild(h("h2", {}, customer.name));
         const descParts = [customer.domain];
         if (customer.description) descParts.push(customer.description);
@@ -507,7 +557,7 @@ async function renderAdminEditCustomer(customerId) {
     clear(app);
     try {
         const customer = await api(`/api/admin/customers/${customerId}`);
-        app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Customers", hash: "admin" }, { label: customer.name, hash: `admin/customers/${customerId}` }, { label: "Edit" }));
+        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: customer.name, hash: `admin/customers/${customerId}` }, { label: "Edit" }));
         app.appendChild(h("h2", {}, "Edit Customer"));
 
         const form = h("form", { className: "form-card", onsubmit: async (e) => {
@@ -539,7 +589,7 @@ async function renderAdminContractDetail(contractId) {
     clear(app);
     try {
         const contract = await api(`/api/admin/contracts/${contractId}`);
-        app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number }));
+        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number }));
         app.appendChild(h("h2", {}, contract.contract_number));
         const descParts = [contract.customer.name, contract.customer.domain];
         if (contract.description) descParts.push(contract.description);
@@ -685,7 +735,7 @@ async function renderAdminEditContract(contractId) {
     clear(app);
     try {
         const contract = await api(`/api/admin/contracts/${contractId}`);
-        app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number, hash: `admin/contracts/${contractId}` }, { label: "Edit" }));
+        app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Customers", hash: "admin" }, { label: contract.customer.name, hash: `admin/customers/${contract.customer.id}` }, { label: contract.contract_number, hash: `admin/contracts/${contractId}` }, { label: "Edit" }));
         app.appendChild(h("h2", {}, "Edit Contract"));
 
         const form = h("form", { className: "form-card", onsubmit: async (e) => {
@@ -713,7 +763,7 @@ async function renderAdminEditContract(contractId) {
 
 async function renderAdminPricing() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Pricing" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Pricing" }));
     app.appendChild(h("h2", {}, "Global Pricing"));
     app.appendChild(h("p", { className: "page-desc" },
         "Set default prices per resource type. Prices can be set per metadata value (e.g. per flavor). Contracts can override these individually. ",
@@ -825,7 +875,7 @@ async function renderAdminPricing() {
 
 function renderPricingDocs() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Pricing", hash: "admin/pricing" }, { label: "Documentation" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Pricing", hash: "admin/pricing" }, { label: "Documentation" }));
     app.appendChild(h("h2", {}, "How Pricing Works"));
 
     const doc = h("div", { className: "doc" });
@@ -1231,7 +1281,7 @@ async function renderEditBillingJob(jobId) {
 
 async function renderAdminBillingJobs() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Billing Jobs" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Billing Jobs" }));
     app.appendChild(h("h2", {}, "All Billing Jobs"));
     app.appendChild(h("p", { className: "page-desc" }, "All billing jobs across all users."));
 
@@ -1306,9 +1356,12 @@ function formatRequestSummary(r) {
 
 async function renderClusters() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "My Clusters" }));
-    app.appendChild(h("h2", {}, "My Clusters"));
-    app.appendChild(h("p", { className: "page-desc" }, "Tenant Kubernetes clusters you have access to."));
+    app.appendChild(breadcrumbs(
+        { label: "My Contracts", hash: "contracts" },
+        { label: "All clusters" },
+    ));
+    app.appendChild(h("h2", {}, "All clusters"));
+    app.appendChild(h("p", { className: "page-desc" }, "Tenant Kubernetes clusters you have access to across every contract. Open a contract page from My Contracts to see clusters scoped to that contract."));
     try {
         const clusters = await api("/api/clusters");
         if (!clusters.length) {
@@ -1335,12 +1388,14 @@ async function renderClusters() {
 
 async function renderClusterDetail(slug) {
     clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "My Clusters", hash: "clusters" },
-        { label: slug },
-    ));
     try {
         const cluster = await api(`/api/clusters/${slug}`);
+        const cn = encodeURIComponent(cluster.contract_number || "");
+        app.appendChild(breadcrumbs(
+            { label: "My Contracts", hash: "contracts" },
+            { label: cluster.contract_number, hash: `contracts/${cn}/projects` },
+            { label: slug },
+        ));
         const isCustomerAdmin = cluster.caller_role === "customer_admin" || cluster.caller_role === "sunet_admin";
 
         const titleRow = [h("h2", {}, cluster.name)];
@@ -1609,15 +1664,21 @@ function showIssuedKubeconfig(issued) {
 
 async function renderClusterUsers(slug) {
     clear(app);
-    app.appendChild(breadcrumbs(
-        { label: "My Clusters", hash: "clusters" },
-        { label: slug, hash: `clusters/${encodeURIComponent(slug)}` },
-        { label: "Users" },
-    ));
     app.appendChild(h("h2", {}, "Cluster users"));
     try {
         const cluster = await api(`/api/clusters/${slug}`);
         const users = await api(`/api/clusters/${slug}/users`);
+        const cn = encodeURIComponent(cluster.contract_number || "");
+        // Insert breadcrumbs above the title now that we know the contract.
+        app.insertBefore(
+            breadcrumbs(
+                { label: "My Contracts", hash: "contracts" },
+                { label: cluster.contract_number, hash: `contracts/${cn}/projects` },
+                { label: slug, hash: `clusters/${encodeURIComponent(slug)}` },
+                { label: "Users" },
+            ),
+            app.firstChild,
+        );
         const isSunetAdmin = cluster.caller_role === "sunet_admin";
 
         for (const u of users) {
@@ -1670,7 +1731,7 @@ async function renderClusterUsers(slug) {
 
 async function renderAdminClusters() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Clusters" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Clusters" }));
     app.appendChild(h("h2", {}, "All Tenant Clusters"));
     app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:16px" },
         h("a", { href: "#/admin/clusters/new", className: "btn btn-primary btn-small", style: "text-decoration:none" }, "+ New Cluster"),
@@ -2077,7 +2138,7 @@ async function renderAdminClusterDetail(slug) {
 
 async function renderAdminClusterRequests() {
     clear(app);
-    app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Cluster Requests" }));
+    app.appendChild(breadcrumbs({ label: "Admin", hash: "admin" },{ label: "Cluster Requests" }));
     app.appendChild(h("h2", {}, "Pending cluster requests"));
     try {
         const requests = await api("/api/admin/cluster-requests?status=pending");
