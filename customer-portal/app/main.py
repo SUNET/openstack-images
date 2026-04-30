@@ -11,8 +11,12 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from kubernetes.client.rest import ApiException as K8sApiException
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.sessions import SessionMiddleware
+
+from app.cluster_client import TenantClusterError
+from app.openbao_client import OpenBaoError
 
 from app.auth import get_current_user, get_user_contracts, init_oauth, oauth
 from app.config import get_settings
@@ -100,6 +104,36 @@ async def value_error_handler(request: Request, exc: ValueError):
 async def git_error_handler(request: Request, exc: git.GitCommandError):
     logger.error("Git operation failed: %s", exc)
     return JSONResponse(status_code=503, content={"detail": "Git operation failed, please try again"})
+
+
+@app.exception_handler(OpenBaoError)
+async def openbao_error_handler(request: Request, exc: OpenBaoError):
+    logger.error("OpenBao error: %s", exc)
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"OpenBao error: {exc}. Check that the per-tenant secrets engine "
+                           "and policy are configured (see deployment runbook)."},
+    )
+
+
+@app.exception_handler(TenantClusterError)
+async def tenant_cluster_error_handler(request: Request, exc: TenantClusterError):
+    logger.error("Tenant cluster error: %s", exc)
+    return JSONResponse(
+        status_code=502, content={"detail": f"Tenant cluster error: {exc}"}
+    )
+
+
+@app.exception_handler(K8sApiException)
+async def k8s_api_error_handler(request: Request, exc: K8sApiException):
+    logger.error("Tenant K8s API error: %s %s", exc.status, exc.reason)
+    body = exc.body if isinstance(exc.body, str) else "(no body)"
+    return JSONResponse(
+        status_code=502,
+        content={
+            "detail": f"Tenant K8s API {exc.status} {exc.reason}: {body[:300]}"
+        },
+    )
 
 
 @app.get("/healthz")
