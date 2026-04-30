@@ -22,9 +22,28 @@ router = APIRouter(prefix="/api/contracts", tags=["projects"])
 
 
 async def _require_contract_access(
-    contract_number: str, user_sub: str, session: AsyncSession
+    contract_number: str,
+    user_sub: str,
+    session: AsyncSession,
+    settings: Settings | None = None,
 ) -> Contract:
-    """Verify user has access to the contract. Returns the contract with customer loaded."""
+    """Verify user has access to the contract. Returns the contract with customer loaded.
+
+    SUNET admins bypass the ContractAccess check — they're the ultimate
+    fallback for any project (especially managed ones the customer can't
+    mutate themselves) and have no separate endpoint for project mutation.
+    """
+    if settings is not None and is_sunet_admin(user_sub, settings):
+        result = await session.execute(
+            select(Contract)
+            .where(Contract.contract_number == contract_number)
+            .options(selectinload(Contract.customer))
+        )
+        contract = result.scalar_one_or_none()
+        if not contract:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        return contract
+
     result = await session.execute(
         select(Contract)
         .join(ContractAccess)
@@ -59,9 +78,10 @@ async def list_projects(
     contract_number: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
     projects = git_backend.list_projects(contract_number)
@@ -74,9 +94,10 @@ async def get_project(
     resource_name: str,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
     proj = git_backend.get_project(resource_name)
@@ -92,9 +113,10 @@ async def create_project(
     req: CreateProjectRequest,
     request: Request,
     user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    contract = await _require_contract_access(contract_number, user["sub"], session)
+    contract = await _require_contract_access(contract_number, user["sub"], session, settings)
 
     # Qualify project name with customer domain
     qualified_name = f"{req.name}.{contract.customer.domain}"
@@ -133,7 +155,7 @@ async def update_project(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
 
@@ -167,7 +189,7 @@ async def delete_project(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    await _require_contract_access(contract_number, user["sub"], session)
+    await _require_contract_access(contract_number, user["sub"], session, settings)
 
     git_backend: GitBackend = request.app.state.git_backend
 
