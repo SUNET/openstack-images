@@ -69,6 +69,8 @@ async function route() {
         return renderAdminPricing();
     if (parts[0] === "admin" && parts[1] === "clusters" && parts[2] === "new")
         return renderAdminCreateCluster();
+    if (parts[0] === "admin" && parts[1] === "clusters" && parts[2] === "help")
+        return renderClusterSetupHelp();
     if (parts[0] === "admin" && parts[1] === "clusters" && parts[2])
         return renderAdminClusterDetail(decodeURIComponent(parts[2]));
     if (parts[0] === "admin" && parts[1] === "clusters")
@@ -1670,7 +1672,10 @@ async function renderAdminClusters() {
     clear(app);
     app.appendChild(breadcrumbs({ label: "Admin" }, { label: "Clusters" }));
     app.appendChild(h("h2", {}, "All Tenant Clusters"));
-    app.appendChild(h("a", { href: "#/admin/clusters/new", className: "btn btn-primary btn-small", style: "display:inline-block;margin-bottom:16px;text-decoration:none" }, "+ New Cluster"));
+    app.appendChild(h("div", { className: "btn-row", style: "margin-bottom:16px" },
+        h("a", { href: "#/admin/clusters/new", className: "btn btn-primary btn-small", style: "text-decoration:none" }, "+ New Cluster"),
+        h("a", { href: "#/admin/clusters/help", className: "btn btn-secondary btn-small", style: "text-decoration:none" }, "Setup guide"),
+    ));
     try {
         const clusters = await api("/api/admin/clusters");
         if (!clusters.length) {
@@ -1770,6 +1775,234 @@ async function renderAdminCreateCluster() {
         ),
     );
     app.appendChild(form);
+}
+
+function renderClusterSetupHelp() {
+    clear(app);
+    app.appendChild(breadcrumbs(
+        { label: "Admin" },
+        { label: "Clusters", hash: "admin/clusters" },
+        { label: "Setup guide" },
+    ));
+    app.appendChild(h("h2", {}, "Tenant Cluster Setup Guide"));
+    app.appendChild(h("p", { className: "page-desc" },
+        "Walks through every manual step needed to onboard a fresh tenant cluster. Run prerequisite steps once for the platform, then the per-cluster steps for each cluster you onboard."));
+
+    const codeBlock = (txt) => h("pre", { className: "help-code" }, h("code", {}, txt));
+    const section = (title) => h("h3", { style: "margin-top:24px;margin-bottom:8px" }, title);
+
+    // ---- Platform prerequisites ----
+    app.appendChild(section("Prerequisites (one-time, platform-wide)"));
+    app.appendChild(h("p", {},
+        "Done once on the platform side. Skip if these are already in place from a previous cluster onboarding."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "1. OpenBao Kubernetes auth method"));
+    app.appendChild(h("p", {},
+        "If `auth/kubernetes/` is not yet enabled in OpenBao, enable it and point it at the platform K8s API:"));
+    app.appendChild(codeBlock(
+        "bao auth enable kubernetes\n" +
+        "bao write auth/kubernetes/config \\\n" +
+        "    kubernetes_host=https://kubernetes.default.svc \\\n" +
+        "    kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    ));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "2. Portal Vault policy + role"));
+    app.appendChild(h("p", {},
+        "Allows the portal pod to read short-lived ephemeral SA tokens from any per-tenant secrets engine."));
+    app.appendChild(codeBlock(
+        "cat > /tmp/customer-portal.hcl <<'EOF'\n" +
+        "path \"kubernetes/+/creds/argocd-rbac-manager\" {\n" +
+        "  capabilities = [\"read\"]\n" +
+        "}\n" +
+        "EOF\n" +
+        "bao policy write customer-portal /tmp/customer-portal.hcl\n\n" +
+        "bao write auth/kubernetes/role/customer-portal \\\n" +
+        "    bound_service_account_names=customer-portal \\\n" +
+        "    bound_service_account_namespaces=customer-portal \\\n" +
+        "    policies=customer-portal \\\n" +
+        "    ttl=1h"
+    ));
+    app.appendChild(h("p", { className: "meta" },
+        "If the portal runs under a different SA name or namespace, adjust the bound_* fields. ttl=1h is how long the portal's Vault session lives between re-logins."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "3. Portal records"));
+    app.appendChild(h("p", {},
+        "The cluster will be tied to a contract under a customer. Create both first under ",
+        h("a", { href: "#/admin" }, "Admin → Customers"),
+        " if they don't exist yet."));
+
+    // ---- Per-cluster ----
+    app.appendChild(section("Per-cluster bootstrap"));
+    app.appendChild(h("p", {},
+        "Run these every time you onboard a new tenant cluster. We use ",
+        h("code", {}, "<slug>"),
+        " as the cluster identifier — it must match the slug you'll enter in the Register Tenant Cluster form."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "1. Provision the cluster"));
+    app.appendChild(h("p", {},
+        "Spin up the K8s cluster with kubespray and install ArgoCD into the ",
+        h("code", {}, "argocd"),
+        " namespace as usual. This guide picks up after that."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "2. Apply RBAC inside the tenant cluster"));
+    app.appendChild(h("p", {},
+        "Creates the Role customer kubeconfigs are bound to (",
+        h("code", {}, "argocd-tenant"),
+        " in the ",
+        h("code", {}, "argocd"),
+        " namespace), and the SA + ClusterRole that OpenBao authenticates as to mint per-issuance RoleBindings and CSRs."));
+    app.appendChild(codeBlock(
+        "cat > /tmp/tenant-bootstrap.yaml <<'EOF'\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: ClusterRole\n" +
+        "metadata:\n" +
+        "  name: argocd-rbac-manager\n" +
+        "rules:\n" +
+        "  - apiGroups: [\"rbac.authorization.k8s.io\"]\n" +
+        "    resources: [\"rolebindings\"]\n" +
+        "    verbs: [\"create\", \"get\", \"list\", \"delete\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"certificatesigningrequests\"]\n" +
+        "    verbs: [\"create\", \"get\", \"delete\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"certificatesigningrequests/approval\"]\n" +
+        "    verbs: [\"update\"]\n" +
+        "  - apiGroups: [\"certificates.k8s.io\"]\n" +
+        "    resources: [\"signers\"]\n" +
+        "    resourceNames: [\"kubernetes.io/kube-apiserver-client\"]\n" +
+        "    verbs: [\"approve\"]\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: Role\n" +
+        "metadata:\n" +
+        "  name: argocd-tenant\n" +
+        "  namespace: argocd\n" +
+        "rules:\n" +
+        "  - apiGroups: [\"argoproj.io\"]\n" +
+        "    resources: [\"applications\", \"appprojects\", \"applicationsets\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"configmaps\", \"secrets\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\", \"delete\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"events\", \"pods\", \"pods/log\"]\n" +
+        "    verbs: [\"get\", \"list\", \"watch\"]\n" +
+        "---\n" +
+        "apiVersion: v1\n" +
+        "kind: ServiceAccount\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager\n" +
+        "  namespace: kube-system\n" +
+        "---\n" +
+        "apiVersion: rbac.authorization.k8s.io/v1\n" +
+        "kind: ClusterRoleBinding\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager\n" +
+        "roleRef:\n" +
+        "  apiGroup: rbac.authorization.k8s.io\n" +
+        "  kind: ClusterRole\n" +
+        "  name: argocd-rbac-manager\n" +
+        "subjects:\n" +
+        "  - kind: ServiceAccount\n" +
+        "    name: openbao-rbac-manager\n" +
+        "    namespace: kube-system\n" +
+        "---\n" +
+        "apiVersion: v1\n" +
+        "kind: Secret\n" +
+        "metadata:\n" +
+        "  name: openbao-rbac-manager-token\n" +
+        "  namespace: kube-system\n" +
+        "  annotations:\n" +
+        "    kubernetes.io/service-account.name: openbao-rbac-manager\n" +
+        "type: kubernetes.io/service-account-token\n" +
+        "EOF\n" +
+        "kubectl --context <tenant-cluster> apply -f /tmp/tenant-bootstrap.yaml"
+    ));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "3. Configure OpenBao secrets engine for the cluster"));
+    app.appendChild(h("p", {},
+        "Mount a per-tenant ",
+        h("code", {}, "kubernetes"),
+        " secrets engine and tell it how to authenticate to the tenant cluster's API."));
+    app.appendChild(codeBlock(
+        "JWT=$(kubectl --context <tenant-cluster> -n kube-system get secret openbao-rbac-manager-token \\\n" +
+        "        -o jsonpath='{.data.token}' | base64 -d)\n" +
+        "CA=$(kubectl --context <tenant-cluster> config view --raw --minify \\\n" +
+        "        -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d)\n" +
+        "APIURL=$(kubectl --context <tenant-cluster> config view --raw --minify \\\n" +
+        "        -o jsonpath='{.clusters[0].cluster.server}')\n\n" +
+        "bao secrets enable -path=kubernetes/<slug> kubernetes\n" +
+        "bao write kubernetes/<slug>/config \\\n" +
+        "    kubernetes_host=\"$APIURL\" \\\n" +
+        "    kubernetes_ca_cert=\"$CA\" \\\n" +
+        "    service_account_jwt=\"$JWT\"\n" +
+        "bao write kubernetes/<slug>/roles/argocd-rbac-manager \\\n" +
+        "    allowed_kubernetes_namespaces=argocd,kube-system \\\n" +
+        "    service_account_name=openbao-rbac-manager \\\n" +
+        "    kubernetes_namespace=kube-system \\\n" +
+        "    token_default_ttl=120s \\\n" +
+        "    token_max_ttl=300s"
+    ));
+    app.appendChild(h("p", { className: "meta" },
+        "The path must be ",
+        h("code", {}, "kubernetes/<slug>"),
+        " — the portal derives the mount path from the cluster slug. Short token TTLs are intentional: the portal needs cluster admin only briefly per request."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "4. Register the cluster in the portal"));
+    app.appendChild(h("p", {},
+        "Open ",
+        h("a", { href: "#/admin/clusters/new" }, "Admin → Clusters → + New Cluster"),
+        ". Fill in the form — slug must match the ",
+        h("code", {}, "<slug>"),
+        " you used in step 3. The CA bundle field accepts the same PEM you passed to ",
+        h("code", {}, "kubernetes_ca_cert"),
+        " above; you can re-extract it with ",
+        h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"),
+        "."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "5. Mark the cluster provisioned"));
+    app.appendChild(h("p", {},
+        "On the cluster's admin detail page, click ",
+        h("strong", {}, "Mark provisioned"),
+        ". This sets ",
+        h("code", {}, "provisioned_at"),
+        " and unlocks: (a) credential issuance for users; (b) the initial setup-fee billing line in the next billing run."));
+
+    app.appendChild(h("h4", { style: "margin-top:16px" }, "6. Grant the first customer admin"));
+    app.appendChild(h("p", {},
+        "Open the cluster's user-facing detail page (",
+        h("a", { href: "#/clusters" }, "My Clusters"),
+        " — SUNET admins see all), click ",
+        h("strong", {}, "Manage users"),
+        ", and add at least one user with role ",
+        h("code", {}, "customer_admin"),
+        ". They can then add their own team members."));
+
+    // ---- Verification ----
+    app.appendChild(section("Verification"));
+    app.appendChild(h("p", {},
+        "Once the customer admin has issued their first kubeconfig:"));
+    app.appendChild(h("ol", { style: "margin-left:24px" },
+        h("li", {}, h("p", {}, "On the platform: ",
+            h("code", {}, "kubectl --context <tenant-cluster> get csr"),
+            " shows an Approved CSR signed by the cluster CA.")),
+        h("li", {}, h("p", {}, "And: ",
+            h("code", {}, "kubectl --context <tenant-cluster> get rolebindings -n argocd -l sunet.se/oidc-sub=<user-sub>"),
+            " shows one binding per active credential for that user.")),
+        h("li", {}, h("p", {}, "User-side: ",
+            h("code", {}, "KUBECONFIG=./issued.yaml kubectl get applications -n argocd"),
+            " succeeds; ",
+            h("code", {}, "kubectl get pods -n kube-system"),
+            " is forbidden (RBAC scoping confirmed).")),
+    ));
+
+    // ---- Decommissioning ----
+    app.appendChild(section("Decommissioning"));
+    app.appendChild(h("p", {},
+        "To retire a tenant cluster, delete it from the admin clusters list (this also deletes its management/backup OpenStack project CRs and revokes all credentials). Then on the OpenBao side: ",
+        h("code", {}, "bao secrets disable kubernetes/<slug>"),
+        ". The OpenStack project will be torn down by the operator on next reconcile."));
 }
 
 async function renderAdminClusterDetail(slug) {
