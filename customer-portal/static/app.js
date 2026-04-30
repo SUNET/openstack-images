@@ -1956,8 +1956,8 @@ function renderClusterSetupHelp() {
         "bao write kubernetes/<slug>/roles/argocd-rbac-manager \\\n" +
         "    allowed_kubernetes_namespaces=kube-system \\\n" +
         "    service_account_name=openbao-rbac-manager \\\n" +
-        "    token_default_ttl=120s \\\n" +
-        "    token_max_ttl=300s"
+        "    token_default_ttl=600s \\\n" +
+        "    token_max_ttl=600s"
     ));
     app.appendChild(h("p", { className: "meta" },
         "The path must be ",
@@ -1968,7 +1968,10 @@ function renderClusterSetupHelp() {
         h("code", {}, "kube-system"),
         ") because that's where the ",
         h("code", {}, "openbao-rbac-manager"),
-        " SA lives. Short token TTLs are intentional: the portal needs cluster admin only briefly per request."));
+        " SA lives. ",
+        "TTL is set to 600s (10 min) because that's K8s's minimum for the ",
+        "TokenRequest API; the portal uses the token only for the duration of a single ",
+        "issuance call (a few seconds), so the actual exposure window is brief regardless."));
 
     app.appendChild(h("h4", { style: "margin-top:16px" }, "4. Register the cluster in the portal"));
     app.appendChild(h("p", {},
