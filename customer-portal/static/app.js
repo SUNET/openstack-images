@@ -1870,6 +1870,10 @@ function renderClusterSetupHelp() {
         "  - apiGroups: [\"rbac.authorization.k8s.io\"]\n" +
         "    resources: [\"rolebindings\"]\n" +
         "    verbs: [\"create\", \"get\", \"list\", \"delete\"]\n" +
+        "  - apiGroups: [\"rbac.authorization.k8s.io\"]\n" +
+        "    resources: [\"roles\"]\n" +
+        "    resourceNames: [\"argocd-tenant\"]\n" +
+        "    verbs: [\"bind\"]\n" +
         "  - apiGroups: [\"certificates.k8s.io\"]\n" +
         "    resources: [\"certificatesigningrequests\"]\n" +
         "    verbs: [\"create\", \"get\", \"delete\"]\n" +
