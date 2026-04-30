@@ -15,6 +15,7 @@ removal lists+deletes all RoleBindings labeled with the user's `oidc-sub`.
 """
 
 import base64
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -32,8 +33,18 @@ from app.models import KubeconfigIssuance, TenantCluster
 
 logger = logging.getLogger(__name__)
 
-LABEL_OIDC_SUB = "sunet.se/oidc-sub"
+# Filterable label: a hex hash of the OIDC sub, because K8s label values
+# cannot contain '@' or '/' (a typical OIDC sub like "kano@sunet.se" fails
+# K8s label validation). The annotation carries the raw sub for human
+# readability and audit; cascade-revoke filters by the hashed label.
+LABEL_OIDC_SUB_HASH = "sunet.se/oidc-sub-hash"
 LABEL_ISSUANCE_ID = "sunet.se/issuance-id"
+ANNOTATION_OIDC_SUB = "sunet.se/oidc-sub"
+
+
+def oidc_sub_label_hash(user_sub: str) -> str:
+    """Stable, label-safe identifier for an OIDC sub (hex sha256, first 32)."""
+    return hashlib.sha256(user_sub.encode("utf-8")).hexdigest()[:32]
 
 
 def _build_kubeconfig(
@@ -140,8 +151,11 @@ async def issue(
                 role_name=cluster.argocd_role_name,
                 group=organization,
                 labels={
-                    LABEL_OIDC_SUB: user_sub,
+                    LABEL_OIDC_SUB_HASH: oidc_sub_label_hash(user_sub),
                     LABEL_ISSUANCE_ID: issuance_id,
+                },
+                annotations={
+                    ANNOTATION_OIDC_SUB: user_sub,
                 },
             )
         except Exception:
@@ -203,7 +217,7 @@ async def cascade_revoke_for_user(
     session: AsyncSession,
 ) -> int:
     """Revoke every active issuance for `user_sub` on `cluster`."""
-    label_selector = f"{LABEL_OIDC_SUB}={user_sub}"
+    label_selector = f"{LABEL_OIDC_SUB_HASH}={oidc_sub_label_hash(user_sub)}"
     async with TenantClusterClient(cluster) as tc:
         names = await tc.list_rolebinding_names_by_label(
             namespace=cluster.argocd_namespace,
@@ -251,6 +265,8 @@ __all__ = [
     "cascade_revoke_for_user",
     "issuance_status",
     "default_ttl_days_or",
-    "LABEL_OIDC_SUB",
+    "oidc_sub_label_hash",
+    "LABEL_OIDC_SUB_HASH",
     "LABEL_ISSUANCE_ID",
+    "ANNOTATION_OIDC_SUB",
 ]

@@ -179,10 +179,14 @@ class TenantClusterClient:
         role_name: str,
         group: str,
         labels: dict[str, str],
+        annotations: dict[str, str] | None = None,
     ) -> None:
         rbac = k8s_client.RbacAuthorizationV1Api(self.api)
         body = k8s_client.V1RoleBinding(
-            metadata=k8s_client.V1ObjectMeta(name=name, namespace=namespace, labels=labels),
+            metadata=k8s_client.V1ObjectMeta(
+                name=name, namespace=namespace,
+                labels=labels, annotations=annotations or None,
+            ),
             role_ref=k8s_client.V1RoleRef(
                 api_group="rbac.authorization.k8s.io",
                 kind="Role",

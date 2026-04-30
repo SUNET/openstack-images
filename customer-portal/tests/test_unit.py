@@ -16,6 +16,7 @@ from app.kubeconfig_service import (
     _build_kubeconfig,
     _cert_serial_and_expiry,
     issuance_status,
+    oidc_sub_label_hash,
 )
 from app.models import KubeconfigIssuance
 from app.schemas import (
@@ -196,6 +197,30 @@ def test_create_cluster_request_slug_regex() -> None:
         CreateClusterRequest(slug="UPPER", **base)
     with pytest.raises(ValidationError):
         CreateClusterRequest(slug="trailing-", **base)
+
+
+def test_oidc_sub_label_hash_is_label_safe() -> None:
+    """K8s label values must match [A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])? and ≤63."""
+    import re
+
+    samples = [
+        "kano@sunet.se",
+        "user.with.dots@example.org",
+        "user+suffix@org",
+        "user/with/slash",
+        "https://idp.example/users/abc-123",
+        "x" * 500,
+    ]
+    label_re = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
+    for s in samples:
+        h = oidc_sub_label_hash(s)
+        assert len(h) <= 63
+        assert label_re.match(h), f"{h!r} from {s!r} not label-safe"
+
+
+def test_oidc_sub_label_hash_is_stable() -> None:
+    assert oidc_sub_label_hash("kano@sunet.se") == oidc_sub_label_hash("kano@sunet.se")
+    assert oidc_sub_label_hash("a") != oidc_sub_label_hash("b")
 
 
 def test_create_cluster_request_worker_groups_min() -> None:
