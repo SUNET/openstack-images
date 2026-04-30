@@ -1812,7 +1812,7 @@ function renderClusterSetupHelp() {
     app.appendChild(codeBlock(
         "cat > /tmp/customer-portal.hcl <<'EOF'\n" +
         "path \"kubernetes/+/creds/argocd-rbac-manager\" {\n" +
-        "  capabilities = [\"read\"]\n" +
+        "  capabilities = [\"update\"]\n" +
         "}\n" +
         "EOF\n" +
         "bao policy write customer-portal /tmp/customer-portal.hcl\n\n" +
@@ -1822,6 +1822,14 @@ function renderClusterSetupHelp() {
         "    policies=customer-portal \\\n" +
         "    ttl=1h"
     ));
+    app.appendChild(h("p", { className: "meta" },
+        "The capability is ", h("code", {}, "update"),
+        " (not ", h("code", {}, "read"),
+        "): the kubernetes secrets engine generates credentials via POST,",
+        " which Vault/OpenBao maps to ",
+        h("code", {}, "update"),
+        " — using ", h("code", {}, "read"),
+        " yields a 403 permission-denied at credential mint time."));
     app.appendChild(h("p", { className: "meta" },
         "If the portal runs under a different SA name or namespace, adjust the bound_* fields. ttl=1h is how long the portal's Vault session lives between re-logins."));
 
