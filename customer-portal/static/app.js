@@ -1880,6 +1880,14 @@ function renderClusterSetupHelp() {
         "    resources: [\"signers\"]\n" +
         "    resourceNames: [\"kubernetes.io/kube-apiserver-client\"]\n" +
         "    verbs: [\"approve\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"serviceaccounts\"]\n" +
+        "    resourceNames: [\"openbao-rbac-manager\"]\n" +
+        "    verbs: [\"get\"]\n" +
+        "  - apiGroups: [\"\"]\n" +
+        "    resources: [\"serviceaccounts/token\"]\n" +
+        "    resourceNames: [\"openbao-rbac-manager\"]\n" +
+        "    verbs: [\"create\"]\n" +
         "---\n" +
         "apiVersion: rbac.authorization.k8s.io/v1\n" +
         "kind: Role\n" +
