@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.audit import audit_log
 from app.auth import get_current_user, is_sunet_admin
 from app.config import Settings, get_settings
 from app.db import get_session
@@ -135,6 +136,11 @@ async def create_project(
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
+    audit_log(
+        user["sub"], "project.create",
+        contract_number=contract_number, resource_name=resource_name,
+        users=len(users),
+    )
     return ProjectResponse(
         resource_name=resource_name,
         name=qualified_name,
@@ -177,6 +183,11 @@ async def update_project(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    audit_log(
+        user["sub"], "project.update",
+        contract_number=contract_number, resource_name=resource_name,
+        users=len(req.users) if req.users is not None else "unchanged",
+    )
     return _enrich_project(updated)
 
 
@@ -206,3 +217,8 @@ async def delete_project(
         git_backend.delete_project(resource_name)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    audit_log(
+        user["sub"], "project.delete",
+        contract_number=contract_number, resource_name=resource_name,
+    )

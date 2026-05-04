@@ -30,6 +30,7 @@ def fake_sa_token(tmp_path) -> str:
 @pytest.fixture
 def settings(fake_sa_token, monkeypatch) -> Settings:
     monkeypatch.setenv("OPENBAO_ADDR", "http://openbao.test:8200")
+    monkeypatch.setenv("OPENBAO_ALLOW_INSECURE", "1")  # http addr is dev-only
     monkeypatch.setenv("OPENBAO_K8S_AUTH_ROLE", "customer-portal")
     monkeypatch.setenv("OPENBAO_SA_TOKEN_PATH", fake_sa_token)
     # bypass cached settings
@@ -129,7 +130,9 @@ async def test_get_k8s_creds_propagates_other_errors(settings: Settings):
             )
             with pytest.raises(OpenBaoError) as exc:
                 await client.get_k8s_creds("kubernetes/x", "r")
+            # Status code surfaces; raw response body must NOT (it goes to
+            # the server log instead, to avoid leaking internal hints).
             assert "404" in str(exc.value)
-            assert "mount not found" in str(exc.value)
+            assert "mount not found" not in str(exc.value)
     finally:
         await client.aclose()

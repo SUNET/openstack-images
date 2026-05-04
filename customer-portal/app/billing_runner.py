@@ -635,9 +635,18 @@ def resolve_template(template: str, **kwargs: str) -> str:
 
 
 async def deliver_webdav(url: str, username: str, password: str, filename: str, content: str) -> None:
-    """Upload a file to a WebDAV endpoint."""
+    """Upload a file to a WebDAV endpoint.
+
+    Re-runs the SSRF allowlist check at delivery time as defence-in-depth
+    against jobs whose stored URL pre-dates a tightened allowlist or whose
+    DNS resolution has shifted to internal addresses.
+    """
+    from app.url_safety import validate_webdav_url
+    settings = get_settings()
+    validate_webdav_url(url, settings.webdav_allowed_hosts)
+
     full_url = url.rstrip("/") + "/" + filename
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
         resp = await client.put(full_url, content=content.encode(), auth=(username, password))
         resp.raise_for_status()
     logger.info("Delivered %s to WebDAV: %s", filename, url)

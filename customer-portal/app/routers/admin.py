@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.audit import audit_log
 from app.auth import require_admin
 from app.db import get_session
 from app.models import (
@@ -52,7 +53,7 @@ async def list_customers(
 @router.post("/customers", response_model=CustomerResponse, status_code=201)
 async def create_customer(
     req: CreateCustomerRequest,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     existing = await session.execute(select(Customer).where(Customer.name == req.name))
@@ -63,6 +64,7 @@ async def create_customer(
     session.add(customer)
     await session.commit()
     await session.refresh(customer)
+    audit_log(user["sub"], "customer.create", customer_id=customer.id, name=customer.name)
     return customer
 
 
@@ -88,7 +90,7 @@ async def update_customer(
     customer_id: int,
     req: UpdateCustomerRequest,
     request: Request,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     customer = await session.get(Customer, customer_id)
@@ -124,13 +126,14 @@ async def update_customer(
 
     await session.commit()
     await session.refresh(customer)
+    audit_log(user["sub"], "customer.update", customer_id=customer.id)
     return customer
 
 
 @router.delete("/customers/{customer_id}", status_code=204)
 async def delete_customer(
     customer_id: int,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     customer = await session.execute(
@@ -146,6 +149,7 @@ async def delete_customer(
 
     await session.delete(customer)
     await session.commit()
+    audit_log(user["sub"], "customer.delete", customer_id=customer_id)
 
 
 # --- Contracts ---
@@ -163,7 +167,7 @@ async def list_contracts(
 @router.post("/contracts", response_model=ContractResponse, status_code=201)
 async def create_contract(
     req: CreateContractRequest,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     customer = await session.get(Customer, req.customer_id)
@@ -184,6 +188,10 @@ async def create_contract(
     session.add(contract)
     await session.commit()
     await session.refresh(contract)
+    audit_log(
+        user["sub"], "contract.create",
+        contract_id=contract.id, contract_number=contract.contract_number,
+    )
     return contract
 
 
@@ -223,7 +231,7 @@ async def get_contract(
 async def update_contract(
     contract_id: int,
     req: UpdateContractRequest,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     contract = await session.get(Contract, contract_id)
@@ -235,6 +243,7 @@ async def update_contract(
 
     await session.commit()
     await session.refresh(contract)
+    audit_log(user["sub"], "contract.update", contract_id=contract.id)
     return contract
 
 
@@ -242,7 +251,7 @@ async def update_contract(
 async def delete_contract(
     contract_id: int,
     request: Request,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     contract = await session.get(Contract, contract_id)
@@ -257,6 +266,7 @@ async def delete_contract(
 
     await session.delete(contract)
     await session.commit()
+    audit_log(user["sub"], "contract.delete", contract_id=contract_id)
 
 
 # --- Contract Access ---
@@ -266,7 +276,7 @@ async def delete_contract(
 async def grant_access(
     contract_id: int,
     req: GrantAccessRequest,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     contract = await session.get(Contract, contract_id)
@@ -285,6 +295,10 @@ async def grant_access(
     grant = ContractAccess(contract_id=contract_id, user_sub=req.user_sub)
     session.add(grant)
     await session.commit()
+    audit_log(
+        user["sub"], "contract.grant_access",
+        contract_id=contract_id, target_sub=req.user_sub,
+    )
     return {"status": "granted", "user_sub": req.user_sub}
 
 
@@ -292,7 +306,7 @@ async def grant_access(
 async def revoke_access(
     contract_id: int,
     user_sub: str,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     result = await session.execute(
@@ -307,6 +321,10 @@ async def revoke_access(
 
     await session.delete(grant)
     await session.commit()
+    audit_log(
+        user["sub"], "contract.revoke_access",
+        contract_id=contract_id, target_sub=user_sub,
+    )
 
 
 # --- Global Pricing ---

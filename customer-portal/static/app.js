@@ -147,6 +147,14 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 
+document.addEventListener("DOMContentLoaded", () => {
+    const toggle = document.getElementById("mobile-toggle");
+    const topbar = document.getElementById("topbar");
+    if (toggle && topbar) {
+        toggle.addEventListener("click", () => topbar.classList.toggle("open"));
+    }
+});
+
 // ---------- API ----------
 
 async function api(path, opts = {}) {

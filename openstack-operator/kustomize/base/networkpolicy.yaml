@@ -32,7 +32,12 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Allow access to Kubernetes API server
+    # Allow access to Kubernetes API server.
+    # NOTE: The base manifest uses 0.0.0.0/0 because the API server endpoint
+    # varies per cluster (bare-metal: dedicated CP IPs; managed: cloud LB
+    # IPs). Production overlays MUST replace this rule with the concrete
+    # CIDR(s) — typically `kubectl get endpoints kubernetes -n default -o
+    # jsonpath='{.subsets[*].addresses[*].ip}'`.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -41,8 +46,9 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
-    # Allow access to OpenStack APIs (typically 5000, 8774, 9292, 9696, 8776)
-    # Using broad HTTPS access since OpenStack endpoints vary by deployment
+    # Allow access to OpenStack APIs (typically 5000, 8774, 9292, 9696, 8776).
+    # NOTE: Overlays should narrow this to the OpenStack control-plane CIDR
+    # (and any external endpoint LB) rather than 0.0.0.0/0.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

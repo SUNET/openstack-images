@@ -249,23 +249,39 @@ spec:
                     properties:
                       role:
                         type: string
-                        description: "Role name (e.g., member, admin, reader)"
+                        description: >-
+                          OpenStack role to bind. Restricted to a safe
+                          allowlist; assigning admin via this CRD is
+                          intentionally not permitted — admin must be
+                          managed out-of-band by SUNET ops.
+                        enum:
+                          - reader
+                          - member
+                          - load-balancer_member
+                          - heat_stack_user
+                          - heat_stack_owner
                       users:
                         type: array
                         description: "List of user names/emails"
+                        maxItems: 256
                         items:
                           type: string
+                          maxLength: 255
                       groups:
                         type: array
                         description: "List of group names"
+                        maxItems: 64
                         items:
                           type: string
+                          maxLength: 255
                       userDomain:
                         type: string
                         description: "Domain for users (defaults to project domain)"
+                        maxLength: 255
                       groupDomain:
                         type: string
                         description: "Domain for groups (defaults to project domain)"
+                        maxLength: 255
 
                 federationRef:
                   type: object

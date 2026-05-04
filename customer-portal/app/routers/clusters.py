@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app import kubeconfig_service
+from app.audit import audit_log
 from app.auth import (
     get_current_user,
     is_sunet_admin,
@@ -183,6 +184,10 @@ async def admin_create_cluster(
     await session.flush()
     await session.commit()
 
+    audit_log(
+        user["sub"], "cluster.create",
+        cluster_id=cluster.id, slug=cluster.slug,
+    )
     return await _to_response(cluster, caller_role="sunet_admin", session=session)
 
 
@@ -221,7 +226,7 @@ async def admin_get_cluster(
 async def admin_update_cluster(
     slug: str,
     req: UpdateClusterRequest,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     cluster = (
@@ -246,13 +251,14 @@ async def admin_update_cluster(
         if v is not None:
             setattr(cluster, field, v)
     await session.commit()
+    audit_log(user["sub"], "cluster.update", cluster_id=cluster.id, slug=cluster.slug)
     return await _to_response(cluster, caller_role="sunet_admin", session=session)
 
 
 @admin_router.post("/{slug}/provision", response_model=ClusterResponse)
 async def admin_provision_cluster(
     slug: str,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     cluster = (
@@ -270,6 +276,7 @@ async def admin_provision_cluster(
 
     cluster.provisioned_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await session.commit()
+    audit_log(user["sub"], "cluster.provision", cluster_id=cluster.id, slug=slug)
     return await _to_response(cluster, caller_role="sunet_admin", session=session)
 
 
@@ -277,7 +284,7 @@ async def admin_provision_cluster(
 async def admin_delete_cluster(
     slug: str,
     request: Request,
-    _user=Depends(require_admin),
+    user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
     cluster = (
@@ -302,6 +309,7 @@ async def admin_delete_cluster(
 
     await session.delete(cluster)
     await session.commit()
+    audit_log(user["sub"], "cluster.delete", slug=slug)
 
 
 # --- Member-facing list/get + access mgmt ---
@@ -416,6 +424,10 @@ async def grant_cluster_access(
         )
 
     await session.commit()
+    audit_log(
+        user["sub"], "cluster.access_grant",
+        slug=slug, target_sub=req.user_sub, role=req.role,
+    )
     return ClusterAccessResponse.model_validate(grant)
 
 
@@ -474,6 +486,10 @@ async def revoke_cluster_access(
         )
 
     await session.commit()
+    audit_log(
+        user["sub"], "cluster.access_revoke",
+        slug=slug, target_sub=user_sub,
+    )
 
 
 # Re-exported so main.py can include both with one import.

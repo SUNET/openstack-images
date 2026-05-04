@@ -7,10 +7,12 @@ from typing import Any
 
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.audit import audit_log
 from app.auth import get_current_user
 from app.billing_runner import execute_job, run_due_jobs
 from app.config import get_settings
@@ -18,12 +20,15 @@ from app.crypto import encrypt_value
 from app.db import get_session
 from app.models import BillingJob, BillingJobContract, BillingJobRun, Contract, ContractAccess
 from app.schemas import (
+    SENSITIVE_DELIVERY_KEYS,
     BillingJobResponse,
     BillingJobRunResponse,
     CreateBillingJobRequest,
     ManualRunRequest,
     UpdateBillingJobRequest,
+    validate_delivery_config,
 )
+from app.url_safety import UnsafeDeliveryURL, validate_webdav_url
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +38,9 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 def _mask_config(config_json: str) -> dict:
     """Parse delivery config and mask sensitive fields."""
     config = json.loads(config_json)
-    if "password" in config:
-        config["password"] = "********"
+    for key in list(config):
+        if key.lower() in SENSITIVE_DELIVERY_KEYS and config[key]:
+            config[key] = "********"
     return config
 
 
@@ -59,10 +65,11 @@ def _job_to_response(job: BillingJob) -> BillingJobResponse:
 
 
 def _encrypt_delivery_config(config: dict) -> str:
-    """Encrypt password in delivery config and return as JSON string."""
+    """Encrypt sensitive fields in delivery config and return as JSON string."""
     config = dict(config)
-    if "password" in config and config["password"]:
-        config["password"] = encrypt_value(config["password"])
+    for key in list(config):
+        if key.lower() in SENSITIVE_DELIVERY_KEYS and config[key]:
+            config[key] = encrypt_value(config[key])
     return json.dumps(config)
 
 
@@ -96,14 +103,27 @@ def _validate_schedule(schedule: str) -> None:
         raise HTTPException(status_code=400, detail=f"Invalid cron schedule: {e}")
 
 
-def _validate_delivery_config(method: str, config: dict) -> None:
-    """Validate delivery config structure."""
+def _validate_delivery_config(method: str, config: dict) -> dict:
+    """Run the typed schema for `method` and apply method-specific safety checks.
+
+    For WebDAV: enforces https + WEBDAV_ALLOWED_HOSTS allowlist + reject any
+    private/loopback/link-local resolution. For email: schema validates the
+    recipient pattern. Returns the normalized config dict.
+    """
+    settings = get_settings()
+    try:
+        normalized = validate_delivery_config(method, config)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=e.errors()) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     if method == "webdav":
-        if not config.get("url"):
-            raise HTTPException(status_code=400, detail="WebDAV URL required")
-    elif method == "email":
-        if not config.get("recipient"):
-            raise HTTPException(status_code=400, detail="Email recipient required")
+        try:
+            validate_webdav_url(normalized["url"], settings.webdav_allowed_hosts)
+        except UnsafeDeliveryURL as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    return normalized
 
 
 async def _require_job_access(
@@ -162,7 +182,7 @@ async def create_job(
     is_admin = user["sub"] in settings.admin_users
 
     _validate_schedule(req.schedule)
-    _validate_delivery_config(req.delivery_method, req.delivery_config)
+    normalized_config = _validate_delivery_config(req.delivery_method, req.delivery_config)
 
     if not req.all_contracts:
         await _validate_contract_access(req.contract_ids, user["sub"], is_admin, session)
@@ -173,7 +193,7 @@ async def create_job(
         all_contracts=req.all_contracts,
         schedule=req.schedule,
         delivery_method=req.delivery_method,
-        delivery_config=_encrypt_delivery_config(req.delivery_config),
+        delivery_config=_encrypt_delivery_config(normalized_config),
         filename_template=req.filename_template,
         per_contract=req.per_contract,
         enabled=req.enabled,
@@ -187,6 +207,12 @@ async def create_job(
 
     await session.commit()
     await session.refresh(job, ["selected_contracts"])
+    audit_log(
+        user["sub"],
+        "billing_job.create",
+        job_id=job.id,
+        delivery_method=job.delivery_method,
+    )
     return _job_to_response(job)
 
 
@@ -219,17 +245,35 @@ async def update_job(
         job.delivery_method = req.delivery_method
 
     if req.delivery_config is not None:
-        _validate_delivery_config(
-            req.delivery_method or job.delivery_method, req.delivery_config
-        )
-        # If password is "********" (masked), keep the existing encrypted password
+        method = req.delivery_method or job.delivery_method
+        # If any sensitive field is masked, splice in the existing encrypted
+        # value before validation so we don't re-encrypt the placeholder.
+        old_config = json.loads(job.delivery_config)
         new_config = dict(req.delivery_config)
-        if new_config.get("password") == "********":
-            old_config = json.loads(job.delivery_config)
-            new_config["password"] = old_config.get("password", "")
-            job.delivery_config = json.dumps(new_config)
-        else:
-            job.delivery_config = _encrypt_delivery_config(new_config)
+        masked_fields: list[str] = []
+        for key in list(new_config):
+            if (
+                key.lower() in SENSITIVE_DELIVERY_KEYS
+                and new_config[key] == "********"
+            ):
+                new_config[key] = ""  # placeholder, stripped below
+                masked_fields.append(key)
+        normalized = _validate_delivery_config(method, new_config)
+        # Restore the masked-out encrypted values from the existing record
+        # *after* schema validation passed.
+        for key in masked_fields:
+            normalized[key] = old_config.get(key, "")
+        # Encrypt only the new (plaintext) sensitive values; for masked
+        # fields, normalized[key] is already the stored ciphertext.
+        encrypted = dict(normalized)
+        for key in list(encrypted):
+            if (
+                key.lower() in SENSITIVE_DELIVERY_KEYS
+                and encrypted[key]
+                and key not in masked_fields
+            ):
+                encrypted[key] = encrypt_value(encrypted[key])
+        job.delivery_config = json.dumps(encrypted)
 
     for field in ("name", "all_contracts", "filename_template", "per_contract", "enabled"):
         val = getattr(req, field)
@@ -248,6 +292,7 @@ async def update_job(
 
     await session.commit()
     await session.refresh(job, ["selected_contracts"])
+    audit_log(user["sub"], "billing_job.update", job_id=job.id)
     return _job_to_response(job)
 
 
@@ -260,6 +305,7 @@ async def delete_job(
     job = await _require_job_access(job_id, user, session)
     await session.delete(job)
     await session.commit()
+    audit_log(user["sub"], "billing_job.delete", job_id=job_id)
 
 
 @router.get("/jobs/{job_id}/runs", response_model=list[BillingJobRunResponse])

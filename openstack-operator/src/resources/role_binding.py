@@ -1,11 +1,32 @@
 """Role binding management for OpenStack projects."""
 
 import logging
+import os
 from typing import Any
 
 from openstack_client import OpenStackClient
 
 logger = logging.getLogger(__name__)
+
+# Operator-side allowlist of OpenStack roles that an OpenstackProject CR may
+# request. Defence-in-depth: even if the CRD schema is loosened or a CR
+# bypasses validation, the operator refuses to bind anything outside this
+# set. `admin` is intentionally excluded; cluster-admin granting must happen
+# out-of-band by SUNET ops, not via tenant-mutable CRs.
+_DEFAULT_ALLOWED_ROLES = (
+    "reader",
+    "member",
+    "load-balancer_member",
+    "heat_stack_user",
+    "heat_stack_owner",
+)
+
+
+def _allowed_roles() -> frozenset[str]:
+    override = os.environ.get("ALLOWED_OPENSTACK_ROLES", "").strip()
+    if override:
+        return frozenset(r.strip() for r in override.split(",") if r.strip())
+    return frozenset(_DEFAULT_ALLOWED_ROLES)
 
 
 def apply_role_bindings(
@@ -45,8 +66,16 @@ def apply_role_bindings(
         logger.debug(f"No role bindings specified for project {project_id}")
         return
 
+    allowed = _allowed_roles()
     for binding in role_bindings:
         role_name = binding["role"]
+        if role_name not in allowed:
+            logger.error(
+                "Refusing to bind disallowed role %r on project %s "
+                "(allowed: %s)",
+                role_name, project_id, sorted(allowed),
+            )
+            continue
         role = client.get_role(role_name)
         if not role:
             logger.warning(f"Role {role_name} not found, skipping")

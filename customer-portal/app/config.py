@@ -2,18 +2,69 @@
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
+
+
+def _required_env(name: str) -> str:
+    val = os.environ.get(name, "").strip()
+    if not val:
+        raise RuntimeError(f"Required environment variable {name} is not set")
+    return val
+
+
+def _validated_base_url() -> str:
+    """BASE_URL is required and must be an https origin (http://localhost ok in dev)."""
+    val = _required_env("BASE_URL").rstrip("/")
+    parsed = urlparse(val)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError(f"BASE_URL must be a full URL (got {val!r})")
+    if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1"):
+        if os.environ.get("PORTAL_ALLOW_INSECURE_BASE_URL", "") != "1":
+            raise RuntimeError(
+                "BASE_URL must use https; set PORTAL_ALLOW_INSECURE_BASE_URL=1 to override (dev only)"
+            )
+    return val
+
+
+def _validated_openbao_addr() -> str:
+    val = os.environ.get(
+        "OPENBAO_ADDR", "https://openbao.openbao.svc.cluster.local:8200"
+    )
+    parsed = urlparse(val)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise RuntimeError(f"OPENBAO_ADDR must be a full URL (got {val!r})")
+    if parsed.scheme == "http" and os.environ.get("OPENBAO_ALLOW_INSECURE", "") != "1":
+        raise RuntimeError(
+            "OPENBAO_ADDR uses http; set OPENBAO_ALLOW_INSECURE=1 to override (dev only)"
+        )
+    return val
+
+
+def _split_csv(name: str) -> list[str]:
+    return [s.strip() for s in os.environ.get(name, "").split(",") if s.strip()]
 
 
 @dataclass(frozen=True)
 class Settings:
     # OIDC
-    oidc_issuer: str = field(default_factory=lambda: os.environ["OIDC_ISSUER"])
-    oidc_client_id: str = field(default_factory=lambda: os.environ["OIDC_CLIENT_ID"])
-    oidc_client_secret: str = field(default_factory=lambda: os.environ["OIDC_CLIENT_SECRET"])
-    oidc_redirect_uri: str = field(default_factory=lambda: os.environ["OIDC_REDIRECT_URI"])
+    oidc_issuer: str = field(default_factory=lambda: _required_env("OIDC_ISSUER"))
+    oidc_client_id: str = field(default_factory=lambda: _required_env("OIDC_CLIENT_ID"))
+    oidc_client_secret: str = field(default_factory=lambda: _required_env("OIDC_CLIENT_SECRET"))
+    oidc_redirect_uri: str = field(default_factory=lambda: _required_env("OIDC_REDIRECT_URI"))
 
     # Session
-    secret_key: str = field(default_factory=lambda: os.environ["SECRET_KEY"])
+    secret_key: str = field(default_factory=lambda: _required_env("SECRET_KEY"))
+    # SameSite=lax works with the OIDC redirect callback; strict would drop
+    # the session on the cross-site auth callback bounce.
+    session_cookie_name: str = field(
+        default_factory=lambda: os.environ.get("SESSION_COOKIE_NAME", "portal_session")
+    )
+    session_max_age_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("SESSION_MAX_AGE_SECONDS", str(8 * 3600)))
+    )
+    session_https_only: bool = field(
+        default_factory=lambda: os.environ.get("SESSION_HTTPS_ONLY", "1") == "1"
+    )
 
     # Database
     database_url: str = field(
@@ -23,7 +74,7 @@ class Settings:
     )
 
     # Git backend
-    git_repo_url: str = field(default_factory=lambda: os.environ["GIT_REPO_URL"])
+    git_repo_url: str = field(default_factory=lambda: _required_env("GIT_REPO_URL"))
     git_branch: str = field(default_factory=lambda: os.environ.get("GIT_BRANCH", "main"))
     git_work_dir: str = field(
         default_factory=lambda: os.environ.get("GIT_WORK_DIR", "/tmp/customer-projects")
@@ -36,14 +87,8 @@ class Settings:
     )
 
     # Portal
-    admin_users: list[str] = field(
-        default_factory=lambda: [
-            u.strip()
-            for u in os.environ.get("PORTAL_ADMIN_USERS", "").split(",")
-            if u.strip()
-        ]
-    )
-    base_url: str = field(default_factory=lambda: os.environ.get("BASE_URL", ""))
+    admin_users: list[str] = field(default_factory=lambda: _split_csv("PORTAL_ADMIN_USERS"))
+    base_url: str = field(default_factory=_validated_base_url)
 
     # OpenStack project defaults
     default_domain: str = field(
@@ -74,13 +119,14 @@ class Settings:
     openstack_cloud: str = field(
         default_factory=lambda: os.environ.get("OPENSTACK_CLOUD", "openstack")
     )
+    # WebDAV delivery: explicit allowlist of hostnames the portal may PUT to.
+    # Empty list disables WebDAV delivery.
+    webdav_allowed_hosts: list[str] = field(
+        default_factory=lambda: _split_csv("WEBDAV_ALLOWED_HOSTS")
+    )
 
     # OpenBao (for tenant cluster ephemeral RBAC creds)
-    openbao_addr: str = field(
-        default_factory=lambda: os.environ.get(
-            "OPENBAO_ADDR", "http://openbao.openbao.svc.cluster.local:8200"
-        )
-    )
+    openbao_addr: str = field(default_factory=_validated_openbao_addr)
     openbao_k8s_auth_role: str = field(
         default_factory=lambda: os.environ.get("OPENBAO_K8S_AUTH_ROLE", "customer-portal")
     )
@@ -90,10 +136,13 @@ class Settings:
             "/var/run/secrets/kubernetes.io/serviceaccount/token",
         )
     )
+    openbao_ca_path: str = field(
+        default_factory=lambda: os.environ.get("OPENBAO_CA_PATH", "")
+    )
 
     # Tenant kubeconfig
     default_kubeconfig_ttl_days: int = field(
-        default_factory=lambda: int(os.environ.get("DEFAULT_KUBECONFIG_TTL_DAYS", "365"))
+        default_factory=lambda: int(os.environ.get("DEFAULT_KUBECONFIG_TTL_DAYS", "90"))
     )
 
     # Cluster-request notifications

@@ -24,6 +24,7 @@ os.environ.setdefault("OIDC_REDIRECT_URI", "http://localhost/callback")
 os.environ.setdefault("SECRET_KEY", secrets.token_hex(16))
 os.environ.setdefault("GIT_REPO_URL", "/dev/null")
 os.environ.setdefault("PORTAL_ADMIN_USERS", "admin@test")
+os.environ.setdefault("BASE_URL", "http://localhost")
 os.environ.setdefault(
     "DATABASE_URL",
     os.environ.get(

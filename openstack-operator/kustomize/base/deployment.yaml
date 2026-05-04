@@ -26,8 +26,10 @@ spec:
         fsGroup: 1000
       containers:
         - name: operator
-          image: docker.sunet.se/platform/openstack-operator:latest
-          imagePullPolicy: Always
+          # Tag is pinned in kustomize base/kustomization.yaml `images:`.
+          # Production overlays should override with a digest reference.
+          image: docker.sunet.se/platform/openstack-operator:v0.1.0
+          imagePullPolicy: IfNotPresent
           env:
             - name: OS_CLIENT_CONFIG_FILE
               value: /etc/openstack/clouds.yaml

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import kubeconfig_service
+from app.audit import audit_log
 from app.auth import (
     get_current_user,
     is_sunet_admin,
@@ -112,6 +113,11 @@ async def issue_credential(
     )
     await session.commit()
 
+    audit_log(
+        user["sub"], "kubeconfig.issue",
+        cluster=slug, issuance_id=issuance.id,
+        cert_serial=issuance.cert_serial, ttl_days=ttl_days,
+    )
     meta = _to_metadata(issuance, slug)
     return IssuedKubeconfigResponse(**meta.model_dump(), kubeconfig=kubeconfig_yaml)
 
@@ -155,6 +161,10 @@ async def rotate_credential(
         cluster, old, by_sub=user["sub"], session=session
     )
     await session.commit()
+    audit_log(
+        user["sub"], "kubeconfig.rotate",
+        cluster=slug, old_issuance_id=old.id, new_issuance_id=new.id,
+    )
     meta = _to_metadata(new, slug)
     return IssuedKubeconfigResponse(**meta.model_dump(), kubeconfig=kubeconfig_yaml)
 
@@ -193,3 +203,8 @@ async def revoke_credential(
         cluster, issuance, by_sub=user["sub"], session=session
     )
     await session.commit()
+    audit_log(
+        user["sub"], "kubeconfig.revoke",
+        cluster=slug, issuance_id=issuance.id,
+        target_sub=issuance.user_sub,
+    )

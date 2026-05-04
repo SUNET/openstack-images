@@ -30,8 +30,11 @@ class OpenBaoClient:
         self._token: str | None = None
         self._token_expires_at: float = 0.0
         self._lock = asyncio.Lock()
+        # OPENBAO_CA_PATH overrides the system trust store for the OpenBao
+        # endpoint; useful when OpenBao is fronted by an internal CA.
+        verify: str | bool = settings.openbao_ca_path or True
         # Reusable client; OpenBao is internal, no proxy needed.
-        self._http = httpx.AsyncClient(timeout=10.0)
+        self._http = httpx.AsyncClient(timeout=10.0, verify=verify, follow_redirects=False)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -50,15 +53,20 @@ class OpenBaoClient:
             json={"role": self._role, "jwt": jwt},
         )
         if resp.status_code != 200:
+            logger.error(
+                "OpenBao kubernetes login failed: status=%s body=%s",
+                resp.status_code, resp.text[:500],
+            )
             raise OpenBaoError(
-                f"OpenBao kubernetes login failed: {resp.status_code} {resp.text}"
+                f"OpenBao kubernetes login failed (status {resp.status_code})"
             )
         body = resp.json()
         auth = body.get("auth") or {}
         token = auth.get("client_token")
         lease = auth.get("lease_duration", 0)
         if not token:
-            raise OpenBaoError(f"OpenBao login response missing client_token: {body}")
+            logger.error("OpenBao login response missing client_token (keys=%s)", list(body))
+            raise OpenBaoError("OpenBao login response missing client_token")
         # Renew slightly before actual expiry.
         self._token = token
         self._token_expires_at = time.monotonic() + max(60, int(lease) - 30)
@@ -103,16 +111,21 @@ class OpenBaoClient:
                 path, headers={"X-Vault-Token": token}, json=body_payload
             )
         if resp.status_code not in (200, 201):
+            logger.error(
+                "OpenBao mint %s/creds/%s failed: status=%s body=%s",
+                mount, role, resp.status_code, resp.text[:500],
+            )
             raise OpenBaoError(
-                f"OpenBao mint {mount}/creds/{role} failed: "
-                f"{resp.status_code} {resp.text}"
+                f"OpenBao mint {mount}/creds/{role} failed (status {resp.status_code})"
             )
         body = resp.json()
         data = body.get("data")
         if not data or "service_account_token" not in data:
-            raise OpenBaoError(
-                f"OpenBao response missing service_account_token: keys={list((data or {}).keys())}"
+            logger.error(
+                "OpenBao response missing service_account_token (keys=%s)",
+                list((data or {}).keys()),
             )
+            raise OpenBaoError("OpenBao response missing service_account_token")
         return data
 
 

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cluster_request_service
+from app.audit import audit_log
 from app.auth import get_current_user, require_admin, require_cluster_access
 from app.config import Settings, get_settings
 from app.db import get_session
@@ -92,6 +93,10 @@ async def create_request(
         session=session,
     )
     await session.commit()
+    audit_log(
+        user["sub"], "cluster_request.create",
+        cluster=slug, request_id=req.id, request_type=req.request_type,
+    )
     return _to_response(req, slug)
 
 
@@ -149,6 +154,10 @@ async def admin_apply_request(
         git_backend=request.app.state.git_backend,
     )
     await session.commit()
+    audit_log(
+        user["sub"], "cluster_request.apply",
+        cluster=slug, request_id=request_id, request_type=cr.request_type,
+    )
     return _to_response(cr, slug)
 
 
@@ -166,6 +175,10 @@ async def admin_deny_request(
         cr, by_sub=user["sub"], note=body.note, session=session
     )
     await session.commit()
+    audit_log(
+        user["sub"], "cluster_request.deny",
+        cluster=slug, request_id=request_id, request_type=cr.request_type,
+    )
     return _to_response(cr, slug)
 
 

@@ -2,8 +2,11 @@
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --- Admin: Customers ---
 
@@ -119,15 +122,44 @@ class ContractRebateRequest(BaseModel):
 # --- Customer: Projects ---
 
 
+_PROJECT_USER_RE = re.compile(r"^[a-zA-Z0-9._+\-:/@]{1,254}$")
+_PROJECT_DESCRIPTION_MAX = 1024
+_PROJECT_USERS_MAX = 256
+
+
+def _validate_user_subjects(users: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for raw in users:
+        if not isinstance(raw, str):
+            raise ValueError("user entries must be strings")
+        u = raw.strip()
+        if not u:
+            raise ValueError("user entry must not be empty")
+        if not _PROJECT_USER_RE.match(u):
+            raise ValueError(f"user entry contains disallowed characters: {u!r}")
+        cleaned.append(u)
+    return cleaned
+
+
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-    description: str = ""
-    users: list[str] = Field(default_factory=list)
+    description: str = Field(default="", max_length=_PROJECT_DESCRIPTION_MAX)
+    users: list[str] = Field(default_factory=list, max_length=_PROJECT_USERS_MAX)
+
+    @field_validator("users")
+    @classmethod
+    def _users_pattern(cls, v: list[str]) -> list[str]:
+        return _validate_user_subjects(v)
 
 
 class UpdateProjectRequest(BaseModel):
-    description: str | None = None
-    users: list[str] | None = None
+    description: str | None = Field(default=None, max_length=_PROJECT_DESCRIPTION_MAX)
+    users: list[str] | None = Field(default=None, max_length=_PROJECT_USERS_MAX)
+
+    @field_validator("users")
+    @classmethod
+    def _users_pattern(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else _validate_user_subjects(v)
 
 
 class ProjectResponse(BaseModel):
@@ -143,12 +175,61 @@ class ProjectResponse(BaseModel):
 # --- Billing Jobs ---
 
 
+class WebDAVDeliveryConfig(BaseModel):
+    """Typed WebDAV delivery config. Unknown keys rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=2048)
+    username: str = Field(default="", max_length=255)
+    password: str = Field(default="", max_length=4096)
+
+
+class EmailDeliveryConfig(BaseModel):
+    """Typed email delivery config. Unknown keys rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipient: str = Field(
+        min_length=3,
+        max_length=320,
+        pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+    )
+
+
+def validate_delivery_config(method: str, config: dict) -> dict:
+    """Coerce a delivery_config dict through its typed schema.
+
+    Returns the validated, normalized dict (same shape, fields stripped to
+    the schema). Raises pydantic.ValidationError on failure.
+    """
+    if method == "webdav":
+        return WebDAVDeliveryConfig.model_validate(config).model_dump()
+    if method == "email":
+        return EmailDeliveryConfig.model_validate(config).model_dump()
+    raise ValueError(f"Unknown delivery method: {method}")
+
+
+# Keys that look sensitive enough to mask in API responses, regardless of
+# whether the typed schema knows about them. Belt-and-braces in case a key
+# slips through future schema evolution.
+SENSITIVE_DELIVERY_KEYS: tuple[str, ...] = (
+    "password",
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+    "auth_token",
+)
+
+
 class CreateBillingJobRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     all_contracts: bool = False
     contract_ids: list[int] = Field(default_factory=list)
     schedule: str = Field(min_length=1, max_length=100)
-    delivery_method: str = Field(pattern=r"^(webdav|email)$")
+    delivery_method: Literal["webdav", "email"]
     delivery_config: dict
     filename_template: str = Field(default="billing-{year}-{month}.csv", max_length=255)
     per_contract: bool = False
@@ -160,7 +241,7 @@ class UpdateBillingJobRequest(BaseModel):
     all_contracts: bool | None = None
     contract_ids: list[int] | None = None
     schedule: str | None = Field(default=None, min_length=1, max_length=100)
-    delivery_method: str | None = Field(default=None, pattern=r"^(webdav|email)$")
+    delivery_method: Literal["webdav", "email"] | None = None
     delivery_config: dict | None = None
     filename_template: str | None = Field(default=None, max_length=255)
     per_contract: bool | None = None

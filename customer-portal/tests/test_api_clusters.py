@@ -213,8 +213,14 @@ async def client(session, git_backend, mock_kubeconfig_service):
     from app.db import get_session as real_get_session
     fastapi_app.dependency_overrides[real_get_session] = _get_session
 
+    # BASE_URL matches conftest; the CSRF middleware enforces Origin against
+    # it, so all test requests send a same-origin Origin header by default.
+    import os
+    base = os.environ["BASE_URL"]
     transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url=base, headers={"Origin": base}
+    ) as ac:
         yield ac
     fastapi_app.dependency_overrides.clear()
 

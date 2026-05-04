@@ -25,5 +25,8 @@ commonLabels:
   app.kubernetes.io/managed-by: kustomize
 
 images:
+  # Pin to a versioned tag in production overlays. The base default tracks
+  # the package version in pyproject.toml; override per-overlay if rolling
+  # forward independently.
   - name: docker.sunet.se/platform/openstack-operator
-    newTag: latest
+    newTag: v0.1.0
