@@ -117,6 +117,8 @@ async function route() {
     // Billing routes
     if (parts[0] === "billing" && parts[1] === "new")
         return renderCreateBillingJob();
+    if (parts[0] === "billing" && parts[1] === "run-once")
+        return renderRunOnce();
     if (parts[0] === "billing" && parts[1] && parts[2] === "edit")
         return renderEditBillingJob(parts[1]);
     if (parts[0] === "billing" && parts[1])
@@ -630,7 +632,10 @@ async function renderBillingJobs() {
         eyebrow: "Billing",
         title: "Billing export jobs",
         lead: "Scheduled exports that deliver monthly billing CSVs to your finance system. Each job covers one or more contracts.",
-        actions: [h("a", { className: "btn primary", href: "#/billing/new" }, svgPlus(), "New job")],
+        actions: [
+            h("a", { className: "btn ghost", href: "#/billing/run-once" }, "Run once"),
+            h("a", { className: "btn primary", href: "#/billing/new" }, svgPlus(), "New job"),
+        ],
     }));
 
     try {
@@ -931,6 +936,149 @@ async function renderEditBillingJob(jobId) {
             navigate(`/billing/${jobId}`);
         })) app.appendChild(node);
     } catch (e) { showAlert(e.message); }
+}
+
+// ---------- Billing: run once (ad-hoc, no saved job) ----------
+
+function renderRunOnce() {
+    clear(app);
+    app.className = "page narrow";
+    app.appendChild(bc({ label: "Billing jobs", hash: "/billing" }, { label: "Run once" }));
+    app.appendChild(phead({
+        eyebrow: "Run once",
+        title: "Ad-hoc billing export",
+        lead: "Generate and deliver a billing CSV a single time, without saving a recurring job.",
+    }));
+
+    const contracts = currentUser.contracts || [];
+
+    const contractSelect = h("select", { name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
+        ...contracts.map(c => h("option", { value: String(c.id) }, `${c.contract_number} — ${c.customer.name}`)),
+    );
+    const scope = h("form", { className: "form" },
+        h("h3", {}, "Scope"),
+        h("label", { className: "checkbox" },
+            h("input", { type: "checkbox", name: "all_contracts", checked: true }),
+            "Include all contracts you have access to",
+        ),
+        h("label", {}, "Or select specific contracts"),
+        contractSelect,
+        h("label", { className: "checkbox", style: "margin-top:18px" },
+            h("input", { type: "checkbox", name: "per_contract" }),
+            "Generate one file per contract",
+        ),
+        h("p", { className: "hint" }, "When unchecked, a single CSV containing all selected contracts is produced."),
+    );
+
+    const period = h("form", { className: "form", style: "margin-top:14px" },
+        h("h3", {}, "Period"),
+        h("div", { className: "row-2" },
+            h("div", { className: "field" },
+                h("label", { htmlFor: "ro-year" }, "Year"),
+                h("input", { id: "ro-year", name: "year", type: "number", className: "mono", placeholder: "previous month" }),
+            ),
+            h("div", { className: "field" },
+                h("label", { htmlFor: "ro-month" }, "Month"),
+                h("input", { id: "ro-month", name: "month", type: "number", min: "1", max: "12", className: "mono", placeholder: "previous month" }),
+            ),
+        ),
+        h("p", { className: "hint" }, "Leave blank to bill the previous calendar month."),
+    );
+
+    const webdavWrap = h("div", { id: "webdav-config" },
+        h("label", { htmlFor: "wurl" }, "WebDAV URL"),
+        h("input", { id: "wurl", name: "webdav_url", type: "url", className: "mono", placeholder: "https://finance.example.se/webdav/billing/" }),
+        h("div", { className: "row-2" },
+            h("div", { className: "field" },
+                h("label", { htmlFor: "wuser" }, "Username"),
+                h("input", { id: "wuser", name: "webdav_username", type: "text" }),
+            ),
+            h("div", { className: "field" },
+                h("label", { htmlFor: "wpw" }, "Password"),
+                h("input", { id: "wpw", name: "webdav_password", type: "password" }),
+            ),
+        ),
+    );
+    const emailWrap = h("div", { id: "email-config", style: "display:none" },
+        h("label", { htmlFor: "rcpt" }, "Recipient"),
+        h("input", { id: "rcpt", name: "email_recipient", type: "email", placeholder: "billing@example.se" }),
+    );
+
+    const dmSelect = h("select", { id: "dm", name: "delivery_method", onchange: (e) => {
+        webdavWrap.style.display = e.target.value === "webdav" ? "block" : "none";
+        emailWrap.style.display = e.target.value === "email" ? "block" : "none";
+    }},
+        h("option", { value: "webdav" }, "WebDAV"),
+        h("option", { value: "email" }, "Email"),
+    );
+
+    const delivery = h("form", { className: "form", style: "margin-top:14px" },
+        h("h3", {}, "Delivery"),
+        h("label", { htmlFor: "dm" }, "Method"),
+        dmSelect,
+        webdavWrap,
+        emailWrap,
+        h("label", { htmlFor: "tpl" }, "Filename template"),
+        h("input", { id: "tpl", name: "filename_template", type: "text", className: "mono", value: "billing-{year}-{month}.csv" }),
+        h("p", { className: "hint" }, "Variables: ",
+            h("code", {}, "{contract}"), " ",
+            h("code", {}, "{year}"), " ",
+            h("code", {}, "{month}"), " ",
+            h("code", {}, "{day}"), " ",
+            h("code", {}, "{date}")),
+    );
+
+    const result = h("div", {});
+
+    const submitBtn = h("button", { className: "btn primary", onclick: async (e) => {
+        e.preventDefault();
+        const allContracts = scope.querySelector('[name="all_contracts"]').checked;
+        const perContract = scope.querySelector('[name="per_contract"]').checked;
+        const contractIds = Array.from(contractSelect.selectedOptions).map(o => parseInt(o.value, 10));
+        const deliveryMethod = dmSelect.value;
+        const filenameTemplate = delivery.querySelector('[name="filename_template"]').value.trim();
+        const yearVal = parseInt(period.querySelector('[name="year"]').value, 10);
+        const monthVal = parseInt(period.querySelector('[name="month"]').value, 10);
+        const deliveryConfig = {};
+        if (deliveryMethod === "webdav") {
+            deliveryConfig.url = delivery.querySelector('[name="webdav_url"]').value.trim();
+            deliveryConfig.username = delivery.querySelector('[name="webdav_username"]').value.trim();
+            const pw = delivery.querySelector('[name="webdav_password"]').value;
+            if (pw) deliveryConfig.password = pw;
+        } else {
+            deliveryConfig.recipient = delivery.querySelector('[name="email_recipient"]').value.trim();
+        }
+        const body = {
+            all_contracts: allContracts,
+            contract_ids: allContracts ? [] : contractIds,
+            delivery_method: deliveryMethod,
+            delivery_config: deliveryConfig,
+            filename_template: filenameTemplate,
+            per_contract: perContract,
+            year: Number.isNaN(yearVal) ? null : yearVal,
+            month: Number.isNaN(monthVal) ? null : monthVal,
+        };
+        submitBtn.disabled = true;
+        clear(result);
+        try {
+            const r = await api("/api/billing/run-once", { method: "POST", body: JSON.stringify(body) });
+            const periodLabel = r.billing_period_start.substring(0, 7);
+            if (r.status === "success") {
+                result.appendChild(h("p", { className: "ok" }, `Delivered ${r.files_delivered} file(s) for ${periodLabel}.`));
+            } else {
+                result.appendChild(h("p", { className: "err" }, `Run failed: ${r.error_message || "unknown error"}`));
+            }
+        } catch (err) { showAlert(err.message); }
+        finally { submitBtn.disabled = false; }
+    }}, "Generate & deliver now");
+
+    const cancel = h("a", { className: "btn ghost", href: "#/billing" }, "Cancel");
+
+    app.appendChild(scope);
+    app.appendChild(period);
+    app.appendChild(delivery);
+    app.appendChild(h("div", { className: "btn-row" }, submitBtn, cancel));
+    app.appendChild(result);
 }
 
 // ---------- Admin: customers ----------
@@ -1273,7 +1421,7 @@ async function renderAdminContractDetail(contractId) {
                 h("input", { id: "u", name: "user_sub", type: "text", required: true, placeholder: "user@idp" }),
                 h("button", { type: "submit", className: "btn primary sm" }, "Grant"),
             ),
-            h("p", { className: "hint" }, "User is identified by their SWAMID ", h("code", {}, "sub"), " claim — typically their email."),
+            h("p", { className: "hint" }, "User is identified by their SWAMID ", h("code", {}, "sub"), " claim — typically their eduPersonPrincipalName."),
         );
         app.appendChild(grant);
     } catch (e) { showAlert(e.message); }

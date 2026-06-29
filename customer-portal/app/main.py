@@ -306,11 +306,28 @@ def _render_index(static_dir: Path) -> str:
         if path.is_file():
             bundle_parts.append(path.read_bytes())
     digest = hashlib.sha256(b"".join(bundle_parts)).hexdigest()[:12]
-    return (
+    index = (
         index
         .replace('href="/style.css"', f'href="/style.css?v={digest}"')
         .replace('src="/app.js"', f'src="/app.js?v={digest}"')
     )
+    # In test, recolour the UI and flag the title/brand so it's obvious which
+    # environment you're looking at. Gated by PORTAL_IS_IN_TEST.
+    if get_settings().is_test:
+        index = (
+            index
+            .replace(
+                "<title>SUNET Cloud Portal</title>",
+                "<title>[TEST] SUNET Cloud Portal</title>",
+            )
+            .replace("<body>", '<body class="test-env">')
+            .replace(
+                "<span>SUNET&nbsp;Cloud</span>",
+                '<span>SUNET&nbsp;Cloud</span>'
+                '<span class="env-badge">TEST</span>',
+            )
+        )
+    return index
 
 
 if _static_dir.is_dir():

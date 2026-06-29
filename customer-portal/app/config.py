@@ -89,6 +89,10 @@ class Settings:
     # Portal
     admin_users: list[str] = field(default_factory=lambda: _split_csv("PORTAL_ADMIN_USERS"))
     base_url: str = field(default_factory=_validated_base_url)
+    is_test: bool = field(
+        default_factory=lambda: os.environ.get("PORTAL_IS_IN_TEST", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # OpenStack project defaults
     default_domain: str = field(
