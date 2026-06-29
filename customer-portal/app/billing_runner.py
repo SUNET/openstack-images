@@ -10,6 +10,7 @@ import smtplib
 from datetime import datetime, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 import httpx
 import openstack
@@ -691,6 +692,10 @@ async def deliver_email(recipient: str, subject: str, filename: str, content: st
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = recipient
+    # Date + Message-ID let downstream MTAs dedupe on retry; without them a
+    # single send can land as two delivered copies.
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=settings.smtp_from.rsplit("@", 1)[-1])
     msg.set_content(f"Billing report: {filename}")
     msg.add_attachment(content.encode(), maintype="text", subtype="csv", filename=filename)
 

@@ -19,6 +19,7 @@ import logging
 import smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -68,6 +69,8 @@ def _send_ops_email(cluster: TenantCluster, request: ClusterRequest) -> None:
     )
     msg["From"] = settings.smtp_from
     msg["To"] = settings.sunet_ops_email
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=settings.smtp_from.rsplit("@", 1)[-1])
     body = (
         f"Cluster: {cluster.slug} (id {cluster.id})\n"
         f"Request type: {request.request_type}\n"
