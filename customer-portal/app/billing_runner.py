@@ -461,6 +461,7 @@ def _query_gnocchi_usage(
         results = []
         granularity_detected = False
         granularity_seconds = 300  # default
+        period_seconds = max((end - begin).total_seconds(), 1)
 
         for group in resp.json():
             group_info = group.get("group", {})
@@ -472,8 +473,16 @@ def _query_gnocchi_usage(
                 granularity_detected = True
                 logger.debug("Detected granularity: %ds for %s/%s", granularity_seconds, resource_type, metric_name)
 
-            # Convert data point count to hours
+            # Convert data point count to hours (time-based metrics)
             hours = len(measures) * granularity_seconds / 3600.0
+
+            # Time-weighted measured size, normalised to the billing period:
+            # for a size metric this is the per-period average value (= the
+            # GB-months held when the period is one month, pro-rated if the
+            # resource only existed part of it). Raw measure units; the caller
+            # scales to GB.
+            value_sum = sum(m[2] for m in measures if m[2] is not None)
+            size_months = value_sum * granularity_seconds / period_seconds
 
             project_id = group_info.pop("project_id", "")
             results.append({
@@ -481,6 +490,7 @@ def _query_gnocchi_usage(
                 "metric": metric_name,
                 "metadata": group_info,
                 "hours": hours,
+                "size_months": size_months,
             })
         return results
     except Exception:
@@ -544,10 +554,29 @@ def generate_billing_csv(
             "volume.size": "volume",
         }
 
+        # These are computed from the DB by _emit_synthetic_cluster_lines,
+        # not metered by Gnocchi; querying them only yields 404s.
+        SYNTHETIC_RESOURCE_TYPES = {
+            "cluster_management_fee",
+            "cluster_setup_fee",
+            "cluster_addon_fee",
+        }
+
+        # Size-based metrics bill per GB-month; everything else by uptime
+        # hours. Scale each metric's raw measure value to GB. NOTE: verify
+        # radosgw.objects.size units against real measures (often bytes).
+        SIZE_METRICS = {"volume.size", "radosgw.objects.size"}
+        SIZE_METRIC_GB_SCALE = {
+            "volume.size": Decimal(1),                            # already GB
+            "radosgw.objects.size": Decimal(1) / Decimal(10**9),  # bytes->GB
+        }
+
         output = io.StringIO()
         writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
 
         for metric, meta_fields in metric_metadata_fields.items():
+            if metric in SYNTHETIC_RESOURCE_TYPES:
+                continue
             resource_type = METRIC_RESOURCE_TYPES.get(metric, metric)
             groupby = list(meta_fields)
 
@@ -565,7 +594,6 @@ def generate_billing_csv(
                     continue
 
                 metadata = entry.get("metadata", {})
-                hours = Decimal(str(entry["hours"]))
 
                 # Find the best matching price (specific metadata > base)
                 price = _find_price(prices, metric, metadata)
@@ -573,10 +601,11 @@ def generate_billing_csv(
                     continue
 
                 unit = price.unit
-                # For time-based metrics, quantity = hours
-                # For size-based metrics (volume.size, radosgw.objects.size),
-                # quantity is also expressed as hours of having that size
-                quantity = hours
+                if metric in SIZE_METRICS:
+                    scale = SIZE_METRIC_GB_SCALE.get(metric, Decimal(1))
+                    quantity = Decimal(str(entry["size_months"])) * scale
+                else:
+                    quantity = Decimal(str(entry["hours"]))
 
                 # Determine unit_price: contract override > global
                 contract_id = contract_id_map.get(cn)
