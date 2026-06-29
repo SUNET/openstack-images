@@ -681,6 +681,60 @@ def _decrypt_config(delivery_config_json: str) -> dict:
     return config
 
 
+async def generate_and_deliver(
+    settings,
+    contract_numbers: list[str],
+    delivery_method: str,
+    config: dict,
+    filename_template: str,
+    per_contract: bool,
+    period_start: datetime,
+    period_end: datetime,
+) -> int:
+    """Generate billing CSV(s) and deliver them. Returns files delivered.
+
+    Shared by scheduled jobs and ad-hoc run-once. `config` must already be
+    decrypted (passwords in plaintext).
+    """
+    template_vars = {
+        "year": f"{period_start.year:04d}",
+        "month": f"{period_start.month:02d}",
+        "day": f"{datetime.utcnow().day:02d}",
+        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+    }
+
+    files_delivered = 0
+
+    if per_contract:
+        # One file per contract
+        for cn in contract_numbers:
+            csv_content = await asyncio.to_thread(
+                generate_billing_csv,
+                settings.database_url, settings.openstack_cloud,
+                [cn], period_start, period_end,
+            )
+            if not csv_content.strip():
+                continue
+
+            cn_vars = {**template_vars, "contract": cn}
+            filename = resolve_template(filename_template, **cn_vars)
+
+            await _deliver(delivery_method, config, filename, csv_content)
+            files_delivered += 1
+    else:
+        # Single file with all contracts
+        csv_content = await asyncio.to_thread(
+            generate_billing_csv,
+            settings.database_url, settings.openstack_cloud,
+            contract_numbers, period_start, period_end,
+        )
+        filename = resolve_template(filename_template, **template_vars)
+        await _deliver(delivery_method, config, filename, csv_content)
+        files_delivered = 1
+
+    return files_delivered
+
+
 async def execute_job(
     session: AsyncSession,
     job: BillingJob,
@@ -727,42 +781,16 @@ async def execute_job(
             return run
 
         config = _decrypt_config(job.delivery_config)
-        template_vars = {
-            "year": f"{period_start.year:04d}",
-            "month": f"{period_start.month:02d}",
-            "day": f"{datetime.utcnow().day:02d}",
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-        }
-
-        files_delivered = 0
-
-        if job.per_contract:
-            # One file per contract
-            for cn in contract_numbers:
-                csv_content = await asyncio.to_thread(
-                    generate_billing_csv,
-                    settings.database_url, settings.openstack_cloud,
-                    [cn], period_start, period_end,
-                )
-                if not csv_content.strip():
-                    continue
-
-                # Look up customer name for template
-                cn_vars = {**template_vars, "contract": cn}
-                filename = resolve_template(job.filename_template, **cn_vars)
-
-                await _deliver(job.delivery_method, config, filename, csv_content)
-                files_delivered += 1
-        else:
-            # Single file with all contracts
-            csv_content = await asyncio.to_thread(
-                generate_billing_csv,
-                settings.database_url, settings.openstack_cloud,
-                contract_numbers, period_start, period_end,
-            )
-            filename = resolve_template(job.filename_template, **template_vars)
-            await _deliver(job.delivery_method, config, filename, csv_content)
-            files_delivered = 1
+        files_delivered = await generate_and_deliver(
+            settings,
+            contract_numbers,
+            job.delivery_method,
+            config,
+            job.filename_template,
+            job.per_contract,
+            period_start,
+            period_end,
+        )
 
         run.status = "success"
         run.files_delivered = files_delivered

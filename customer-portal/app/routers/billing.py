@@ -11,8 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.audit import audit_log
 from app.auth import get_current_user
-from app.billing_runner import execute_job, run_due_jobs
+from app.billing_runner import (
+    execute_job,
+    generate_and_deliver,
+    get_billing_period,
+    run_due_jobs,
+)
 from app.config import get_settings
 from app.crypto import encrypt_value
 from app.db import get_session
@@ -22,6 +28,8 @@ from app.schemas import (
     BillingJobRunResponse,
     CreateBillingJobRequest,
     ManualRunRequest,
+    RunOnceRequest,
+    RunOnceResponse,
     UpdateBillingJobRequest,
 )
 
@@ -289,6 +297,97 @@ async def manual_run(
     job = await _require_job_access(job_id, user, session)
     run = await execute_job(session, job, year=req.year, month=req.month)
     return run
+
+
+# --- Ad-hoc run-once (no saved job) ---
+
+
+async def _resolve_run_once_contracts(
+    req: RunOnceRequest, user_sub: str, is_admin: bool, session: AsyncSession
+) -> list[str]:
+    """Resolve contract numbers for an ad-hoc run, enforcing access."""
+    if req.all_contracts:
+        if is_admin:
+            result = await session.execute(select(Contract.contract_number))
+        else:
+            result = await session.execute(
+                select(Contract.contract_number)
+                .join(ContractAccess)
+                .where(ContractAccess.user_sub == user_sub)
+            )
+        return [r[0] for r in result]
+
+    await _validate_contract_access(req.contract_ids, user_sub, is_admin, session)
+    result = await session.execute(
+        select(Contract.contract_number).where(Contract.id.in_(req.contract_ids))
+    )
+    return [r[0] for r in result]
+
+
+@router.post("/run-once", response_model=RunOnceResponse)
+async def run_once(
+    req: RunOnceRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Generate and deliver a billing export once, without saving a job."""
+    settings = get_settings()
+    is_admin = user["sub"] in settings.admin_users
+
+    _validate_delivery_config(req.delivery_method, req.delivery_config)
+    contract_numbers = await _resolve_run_once_contracts(
+        req, user["sub"], is_admin, session
+    )
+
+    period_start, period_end = get_billing_period(req.year, req.month)
+
+    if not contract_numbers:
+        audit_log(
+            user["sub"], "billing.run_once",
+            files=0, period=period_start.strftime("%Y-%m"), status="empty",
+        )
+        return RunOnceResponse(
+            status="success",
+            files_delivered=0,
+            billing_period_start=period_start,
+            billing_period_end=period_end,
+        )
+
+    try:
+        files = await generate_and_deliver(
+            settings,
+            contract_numbers,
+            req.delivery_method,
+            dict(req.delivery_config),
+            req.filename_template,
+            req.per_contract,
+            period_start,
+            period_end,
+        )
+    except Exception as e:
+        logger.exception("Ad-hoc billing run failed for %s", user["sub"])
+        audit_log(
+            user["sub"], "billing.run_once",
+            period=period_start.strftime("%Y-%m"), status="error",
+        )
+        return RunOnceResponse(
+            status="error",
+            files_delivered=0,
+            billing_period_start=period_start,
+            billing_period_end=period_end,
+            error_message=str(e)[:500],
+        )
+
+    audit_log(
+        user["sub"], "billing.run_once",
+        files=files, period=period_start.strftime("%Y-%m"), status="success",
+    )
+    return RunOnceResponse(
+        status="success",
+        files_delivered=files,
+        billing_period_start=period_start,
+        billing_period_end=period_end,
+    )
 
 
 # --- Trigger endpoint (called by CronJob) ---

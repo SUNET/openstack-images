@@ -20,6 +20,20 @@
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
+/* Test environment: recolour the orange accent to indigo so it is obvious
+   you are not in prod. Gated server-side via PORTAL_IS_IN_TEST. */
+body.test-env {
+  --orange: #5b4bdb;
+  --orange-btn: #4a3bc4;
+  --orange-soft: #e8e5fb;
+}
+.env-badge {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 1px;
+  padding: 2px 6px; border-radius: 4px;
+  background: var(--orange); color: #fff;
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
@@ -581,3 +595,5 @@ button { font-family: inherit; }
   margin-top: 4px;
   white-space: pre-wrap; word-break: break-word;
 }
+p.ok { color: var(--ok); font-weight: 600; }
+p.err { color: var(--err); font-weight: 600; }

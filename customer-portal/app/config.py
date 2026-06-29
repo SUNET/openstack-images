@@ -44,6 +44,10 @@ class Settings:
         ]
     )
     base_url: str = field(default_factory=lambda: os.environ.get("BASE_URL", ""))
+    is_test: bool = field(
+        default_factory=lambda: os.environ.get("PORTAL_IS_IN_TEST", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # OpenStack project defaults
     default_domain: str = field(

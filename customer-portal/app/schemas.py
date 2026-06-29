@@ -172,6 +172,27 @@ class ManualRunRequest(BaseModel):
     month: int | None = None
 
 
+class RunOnceRequest(BaseModel):
+    """Ad-hoc billing run: generate + deliver once, without saving a job."""
+
+    all_contracts: bool = False
+    contract_ids: list[int] = Field(default_factory=list)
+    delivery_method: str = Field(pattern=r"^(webdav|email)$")
+    delivery_config: dict
+    filename_template: str = Field(default="billing-{year}-{month}.csv", max_length=255)
+    per_contract: bool = False
+    year: int | None = None
+    month: int | None = None
+
+
+class RunOnceResponse(BaseModel):
+    status: str
+    files_delivered: int
+    billing_period_start: datetime
+    billing_period_end: datetime
+    error_message: str | None = None
+
+
 class BillingJobResponse(BaseModel):
     id: int
     name: str
