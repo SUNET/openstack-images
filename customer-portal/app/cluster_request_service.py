@@ -78,10 +78,16 @@ def _send_ops_email(cluster: TenantCluster, request: ClusterRequest) -> None:
     msg.set_content(body)
 
     def _send() -> None:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
             if settings.smtp_username:
                 smtp.starttls()
-                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.ehlo()
+                # Pin AUTH LOGIN: some relays (smtp.sunet.se) drop the
+                # connection on smtplib's default PLAIN-first attempt,
+                # masking a clean 535 as SMTPServerDisconnected.
+                smtp.user = settings.smtp_username
+                smtp.password = settings.smtp_password
+                smtp.auth("LOGIN", smtp.auth_login)
             smtp.send_message(msg)
 
     try:

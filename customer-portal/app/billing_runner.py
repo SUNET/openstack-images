@@ -666,10 +666,16 @@ async def deliver_email(recipient: str, subject: str, filename: str, content: st
     msg.add_attachment(content.encode(), maintype="text", subtype="csv", filename=filename)
 
     def _send():
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as smtp:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
             if settings.smtp_username:
                 smtp.starttls()
-                smtp.login(settings.smtp_username, settings.smtp_password)
+                smtp.ehlo()
+                # Pin AUTH LOGIN: some relays (smtp.sunet.se) drop the
+                # connection on smtplib's default PLAIN-first attempt,
+                # masking a clean 535 as SMTPServerDisconnected.
+                smtp.user = settings.smtp_username
+                smtp.password = settings.smtp_password
+                smtp.auth("LOGIN", smtp.auth_login)
             smtp.send_message(msg)
 
     await asyncio.to_thread(_send)
