@@ -518,6 +518,48 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
         app.appendChild(slbl("Quotas"));
         app.appendChild(quotaKv(p.quotas));
+
+        if (currentUser && currentUser.is_admin) {
+            app.appendChild(slbl("Move project"));
+            let contracts = [], customersById = {};
+            try {
+                contracts = await api("/api/admin/contracts");
+                const customers = await api("/api/admin/customers");
+                customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
+            } catch (err) { showAlert(err.message); }
+            const others = (contracts || []).filter(c => c.contract_number !== p.contract_number);
+            if (!others.length) {
+                app.appendChild(h("p", { className: "hint" }, "No other contracts to move this project to."));
+            } else {
+                const sel = h("select", { id: "move-contract", name: "contract_number" },
+                    ...others.map(c => {
+                        const cust = customersById[c.customer_id];
+                        return h("option", { value: c.contract_number },
+                            `${c.contract_number}${cust ? " — " + cust.name : ""}`);
+                    }),
+                );
+                const moveForm = h("form", { className: "form", onsubmit: async (e) => {
+                    e.preventDefault();
+                    const target = sel.value;
+                    if (!target || target === p.contract_number) return;
+                    if (!confirm(`Move project ${p.name} to contract ${target}? The project keeps its name and OpenStack resources; only billing moves to the new contract.`)) return;
+                    try {
+                        await api(`/api/admin/projects/${encodeURIComponent(p.resource_name)}/move`, {
+                            method: "POST", body: JSON.stringify({ contract_number: target }),
+                        });
+                        navigate(`/contracts/${encodeURIComponent(target)}/projects/${encodeURIComponent(p.resource_name)}`);
+                    } catch (err) { showAlert(err.message); }
+                }},
+                    h("p", { className: "hint" }, "Reassign this project to a different contract (and customer). The project keeps its name and OpenStack resources; only billing follows the new contract."),
+                    h("label", { htmlFor: "move-contract" }, "Target contract"),
+                    sel,
+                    h("div", { className: "btn-row" },
+                        h("button", { type: "submit", className: "btn primary sm" }, "Move project"),
+                    ),
+                );
+                app.appendChild(moveForm);
+            }
+        }
     } catch (e) { showAlert(e.message); }
 }
 
@@ -1396,6 +1438,50 @@ async function renderAdminContractDetail(contractId) {
             ),
         );
         app.appendChild(descForm);
+
+        // Move to another customer
+        app.appendChild(h("div", { className: "slbl" }, "Move to another customer"));
+        let customers = [];
+        try { customers = await api("/api/admin/customers"); } catch {}
+        const moveTargets = (customers || []).filter(c => c.id !== contract.customer.id);
+        if (!moveTargets.length) {
+            app.appendChild(h("p", { className: "hint" }, "No other customers to move this contract to."));
+        } else {
+            const warn = h("p", { className: "hint", style: "display:none" });
+            const updateWarn = (cust) => {
+                if (cust && cust.domain !== contract.customer.domain) {
+                    warn.style.display = "";
+                    warn.textContent = `Note: ${cust.name} uses domain “${cust.domain}”, but existing projects keep their current names (which embed “${contract.customer.domain}”). The name is cosmetic — resources and access are unaffected.`;
+                } else {
+                    warn.style.display = "none";
+                }
+            };
+            const sel = h("select", { id: "move-customer", name: "customer_id" },
+                ...moveTargets.map(c => h("option", { value: String(c.id) }, `${c.name} (${c.domain})`)),
+            );
+            sel.addEventListener("change", () => updateWarn(moveTargets.find(c => String(c.id) === sel.value)));
+            const moveForm = h("form", { className: "form", onsubmit: async (e) => {
+                e.preventDefault();
+                const customerId = parseInt(sel.value, 10);
+                const cust = moveTargets.find(c => c.id === customerId);
+                if (!confirm(`Move contract ${contract.contract_number} to ${cust ? cust.name : "the selected customer"}?`)) return;
+                try {
+                    await api(`/api/admin/contracts/${contractId}/move`, {
+                        method: "POST", body: JSON.stringify({ customer_id: customerId }),
+                    });
+                    renderAdminContractDetail(contractId);
+                } catch (err) { showAlert(err.message); }
+            }},
+                h("label", { htmlFor: "move-customer" }, "Target customer"),
+                sel,
+                warn,
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Move contract"),
+                ),
+            );
+            updateWarn(moveTargets[0]);
+            app.appendChild(moveForm);
+        }
 
         // Rebate
         app.appendChild(h("div", { className: "slbl" }, "Rebate"));

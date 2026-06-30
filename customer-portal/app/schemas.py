@@ -51,6 +51,12 @@ class UpdateContractRequest(BaseModel):
     description: str | None = None
 
 
+class MoveContractRequest(BaseModel):
+    """Reassign a contract to a different customer (admin-only)."""
+
+    customer_id: int
+
+
 class ContractResponse(BaseModel):
     id: int
     customer_id: int
@@ -197,6 +203,12 @@ class UpdateProjectRequest(BaseModel):
     @classmethod
     def _users_pattern(cls, v: list[str] | None) -> list[str] | None:
         return None if v is None else _validate_user_subjects(v)
+
+
+class MoveProjectRequest(BaseModel):
+    """Reassign a project to a different contract (admin-only)."""
+
+    contract_number: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9-]+$")
 
 
 class ProjectResponse(BaseModel):

@@ -29,11 +29,15 @@ from app.schemas import (
     CustomerDetailResponse,
     CustomerResponse,
     GrantAccessRequest,
+    MoveContractRequest,
+    MoveProjectRequest,
+    ProjectResponse,
     ResourcePriceRequest,
     ResourcePriceResponse,
     UpdateContractRequest,
     UpdateCustomerRequest,
 )
+from app.routers.projects import _enrich_project
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -244,6 +248,42 @@ async def update_contract(
     await session.commit()
     await session.refresh(contract)
     audit_log(user["sub"], "contract.update", contract_id=contract.id)
+    return contract
+
+
+@router.post("/contracts/{contract_id}/move", response_model=ContractResponse)
+async def move_contract(
+    contract_id: int,
+    req: MoveContractRequest,
+    user=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Reassign a contract to a different customer.
+
+    Existing projects keep their current names (which embed the old customer's
+    domain) — only the customer link changes. Renaming projects would be
+    destructive, so it is intentionally out of scope.
+    """
+    contract = await session.get(Contract, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+
+    customer = await session.get(Customer, req.customer_id)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Target customer not found")
+
+    if contract.customer_id == req.customer_id:
+        raise HTTPException(status_code=409, detail="Contract already belongs to this customer")
+
+    old_customer_id = contract.customer_id
+    contract.customer_id = req.customer_id
+    await session.commit()
+    await session.refresh(contract)
+    audit_log(
+        user["sub"], "contract.move",
+        contract_id=contract.id, contract_number=contract.contract_number,
+        from_customer_id=old_customer_id, to_customer_id=req.customer_id,
+    )
     return contract
 
 
@@ -530,3 +570,48 @@ async def delete_rebate(
 
     await session.delete(rebate)
     await session.commit()
+
+
+# --- Projects (admin moves) ---
+
+
+@router.post("/projects/{resource_name}/move", response_model=ProjectResponse)
+async def move_project(
+    resource_name: str,
+    req: MoveProjectRequest,
+    request: Request,
+    user=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Reassign a project to a different contract.
+
+    Only `spec.contractNumber` in the CR changes; the project keeps its name
+    and OpenStack identity, so no resources are touched. Billing follows the
+    new contract from the next run onward.
+    """
+    result = await session.execute(
+        select(Contract).where(Contract.contract_number == req.contract_number)
+    )
+    target = result.scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target contract not found")
+
+    git_backend = request.app.state.git_backend
+    existing = git_backend.get_project(resource_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if existing["contract_number"] == req.contract_number:
+        raise HTTPException(status_code=409, detail="Project already belongs to this contract")
+
+    try:
+        updated = git_backend.move_project(resource_name, req.contract_number)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    audit_log(
+        user["sub"], "project.move",
+        resource_name=resource_name,
+        from_contract=existing["contract_number"], to_contract=req.contract_number,
+    )
+    return _enrich_project(updated)

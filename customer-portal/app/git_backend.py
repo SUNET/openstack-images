@@ -301,6 +301,33 @@ class GitBackend:
 
             return _parse_project(doc)
 
+    def move_project(self, resource_name: str, new_contract_number: str) -> dict:
+        """Reassign a project to a different contract, commit, and push.
+
+        Only `spec.contractNumber` changes — the CR name (and thus the
+        OpenStack project identity the operator keys on) is untouched, so the
+        move is non-destructive. Returns the updated project dict.
+        """
+        with self._lock:
+            self._pull()
+
+            result = self._read_yaml(resource_name)
+            if not result:
+                raise ValueError(f"Project '{resource_name}' not found")
+
+            file_path, doc = result
+            spec = doc["spec"]
+            old_contract = spec.get("contractNumber", "")
+            spec["contractNumber"] = new_contract_number
+
+            self._write_yaml(file_path, doc)
+            self._commit_and_push(
+                f"Move project {spec.get('name', resource_name)} "
+                f"from contract {old_contract} to {new_contract_number}"
+            )
+
+            return _parse_project(doc)
+
     def delete_project(self, resource_name: str) -> None:
         """Delete a project YAML file, commit, and push."""
         with self._lock:
