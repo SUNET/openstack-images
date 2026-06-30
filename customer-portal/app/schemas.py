@@ -143,30 +143,28 @@ def _validate_user_subjects(users: list[str]) -> list[str]:
 
 # Quota field defaults double as the self-service defaults surfaced in the
 # UI (via /api/me) and the values written into the CR when none are given.
-# `le` bounds are generous fat-finger guards, not policy limits.
-_QUOTA_MAX = 100_000
-_QUOTA_RAM_MB_MAX = 100_000_000
-_QUOTA_GB_MAX = 10_000_000
+# Only `ge=0` is enforced — no upper bound, since legitimate large projects
+# (e.g. national-scale storage) can need very high quotas.
 
 
 class ComputeQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instances: int = Field(default=10, ge=0, le=_QUOTA_MAX)
-    cores: int = Field(default=20, ge=0, le=_QUOTA_MAX)
-    ramMB: int = Field(default=40960, ge=0, le=_QUOTA_RAM_MB_MAX)
+    instances: int = Field(default=10, ge=0)
+    cores: int = Field(default=20, ge=0)
+    ramMB: int = Field(default=40960, ge=0)
 
 
 class StorageQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    volumes: int = Field(default=10, ge=0, le=_QUOTA_MAX)
-    volumesGB: int = Field(default=500, ge=0, le=_QUOTA_GB_MAX)
-    snapshots: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    volumes: int = Field(default=10, ge=0)
+    volumesGB: int = Field(default=500, ge=0)
+    snapshots: int = Field(default=10, ge=0)
 
 
 class NetworkQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    securityGroups: int = Field(default=10, ge=0, le=_QUOTA_MAX)
-    securityGroupRules: int = Field(default=100, ge=0, le=_QUOTA_MAX)
+    securityGroups: int = Field(default=10, ge=0)
+    securityGroupRules: int = Field(default=100, ge=0)
 
 
 class QuotaSpec(BaseModel):
