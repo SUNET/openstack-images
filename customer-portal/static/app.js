@@ -159,6 +159,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // ---------- API ----------
 
+/**
+ * Render a FastAPI error `detail` into a readable string. `detail` is a
+ * plain string for HTTPException, but an array of {loc, msg} objects for
+ * 422 validation errors — which would otherwise stringify to "[object
+ * Object]".
+ */
+function formatApiError(detail) {
+    if (detail == null) return "";
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+        return detail.map((e) => {
+            const loc = Array.isArray(e.loc)
+                ? e.loc.filter((p) => p !== "body").join(".")
+                : "";
+            return loc ? `${loc}: ${e.msg}` : (e.msg || JSON.stringify(e));
+        }).join("; ");
+    }
+    return JSON.stringify(detail);
+}
+
 async function api(path, opts = {}) {
     const resp = await fetch(path, {
         headers: { "Content-Type": "application/json", ...opts.headers },
@@ -167,7 +187,7 @@ async function api(path, opts = {}) {
     if (resp.status === 401) { currentUser = null; renderLogin(); return null; }
     if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || "Request failed");
+        throw new Error(formatApiError(err.detail) || "Request failed");
     }
     if (resp.status === 204) return null;
     return resp.json();
