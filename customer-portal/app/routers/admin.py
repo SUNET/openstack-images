@@ -32,6 +32,7 @@ from app.schemas import (
     MoveContractRequest,
     MoveProjectRequest,
     ProjectResponse,
+    RenameContractRequest,
     ResourcePriceRequest,
     ResourcePriceResponse,
     UpdateContractRequest,
@@ -283,6 +284,56 @@ async def move_contract(
         user["sub"], "contract.move",
         contract_id=contract.id, contract_number=contract.contract_number,
         from_customer_id=old_customer_id, to_customer_id=req.customer_id,
+    )
+    return contract
+
+
+@router.post("/contracts/{contract_id}/rename", response_model=ContractResponse)
+async def rename_contract(
+    contract_id: int,
+    req: RenameContractRequest,
+    request: Request,
+    user=Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Change a contract's number, re-pointing all its projects.
+
+    The new number must be unused. Every project linked to the old number has
+    its `spec.contractNumber` rewritten in git; CR names (OpenStack identity)
+    are untouched, so the rename is non-destructive. The DB change is committed
+    only after the git rewrite succeeds.
+    """
+    contract = await session.get(Contract, contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+
+    old_number = contract.contract_number
+    new_number = req.contract_number
+    if new_number == old_number:
+        raise HTTPException(status_code=409, detail="Contract already has this number")
+
+    result = await session.execute(
+        select(Contract).where(Contract.contract_number == new_number)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A contract with this number already exists")
+
+    contract.contract_number = new_number
+    await session.flush()
+
+    git_backend = request.app.state.git_backend
+    try:
+        count = git_backend.rename_contract(old_number, new_number)
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to re-point projects: {e}")
+
+    await session.commit()
+    await session.refresh(contract)
+    audit_log(
+        user["sub"], "contract.rename",
+        contract_id=contract.id, from_number=old_number,
+        to_number=new_number, projects_repointed=count,
     )
     return contract
 

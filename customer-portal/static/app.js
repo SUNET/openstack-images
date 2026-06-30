@@ -471,13 +471,6 @@ async function renderProjectDetail(contractNumber, resourceName) {
         const actions = [];
         if (canMutate) {
             actions.push(h("a", { className: "btn ghost sm", href: `#/contracts/${cn}/projects/edit/${rn}` }, "Edit"));
-            actions.push(h("button", { className: "btn danger sm", onclick: async () => {
-                if (!confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources.`)) return;
-                try {
-                    await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
-                    navigate(`/contracts/${cn}/projects`);
-                } catch (err) { showAlert(err.message); }
-            }}, "Delete"));
         }
         app.appendChild(phead({
             eyebrow: p.managed ? "Project · managed-by-sunet" : "Project",
@@ -519,46 +512,22 @@ async function renderProjectDetail(contractNumber, resourceName) {
         app.appendChild(slbl("Quotas"));
         app.appendChild(quotaKv(p.quotas));
 
-        if (currentUser && currentUser.is_admin) {
-            app.appendChild(slbl("Move project"));
-            let contracts = [], customersById = {};
-            try {
-                contracts = await api("/api/admin/contracts");
-                const customers = await api("/api/admin/customers");
-                customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
-            } catch (err) { showAlert(err.message); }
-            const others = (contracts || []).filter(c => c.contract_number !== p.contract_number);
-            if (!others.length) {
-                app.appendChild(h("p", { className: "hint" }, "No other contracts to move this project to."));
-            } else {
-                const sel = h("select", { id: "move-contract", name: "contract_number" },
-                    ...others.map(c => {
-                        const cust = customersById[c.customer_id];
-                        return h("option", { value: c.contract_number },
-                            `${c.contract_number}${cust ? " — " + cust.name : ""}`);
-                    }),
-                );
-                const moveForm = h("form", { className: "form", onsubmit: async (e) => {
-                    e.preventDefault();
-                    const target = sel.value;
-                    if (!target || target === p.contract_number) return;
-                    if (!confirm(`Move project ${p.name} to contract ${target}? The project keeps its name and OpenStack resources; only billing moves to the new contract.`)) return;
+        if (canMutate) {
+            const dz = h("div", { className: "danger-zone" });
+            dz.appendChild(h("div", { className: "dz-head" }, "Danger zone"));
+            dz.appendChild(h("div", { className: "slbl" }, "Delete project"));
+            dz.appendChild(h("p", { className: "hint" },
+                "Permanently removes the OpenStack project and all its resources. To move it to another contract, use the contract's danger zone."));
+            dz.appendChild(h("div", { className: "btn-row" },
+                h("button", { className: "btn danger sm", onclick: async () => {
+                    if (!confirm(`Delete project ${p.name}? This will remove the OpenStack project and all its resources.`)) return;
                     try {
-                        await api(`/api/admin/projects/${encodeURIComponent(p.resource_name)}/move`, {
-                            method: "POST", body: JSON.stringify({ contract_number: target }),
-                        });
-                        navigate(`/contracts/${encodeURIComponent(target)}/projects/${encodeURIComponent(p.resource_name)}`);
+                        await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, { method: "DELETE" });
+                        navigate(`/contracts/${cn}/projects`);
                     } catch (err) { showAlert(err.message); }
-                }},
-                    h("p", { className: "hint" }, "Reassign this project to a different contract (and customer). The project keeps its name and OpenStack resources; only billing follows the new contract."),
-                    h("label", { htmlFor: "move-contract" }, "Target contract"),
-                    sel,
-                    h("div", { className: "btn-row" },
-                        h("button", { type: "submit", className: "btn primary sm" }, "Move project"),
-                    ),
-                );
-                app.appendChild(moveForm);
-            }
+                }}, "Delete project"),
+            ));
+            app.appendChild(dz);
         }
     } catch (e) { showAlert(e.message); }
 }
@@ -1406,15 +1375,6 @@ async function renderAdminContractDetail(contractId) {
             eyebrow: "Contract",
             title: contract.contract_number,
             lead: `${contract.customer.name} · ${contract.users.length} user${contract.users.length === 1 ? "" : "s"} with portal access.`,
-            actions: [
-                h("button", { className: "btn danger sm", onclick: async () => {
-                    if (!confirm(`Delete contract ${contract.contract_number}? All projects must be deleted first.`)) return;
-                    try {
-                        await api(`/api/admin/contracts/${contractId}`, { method: "DELETE" });
-                        navigate(`/admin/customers/${contract.customer.id}`);
-                    } catch (err) { showAlert(err.message); }
-                }}, "Delete"),
-            ],
         }));
 
         // Description
@@ -1438,50 +1398,6 @@ async function renderAdminContractDetail(contractId) {
             ),
         );
         app.appendChild(descForm);
-
-        // Move to another customer
-        app.appendChild(h("div", { className: "slbl" }, "Move to another customer"));
-        let customers = [];
-        try { customers = await api("/api/admin/customers"); } catch {}
-        const moveTargets = (customers || []).filter(c => c.id !== contract.customer.id);
-        if (!moveTargets.length) {
-            app.appendChild(h("p", { className: "hint" }, "No other customers to move this contract to."));
-        } else {
-            const warn = h("p", { className: "hint", style: "display:none" });
-            const updateWarn = (cust) => {
-                if (cust && cust.domain !== contract.customer.domain) {
-                    warn.style.display = "";
-                    warn.textContent = `Note: ${cust.name} uses domain “${cust.domain}”, but existing projects keep their current names (which embed “${contract.customer.domain}”). The name is cosmetic — resources and access are unaffected.`;
-                } else {
-                    warn.style.display = "none";
-                }
-            };
-            const sel = h("select", { id: "move-customer", name: "customer_id" },
-                ...moveTargets.map(c => h("option", { value: String(c.id) }, `${c.name} (${c.domain})`)),
-            );
-            sel.addEventListener("change", () => updateWarn(moveTargets.find(c => String(c.id) === sel.value)));
-            const moveForm = h("form", { className: "form", onsubmit: async (e) => {
-                e.preventDefault();
-                const customerId = parseInt(sel.value, 10);
-                const cust = moveTargets.find(c => c.id === customerId);
-                if (!confirm(`Move contract ${contract.contract_number} to ${cust ? cust.name : "the selected customer"}?`)) return;
-                try {
-                    await api(`/api/admin/contracts/${contractId}/move`, {
-                        method: "POST", body: JSON.stringify({ customer_id: customerId }),
-                    });
-                    renderAdminContractDetail(contractId);
-                } catch (err) { showAlert(err.message); }
-            }},
-                h("label", { htmlFor: "move-customer" }, "Target customer"),
-                sel,
-                warn,
-                h("div", { className: "btn-row" },
-                    h("button", { type: "submit", className: "btn primary sm" }, "Move contract"),
-                ),
-            );
-            updateWarn(moveTargets[0]);
-            app.appendChild(moveForm);
-        }
 
         // Rebate
         app.appendChild(h("div", { className: "slbl" }, "Rebate"));
@@ -1617,6 +1533,143 @@ async function renderAdminContractDetail(contractId) {
             h("p", { className: "hint" }, "User is identified by their SWAMID ", h("code", {}, "sub"), " claim — typically their eduPersonPrincipalName."),
         );
         app.appendChild(grant);
+
+        // --- Danger zone: relocation & deletion ---
+        const dz = h("div", { className: "danger-zone" });
+        dz.appendChild(h("div", { className: "dz-head" }, "Danger zone"));
+        dz.appendChild(h("p", { className: "hint" },
+            "Relocation and deletion. Moves re-point billing; renames re-point every project; deletion is permanent."));
+
+        let customers = [], allContracts = [], projects = [];
+        try { customers = await api("/api/admin/customers"); } catch {}
+        try { allContracts = await api("/api/admin/contracts"); } catch {}
+        try {
+            projects = await api(`/api/contracts/${encodeURIComponent(contract.contract_number)}/projects`);
+        } catch {}
+        const customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
+
+        // Projects — move each to another contract.
+        dz.appendChild(h("div", { className: "slbl" }, "Projects", h("span", { className: "count" }, String(projects.length))));
+        if (!projects.length) {
+            dz.appendChild(h("p", { className: "hint" }, "No projects on this contract."));
+        } else {
+            const otherContracts = (allContracts || []).filter(c => c.contract_number !== contract.contract_number);
+            for (const p of projects) {
+                const row = h("div", { className: "dz-row" });
+                row.appendChild(h("a", { className: "dz-row-name link",
+                    href: `#/contracts/${encodeURIComponent(contract.contract_number)}/projects/${encodeURIComponent(p.resource_name)}` },
+                    p.name));
+                if (!otherContracts.length) {
+                    row.appendChild(h("span", { className: "hint" }, "No other contract to move to."));
+                } else {
+                    const sel = h("select", {},
+                        ...otherContracts.map(c => {
+                            const cust = customersById[c.customer_id];
+                            return h("option", { value: c.contract_number },
+                                `${c.contract_number}${cust ? " — " + cust.name : ""}`);
+                        }),
+                    );
+                    const btn = h("button", { className: "btn danger tiny", onclick: async () => {
+                        const target = sel.value;
+                        if (!target) return;
+                        if (!confirm(`Move project ${p.name} to contract ${target}? It keeps its name and OpenStack resources; only billing follows the new contract.`)) return;
+                        try {
+                            await api(`/api/admin/projects/${encodeURIComponent(p.resource_name)}/move`, {
+                                method: "POST", body: JSON.stringify({ contract_number: target }),
+                            });
+                            renderAdminContractDetail(contractId);
+                        } catch (err) { showAlert(err.message); }
+                    }}, "Move");
+                    row.appendChild(sel);
+                    row.appendChild(btn);
+                }
+                dz.appendChild(row);
+            }
+        }
+
+        // Rename contract.
+        dz.appendChild(h("div", { className: "slbl" }, "Rename contract"));
+        const renameForm = h("form", { className: "form", onsubmit: async (e) => {
+            e.preventDefault();
+            const v = renameForm.querySelector('[name="contract_number"]').value.trim();
+            if (!v || v === contract.contract_number) return;
+            if (!confirm(`Rename contract ${contract.contract_number} to ${v}? All ${projects.length} project(s) will be re-pointed to the new number.`)) return;
+            try {
+                await api(`/api/admin/contracts/${contractId}/rename`, {
+                    method: "POST", body: JSON.stringify({ contract_number: v }),
+                });
+                renderAdminContractDetail(contractId);
+            } catch (err) { showAlert(err.message); }
+        }},
+            h("p", { className: "hint" }, "Changes the contract number and re-points all its projects. Names and OpenStack resources are unaffected; only the billing identifier changes."),
+            h("label", { htmlFor: "cn" }, "New contract number"),
+            h("div", { className: "input-suffix" },
+                (() => {
+                    const i = h("input", { id: "cn", name: "contract_number", type: "text", required: true, pattern: "[A-Za-z0-9-]+" });
+                    i.value = contract.contract_number;
+                    return i;
+                })(),
+                h("button", { type: "submit", className: "btn danger sm" }, "Rename"),
+            ),
+        );
+        dz.appendChild(renameForm);
+
+        // Move to another customer.
+        dz.appendChild(h("div", { className: "slbl" }, "Move to another customer"));
+        const moveTargets = (customers || []).filter(c => c.id !== contract.customer.id);
+        if (!moveTargets.length) {
+            dz.appendChild(h("p", { className: "hint" }, "No other customers to move this contract to."));
+        } else {
+            const warn = h("p", { className: "hint", style: "display:none" });
+            const updateWarn = (cust) => {
+                if (cust && cust.domain !== contract.customer.domain) {
+                    warn.style.display = "";
+                    warn.textContent = `Note: ${cust.name} uses domain “${cust.domain}”, but existing projects keep their current names (which embed “${contract.customer.domain}”). The name is cosmetic — resources and access are unaffected.`;
+                } else {
+                    warn.style.display = "none";
+                }
+            };
+            const sel = h("select", { id: "move-customer", name: "customer_id" },
+                ...moveTargets.map(c => h("option", { value: String(c.id) }, `${c.name} (${c.domain})`)),
+            );
+            sel.addEventListener("change", () => updateWarn(moveTargets.find(c => String(c.id) === sel.value)));
+            const moveForm = h("form", { className: "form", onsubmit: async (e) => {
+                e.preventDefault();
+                const customerId = parseInt(sel.value, 10);
+                const cust = moveTargets.find(c => c.id === customerId);
+                if (!confirm(`Move contract ${contract.contract_number} to ${cust ? cust.name : "the selected customer"}?`)) return;
+                try {
+                    await api(`/api/admin/contracts/${contractId}/move`, {
+                        method: "POST", body: JSON.stringify({ customer_id: customerId }),
+                    });
+                    renderAdminContractDetail(contractId);
+                } catch (err) { showAlert(err.message); }
+            }},
+                h("label", { htmlFor: "move-customer" }, "Target customer"),
+                sel,
+                warn,
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn danger sm" }, "Move contract"),
+                ),
+            );
+            updateWarn(moveTargets[0]);
+            dz.appendChild(moveForm);
+        }
+
+        // Delete contract.
+        dz.appendChild(h("div", { className: "slbl" }, "Delete contract"));
+        dz.appendChild(h("p", { className: "hint" }, "Permanently removes this contract. All its projects must be deleted first."));
+        dz.appendChild(h("div", { className: "btn-row" },
+            h("button", { className: "btn danger sm", onclick: async () => {
+                if (!confirm(`Delete contract ${contract.contract_number}? All projects must be deleted first.`)) return;
+                try {
+                    await api(`/api/admin/contracts/${contractId}`, { method: "DELETE" });
+                    navigate(`/admin/customers/${contract.customer.id}`);
+                } catch (err) { showAlert(err.message); }
+            }}, "Delete contract"),
+        ));
+
+        app.appendChild(dz);
     } catch (e) { showAlert(e.message); }
 }
 

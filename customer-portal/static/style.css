@@ -218,6 +218,28 @@ button { font-family: inherit; }
 .btn.tiny { padding: 6px 10px; font-size: 10px; letter-spacing: 0.8px; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
 
+/* Danger zone */
+.danger-zone {
+  margin-top: 40px;
+  border: 1px solid var(--err);
+  border-radius: 10px;
+  background: var(--err-soft);
+  padding: 16px 20px 24px;
+}
+.danger-zone .dz-head {
+  font-family: var(--mono); font-weight: 700;
+  font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase;
+  color: var(--err);
+}
+.danger-zone .slbl { color: var(--err); }
+.danger-zone .dz-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 0; border-top: 1px solid var(--err);
+}
+.danger-zone .dz-row:first-of-type { border-top: none; }
+.danger-zone .dz-row-name { flex: 1; font-weight: 600; }
+.danger-zone select { flex: 0 1 auto; }
+
 /* Cards */
 .card {
   background: var(--surface);

@@ -57,6 +57,12 @@ class MoveContractRequest(BaseModel):
     customer_id: int
 
 
+class RenameContractRequest(BaseModel):
+    """Change a contract's identifier (admin-only)."""
+
+    contract_number: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9-]+$")
+
+
 class ContractResponse(BaseModel):
     id: int
     customer_id: int

@@ -328,6 +328,38 @@ class GitBackend:
 
             return _parse_project(doc)
 
+    def rename_contract(self, old_contract_number: str, new_contract_number: str) -> int:
+        """Re-point every project of a contract to a new contract number.
+
+        Rewrites `spec.contractNumber` from old to new across all matching
+        project YAMLs in a single commit. CR names (the OpenStack project
+        identity the operator keys on) are untouched, so this is
+        non-destructive. Returns the number of projects re-pointed.
+        """
+        with self._lock:
+            self._pull()
+
+            changed = 0
+            for path in self.projects_dir.glob("*.yaml"):
+                with open(path) as f:
+                    doc = yaml.safe_load(f)
+                if not doc or doc.get("kind") != "OpenstackProject":
+                    continue
+                spec = doc.get("spec", {})
+                if spec.get("contractNumber") != old_contract_number:
+                    continue
+                spec["contractNumber"] = new_contract_number
+                self._write_yaml(path, doc)
+                changed += 1
+
+            if changed:
+                self._commit_and_push(
+                    f"Rename contract {old_contract_number} to "
+                    f"{new_contract_number} ({changed} project(s))"
+                )
+
+            return changed
+
     def delete_project(self, resource_name: str) -> None:
         """Delete a project YAML file, commit, and push."""
         with self._lock:
