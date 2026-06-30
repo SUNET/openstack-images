@@ -523,14 +523,28 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
 // ---------- Quotas (shared) ----------
 
+// Each field: { k, label, factor }. `factor` is how many stored (CR) units
+// one displayed unit is worth — RAM is stored as ramMB but shown in GB, so
+// factor 1024 (display GB = ramMB / 1024). Default factor 1 (no conversion).
 const QUOTA_GROUPS = [
     { key: "compute", label: "Compute", fields: [
-        ["instances", "Instances"], ["cores", "vCPUs"], ["ramMB", "RAM (MB)"]] },
+        { k: "instances", label: "Instances" },
+        { k: "cores", label: "vCPUs" },
+        { k: "ramMB", label: "RAM (GB)", factor: 1024 },
+    ] },
     { key: "storage", label: "Storage", fields: [
-        ["volumes", "Volumes"], ["volumesGB", "Volume storage (GB)"], ["snapshots", "Snapshots"]] },
+        { k: "volumes", label: "Volumes" },
+        { k: "volumesGB", label: "Volume storage (GB)" },
+        { k: "snapshots", label: "Snapshots" },
+    ] },
     { key: "network", label: "Network", fields: [
-        ["securityGroups", "Security groups"], ["securityGroupRules", "Security group rules"]] },
+        { k: "securityGroups", label: "Security groups" },
+        { k: "securityGroupRules", label: "Security group rules" },
+    ] },
 ];
+
+const _qstored = (quotas, gk, k) =>
+    (quotas && quotas[gk] && quotas[gk][k] != null) ? quotas[gk][k] : 0;
 
 /** Build an editable quota form pre-filled from `values` (a quotas dict). */
 function quotaForm(values, { warnLowering = false } = {}) {
@@ -545,24 +559,27 @@ function quotaForm(values, { warnLowering = false } = {}) {
     for (const g of QUOTA_GROUPS) {
         form.appendChild(h("div", { className: "slbl" }, g.label));
         const grid = h("div", { style: "display:grid;grid-template-columns:1fr 130px;gap:8px 14px;align-items:center" });
-        for (const [k, lbl] of g.fields) {
-            const v = (values && values[g.key] && values[g.key][k] != null) ? values[g.key][k] : 0;
-            grid.appendChild(h("label", { htmlFor: `q-${g.key}-${k}`, style: "margin:0" }, lbl));
-            grid.appendChild(h("input", { id: `q-${g.key}-${k}`, name: `${g.key}.${k}`, type: "number", min: "0", step: "1", value: String(v), className: "mono" }));
+        for (const f of g.fields) {
+            const factor = f.factor || 1;
+            const display = _qstored(values, g.key, f.k) / factor;
+            grid.appendChild(h("label", { htmlFor: `q-${g.key}-${f.k}`, style: "margin:0" }, f.label));
+            grid.appendChild(h("input", { id: `q-${g.key}-${f.k}`, name: `${g.key}.${f.k}`, type: "number", min: "0", step: factor === 1 ? "1" : "any", value: String(display), className: "mono" }));
         }
         form.appendChild(grid);
     }
     return form;
 }
 
-/** Read a quotas dict back out of a form built by quotaForm(). */
+/** Read a quotas dict back out of a form built by quotaForm() (display -> stored). */
 function readQuotaForm(form) {
     const q = {};
     for (const g of QUOTA_GROUPS) {
         q[g.key] = {};
-        for (const [k] of g.fields) {
-            const n = parseInt(form.querySelector(`[name="${g.key}.${k}"]`).value, 10);
-            q[g.key][k] = Number.isFinite(n) && n >= 0 ? n : 0;
+        for (const f of g.fields) {
+            const factor = f.factor || 1;
+            const n = parseFloat(form.querySelector(`[name="${g.key}.${f.k}"]`).value);
+            const display = Number.isFinite(n) && n >= 0 ? n : 0;
+            q[g.key][f.k] = Math.round(display * factor);
         }
     }
     return q;
@@ -572,9 +589,10 @@ function readQuotaForm(form) {
 function quotaKv(quotas) {
     const rows = [];
     for (const g of QUOTA_GROUPS) {
-        for (const [k, lbl] of g.fields) {
-            const v = (quotas && quotas[g.key] && quotas[g.key][k] != null) ? quotas[g.key][k] : "—";
-            rows.push(kvRow(`${g.label}: ${lbl}`, String(v)));
+        for (const f of g.fields) {
+            const has = quotas && quotas[g.key] && quotas[g.key][f.k] != null;
+            const display = has ? _qstored(quotas, g.key, f.k) / (f.factor || 1) : "—";
+            rows.push(kvRow(`${g.label}: ${f.label}`, String(display)));
         }
     }
     return kv(...rows);
