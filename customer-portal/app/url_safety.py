@@ -27,12 +27,30 @@ def _is_private_ip(addr: str) -> bool:
     )
 
 
+def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
+    """Match `host` against the allowlist (exact or ``*.`` wildcard).
+
+    A ``*.suffix`` entry matches any subdomain of ``suffix`` on a label
+    boundary (``su.drive.sunet.se`` matches ``*.drive.sunet.se``) but not
+    the bare apex and not lookalikes (``evildrive.sunet.se`` does not).
+    """
+    for entry in allowed_hosts:
+        entry = entry.lower()
+        if entry.startswith("*."):
+            if host.endswith(entry[1:]):  # entry[1:] keeps the leading dot
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
 def validate_webdav_url(url: str, allowed_hosts: list[str]) -> None:
     """Reject WebDAV URLs that are unsafe to PUT to from the portal pod.
 
     Rules:
       - Scheme must be https.
-      - Hostname must be in `allowed_hosts` (exact match, case-insensitive).
+      - Hostname must match `allowed_hosts` (exact or ``*.`` wildcard,
+        case-insensitive).
       - All resolved IPs must be public (no RFC1918/loopback/link-local/
         metadata).
 
@@ -45,8 +63,7 @@ def validate_webdav_url(url: str, allowed_hosts: list[str]) -> None:
     host = (parsed.hostname or "").lower()
     if not host:
         raise UnsafeDeliveryURL("WebDAV URL is missing a hostname")
-    allowed = {h.lower() for h in allowed_hosts}
-    if host not in allowed:
+    if not _host_allowed(host, allowed_hosts):
         raise UnsafeDeliveryURL(
             "WebDAV host is not in the portal's WEBDAV_ALLOWED_HOSTS allowlist"
         )
