@@ -678,8 +678,21 @@ async def deliver_webdav(url: str, username: str, password: str, filename: str, 
     full_url = url.rstrip("/") + "/" + filename
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
         resp = await client.put(full_url, content=content.encode(), auth=(username, password))
-        resp.raise_for_status()
-    logger.info("Delivered %s to WebDAV: %s", filename, url)
+        # WebDAV success is 200/201/204. Treat anything else (including an
+        # unfollowed 3xx) as a failure. raise_for_status() discards the
+        # response body, but Nextcloud/Sabre puts the actual cause there
+        # (e.g. the Sabre exception class and message), so capture it.
+        if not resp.is_success:
+            body = resp.text.strip()[:500]
+            logger.error(
+                "WebDAV PUT to %s failed: HTTP %d; body: %s",
+                full_url, resp.status_code, body or "(empty body)",
+            )
+            raise RuntimeError(
+                f"WebDAV PUT returned HTTP {resp.status_code}: "
+                f"{body or '(empty body)'}"
+            )
+    logger.info("Delivered %s to WebDAV (HTTP %d): %s", filename, resp.status_code, url)
 
 
 async def deliver_email(recipient: str, subject: str, filename: str, content: str) -> None:
