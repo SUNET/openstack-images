@@ -495,7 +495,69 @@ async function renderProjectDetail(contractNumber, resourceName) {
             }
             app.appendChild(ul);
         }
+
+        app.appendChild(slbl("Quotas"));
+        app.appendChild(quotaKv(p.quotas));
     } catch (e) { showAlert(e.message); }
+}
+
+// ---------- Quotas (shared) ----------
+
+const QUOTA_GROUPS = [
+    { key: "compute", label: "Compute", fields: [
+        ["instances", "Instances"], ["cores", "vCPUs"], ["ramMB", "RAM (MB)"]] },
+    { key: "storage", label: "Storage", fields: [
+        ["volumes", "Volumes"], ["volumesGB", "Volume storage (GB)"], ["snapshots", "Snapshots"]] },
+    { key: "network", label: "Network", fields: [
+        ["securityGroups", "Security groups"], ["securityGroupRules", "Security group rules"]] },
+];
+
+/** Build an editable quota form pre-filled from `values` (a quotas dict). */
+function quotaForm(values, { warnLowering = false } = {}) {
+    const form = h("form", { className: "form", style: "margin-top:14px", id: "quota-form" },
+        h("h3", {}, "Quotas"),
+        h("p", { className: "hint" }, "Resource limits for this project. You can change these anytime."),
+        warnLowering ? h("p", { className: "hint" },
+            "Lowering a quota below what the project already uses won't remove "
+            + "existing resources, but you won't be able to create new ones of "
+            + "that type until usage drops below the new limit.") : null,
+    );
+    for (const g of QUOTA_GROUPS) {
+        form.appendChild(h("div", { className: "slbl" }, g.label));
+        const grid = h("div", { style: "display:grid;grid-template-columns:1fr 130px;gap:8px 14px;align-items:center" });
+        for (const [k, lbl] of g.fields) {
+            const v = (values && values[g.key] && values[g.key][k] != null) ? values[g.key][k] : 0;
+            grid.appendChild(h("label", { htmlFor: `q-${g.key}-${k}`, style: "margin:0" }, lbl));
+            grid.appendChild(h("input", { id: `q-${g.key}-${k}`, name: `${g.key}.${k}`, type: "number", min: "0", step: "1", value: String(v), className: "mono" }));
+        }
+        form.appendChild(grid);
+    }
+    return form;
+}
+
+/** Read a quotas dict back out of a form built by quotaForm(). */
+function readQuotaForm(form) {
+    const q = {};
+    for (const g of QUOTA_GROUPS) {
+        q[g.key] = {};
+        for (const [k] of g.fields) {
+            const n = parseInt(form.querySelector(`[name="${g.key}.${k}"]`).value, 10);
+            q[g.key][k] = Number.isFinite(n) && n >= 0 ? n : 0;
+        }
+    }
+    return q;
+}
+
+/** Render quotas read-only as a kv block. */
+function quotaKv(quotas) {
+    const rows = [];
+    for (const g of QUOTA_GROUPS) {
+        for (const [k, lbl] of g.fields) {
+            const v = (quotas && quotas[g.key] && quotas[g.key][k] != null) ? quotas[g.key][k] : "—";
+            rows.push(kvRow(`${g.label}: ${lbl}`, String(v)));
+        }
+    }
+    return kv(...rows);
 }
 
 // ---------- Customer: Create project ----------
@@ -540,6 +602,8 @@ function renderCreateProject(contractNumber) {
         h("p", { className: "hint" }, "Add the SWAMID identifiers of users who can manage the project. You can update this anytime."),
     );
 
+    const quota = quotaForm(currentUser.quota_defaults);
+
     const actions = h("div", { className: "btn-row" },
         h("button", { className: "btn primary", onclick: async (e) => {
             e.preventDefault();
@@ -547,9 +611,10 @@ function renderCreateProject(contractNumber) {
             const description = identity.querySelector('[name="description"]').value.trim();
             const usersRaw = access.querySelector('[name="users"]').value.trim();
             const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+            const quotas = readQuotaForm(quota);
             try {
                 await api(`/api/contracts/${contractNumber}/projects`, {
-                    method: "POST", body: JSON.stringify({ name, description, users }),
+                    method: "POST", body: JSON.stringify({ name, description, users, quotas }),
                 });
                 navigate(`/contracts/${cn}/projects`);
             } catch (err) { showAlert(err.message); }
@@ -559,6 +624,7 @@ function renderCreateProject(contractNumber) {
 
     app.appendChild(identity);
     app.appendChild(access);
+    app.appendChild(quota);
     app.appendChild(actions);
 }
 
@@ -601,15 +667,17 @@ async function renderEditProject(contractNumber, resourceName) {
                 return t;
             })(),
         );
+        const quota = quotaForm(p.quotas, { warnLowering: true });
         const actions = h("div", { className: "btn-row" },
             h("button", { className: "btn primary", onclick: async (e) => {
                 e.preventDefault();
                 const description = identity.querySelector('[name="description"]').value.trim();
                 const usersRaw = access.querySelector('[name="users"]').value.trim();
                 const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+                const quotas = readQuotaForm(quota);
                 try {
                     await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
-                        method: "PATCH", body: JSON.stringify({ description, users }),
+                        method: "PATCH", body: JSON.stringify({ description, users, quotas }),
                     });
                     navigate(`/contracts/${cn}/projects/${rn}`);
                 } catch (err) { showAlert(err.message); }
@@ -619,6 +687,7 @@ async function renderEditProject(contractNumber, resourceName) {
 
         app.appendChild(identity);
         app.appendChild(access);
+        app.appendChild(quota);
         app.appendChild(actions);
     } catch (e) { showAlert(e.message); }
 }

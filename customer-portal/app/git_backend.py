@@ -9,15 +9,13 @@ import git
 import yaml
 
 from app.config import Settings
+from app.schemas import QuotaSpec
 
 logger = logging.getLogger(__name__)
 
-# Default quotas for self-service projects
-DEFAULT_QUOTAS = {
-    "compute": {"instances": 10, "cores": 20, "ramMB": 40960},
-    "storage": {"volumes": 10, "volumesGB": 500, "snapshots": 10},
-    "network": {"securityGroups": 10, "securityGroupRules": 100},
-}
+# Default quotas for self-service projects. Derived from QuotaSpec so the
+# CR defaults, the API validation bounds and the UI pre-fill never drift.
+DEFAULT_QUOTAS = QuotaSpec().model_dump()
 
 
 def _sanitize_name(name: str) -> str:
@@ -41,6 +39,7 @@ def _parse_project(doc: dict) -> dict:
         "description": spec.get("description", ""),
         "contract_number": spec.get("contractNumber", ""),
         "users": users,
+        "quotas": spec.get("quotas") or DEFAULT_QUOTAS,
         "managed": bool(spec.get("managed", False)),
     }
 
@@ -124,6 +123,7 @@ class GitBackend:
         users: list[str],
         *,
         managed: bool = False,
+        quotas: dict | None = None,
     ) -> dict:
         """Render an OpenstackProject CR as a dict."""
         resource_name = _sanitize_name(project_name)
@@ -134,7 +134,7 @@ class GitBackend:
             "description": description,
             "enabled": True,
             "contractNumber": contract_number,
-            "quotas": DEFAULT_QUOTAS,
+            "quotas": quotas if quotas is not None else DEFAULT_QUOTAS,
             "roleBindings": [
                 {
                     "role": "member",
@@ -211,6 +211,7 @@ class GitBackend:
         users: list[str],
         *,
         managed: bool = False,
+        quotas: dict | None = None,
     ) -> str:
         """Create an OpenstackProject YAML file, commit, and push.
 
@@ -218,6 +219,8 @@ class GitBackend:
         marked SUNET-managed: the operator assigns customer-domain users the
         Keystone `reader` role rather than `member`, and portal-side mutation
         endpoints reject non-admin write attempts.
+
+        `quotas` overrides the per-resource quotas; `None` uses DEFAULT_QUOTAS.
         """
         with self._lock:
             self._pull()
@@ -229,7 +232,8 @@ class GitBackend:
                 raise ValueError(f"Project '{resource_name}' already exists")
 
             cr = self._render_project_cr(
-                contract_number, project_name, description, users, managed=managed
+                contract_number, project_name, description, users,
+                managed=managed, quotas=quotas,
             )
             self._write_yaml(file_path, cr)
             self._update_kustomization()
@@ -245,6 +249,7 @@ class GitBackend:
         users: list[str] | None = None,
         *,
         role_bindings: list[dict] | None = None,
+        quotas: dict | None = None,
     ) -> dict:
         """Update an existing project YAML, commit, and push.
 
@@ -271,6 +276,10 @@ class GitBackend:
             if description is not None:
                 spec["description"] = description
                 changed.append("description")
+
+            if quotas is not None:
+                spec["quotas"] = quotas
+                changed.append("quotas")
 
             if role_bindings is not None:
                 spec["roleBindings"] = role_bindings

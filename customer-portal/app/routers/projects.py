@@ -69,6 +69,7 @@ def _enrich_project(proj: dict) -> ProjectResponse:
         description=proj["description"],
         contract_number=proj["contract_number"],
         users=proj["users"],
+        quotas=proj.get("quotas"),
         phase=status.get("phase") if status else "Pending (not synced)",
         managed=proj.get("managed", False),
     )
@@ -132,6 +133,7 @@ async def create_project(
             project_name=qualified_name,
             description=req.description,
             users=users,
+            quotas=req.quotas.model_dump(),
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -147,6 +149,7 @@ async def create_project(
         description=req.description,
         contract_number=contract_number,
         users=users,
+        quotas=req.quotas,
         phase="Pending (waiting for ArgoCD sync)",
     )
 
@@ -179,6 +182,7 @@ async def update_project(
             resource_name=resource_name,
             description=req.description,
             users=req.users,
+            quotas=req.quotas.model_dump() if req.quotas is not None else None,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -187,6 +191,7 @@ async def update_project(
         user["sub"], "project.update",
         contract_number=contract_number, resource_name=resource_name,
         users=len(req.users) if req.users is not None else "unchanged",
+        quotas="changed" if req.quotas is not None else "unchanged",
     )
     return _enrich_project(updated)
 

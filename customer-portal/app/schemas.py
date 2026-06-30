@@ -141,10 +141,48 @@ def _validate_user_subjects(users: list[str]) -> list[str]:
     return cleaned
 
 
+# Quota field defaults double as the self-service defaults surfaced in the
+# UI (via /api/me) and the values written into the CR when none are given.
+# `le` bounds are generous fat-finger guards, not policy limits.
+_QUOTA_MAX = 100_000
+_QUOTA_RAM_MB_MAX = 100_000_000
+_QUOTA_GB_MAX = 10_000_000
+
+
+class ComputeQuota(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instances: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    cores: int = Field(default=20, ge=0, le=_QUOTA_MAX)
+    ramMB: int = Field(default=40960, ge=0, le=_QUOTA_RAM_MB_MAX)
+
+
+class StorageQuota(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    volumes: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    volumesGB: int = Field(default=500, ge=0, le=_QUOTA_GB_MAX)
+    snapshots: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+
+
+class NetworkQuota(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    securityGroups: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    securityGroupRules: int = Field(default=100, ge=0, le=_QUOTA_MAX)
+
+
+class QuotaSpec(BaseModel):
+    """Project resource quotas mirroring OpenstackProject `spec.quotas`."""
+
+    model_config = ConfigDict(extra="forbid")
+    compute: ComputeQuota = Field(default_factory=ComputeQuota)
+    storage: StorageQuota = Field(default_factory=StorageQuota)
+    network: NetworkQuota = Field(default_factory=NetworkQuota)
+
+
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     description: str = Field(default="", max_length=_PROJECT_DESCRIPTION_MAX)
     users: list[str] = Field(default_factory=list, max_length=_PROJECT_USERS_MAX)
+    quotas: QuotaSpec = Field(default_factory=QuotaSpec)
 
     @field_validator("users")
     @classmethod
@@ -155,6 +193,7 @@ class CreateProjectRequest(BaseModel):
 class UpdateProjectRequest(BaseModel):
     description: str | None = Field(default=None, max_length=_PROJECT_DESCRIPTION_MAX)
     users: list[str] | None = Field(default=None, max_length=_PROJECT_USERS_MAX)
+    quotas: QuotaSpec | None = None
 
     @field_validator("users")
     @classmethod
@@ -168,6 +207,7 @@ class ProjectResponse(BaseModel):
     description: str
     contract_number: str
     users: list[str]
+    quotas: QuotaSpec | None = None
     phase: str | None = None
     managed: bool = False
 
@@ -313,6 +353,7 @@ class UserInfo(BaseModel):
     email: str | None = None
     is_admin: bool = False
     contracts: list[ContractWithCustomerResponse] = []
+    quota_defaults: QuotaSpec = Field(default_factory=QuotaSpec)
 
 
 # --- Tenant Clusters ---
