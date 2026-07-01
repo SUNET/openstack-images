@@ -47,3 +47,13 @@ extra_jobs:
       - "2025.1-ubuntu_noble-1"
       - "latest"
 
+  # Runner for the monitoring end-to-end tests (OpenStack client + kubectl)
+  - name: monitoring-e2e
+    builders:
+      - docker
+    docker_name: platform/monitoring-e2e
+    docker_context_dir: monitoring-e2e
+    docker_tags:
+      - "0.1.0"
+      - "latest"
+
