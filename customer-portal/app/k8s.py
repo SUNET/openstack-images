@@ -41,3 +41,33 @@ def get_project_status(resource_name: str, namespace: str = "customer-projects")
             return None
         logger.warning("Failed to get OpenstackProject %s: %s", resource_name, e)
         return None
+
+
+def find_project_cr_by_spec_name(spec_name: str) -> str | None:
+    """Find any OpenstackProject CR (cluster-wide) targeting an OpenStack project.
+
+    Catches projects defined outside the portal's git repo, e.g. CRs applied
+    directly through ArgoCD, so the portal cannot create a duplicate that
+    would fight over the same Keystone project.
+
+    Returns 'namespace/name' of the CR, or None if no CR matches (or the
+    lookup fails — the operator has its own duplicate guard as backstop).
+    """
+    if _api is None:
+        return None
+
+    try:
+        crs = _api.list_cluster_custom_object(
+            group="sunet.se",
+            version="v1alpha1",
+            plural="openstackprojects",
+        )
+    except client.ApiException as e:
+        logger.warning("Failed to list OpenstackProjects: %s", e)
+        return None
+
+    for cr in crs.get("items", []):
+        if cr.get("spec", {}).get("name") == spec_name:
+            meta = cr.get("metadata", {})
+            return f"{meta.get('namespace', '')}/{meta.get('name', '')}"
+    return None

@@ -23,6 +23,7 @@ from app.auth import (
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.git_backend import GitBackend
+from app.k8s import find_project_cr_by_spec_name
 from app.models import (
     ClusterAccess,
     ClusterAddon,
@@ -153,6 +154,16 @@ async def admin_create_cluster(
 
     git_backend: GitBackend = request.app.state.git_backend
     project_name = f"{req.slug}.{contract.customer.domain}"
+
+    # Reject names already taken by a CR outside the portal's git repo
+    # (e.g. applied directly through ArgoCD) — a duplicate would fight
+    # over the same OpenStack project.
+    if find_project_cr_by_spec_name(project_name):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A project named '{project_name}' already exists",
+        )
+
     try:
         management_resource_name = git_backend.write_project(
             contract_number=contract.contract_number,

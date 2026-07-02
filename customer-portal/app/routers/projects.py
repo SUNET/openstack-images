@@ -13,7 +13,7 @@ from app.auth import get_current_user, is_sunet_admin
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.git_backend import GitBackend
-from app.k8s import get_project_status
+from app.k8s import find_project_cr_by_spec_name, get_project_status
 from app.models import Contract, ContractAccess
 from app.schemas import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
 
@@ -125,6 +125,16 @@ async def create_project(
 
     # Ensure the creating user is in the users list
     users = list(set(req.users + [user["sub"]]))
+
+    # Reject names already taken by a CR outside the portal's git repo
+    # (e.g. applied directly through ArgoCD) — a duplicate would fight
+    # over the same OpenStack project.
+    existing_cr = find_project_cr_by_spec_name(qualified_name)
+    if existing_cr:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A project named '{qualified_name}' already exists",
+        )
 
     git_backend: GitBackend = request.app.state.git_backend
     try:
