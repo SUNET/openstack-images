@@ -155,28 +155,31 @@ def _validate_user_subjects(users: list[str]) -> list[str]:
 
 # Quota field defaults double as the self-service defaults surfaced in the
 # UI (via /api/me) and the values written into the CR when none are given.
-# Only `ge=0` is enforced — no upper bound, since legitimate large projects
-# (e.g. national-scale storage) can need very high quotas.
+# Upper bound: the Nova/Cinder/Neutron quota APIs validate values as signed
+# int32 and 400 on anything larger. A value above that in the CR wedges the
+# operator's reconcile loop (quota step fails forever, role bindings and
+# federation mapping never apply), so cap it here before it reaches the CR.
+_QUOTA_MAX = 2**31 - 1
 
 
 class ComputeQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    instances: int = Field(default=10, ge=0)
-    cores: int = Field(default=20, ge=0)
-    ramMB: int = Field(default=40960, ge=0)
+    instances: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    cores: int = Field(default=20, ge=0, le=_QUOTA_MAX)
+    ramMB: int = Field(default=40960, ge=0, le=_QUOTA_MAX)
 
 
 class StorageQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    volumes: int = Field(default=10, ge=0)
-    volumesGB: int = Field(default=500, ge=0)
-    snapshots: int = Field(default=10, ge=0)
+    volumes: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    volumesGB: int = Field(default=500, ge=0, le=_QUOTA_MAX)
+    snapshots: int = Field(default=10, ge=0, le=_QUOTA_MAX)
 
 
 class NetworkQuota(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    securityGroups: int = Field(default=10, ge=0)
-    securityGroupRules: int = Field(default=100, ge=0)
+    securityGroups: int = Field(default=10, ge=0, le=_QUOTA_MAX)
+    securityGroupRules: int = Field(default=100, ge=0, le=_QUOTA_MAX)
 
 
 class QuotaSpec(BaseModel):

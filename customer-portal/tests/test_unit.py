@@ -223,6 +223,23 @@ def test_oidc_sub_label_hash_is_stable() -> None:
     assert oidc_sub_label_hash("a") != oidc_sub_label_hash("b")
 
 
+def test_quota_values_capped_at_int32() -> None:
+    """OpenStack quota APIs reject values above signed int32; a larger value
+    in the CR wedges the operator's reconcile loop, so the schema must
+    refuse it (regression: drive.sunet.se ramMB=4096000000)."""
+    from app.schemas import ComputeQuota, NetworkQuota, StorageQuota, _QUOTA_MAX
+
+    ComputeQuota(ramMB=_QUOTA_MAX)
+    with pytest.raises(ValidationError):
+        ComputeQuota(ramMB=4096000000)
+    with pytest.raises(ValidationError):
+        ComputeQuota(cores=_QUOTA_MAX + 1)
+    with pytest.raises(ValidationError):
+        StorageQuota(volumesGB=_QUOTA_MAX + 1)
+    with pytest.raises(ValidationError):
+        NetworkQuota(securityGroupRules=_QUOTA_MAX + 1)
+
+
 def test_create_cluster_request_worker_groups_min() -> None:
     base = dict(
         contract_number="CO-001",

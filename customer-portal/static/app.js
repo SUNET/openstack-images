@@ -554,6 +554,11 @@ const QUOTA_GROUPS = [
     ] },
 ];
 
+// The OpenStack quota APIs validate values as signed int32 and reject
+// anything larger, so a bigger value in the CR wedges the operator.
+// Mirrored server-side in schemas.py (_QUOTA_MAX).
+const QUOTA_MAX = 2147483647;
+
 const _qstored = (quotas, gk, k) =>
     (quotas && quotas[gk] && quotas[gk][k] != null) ? quotas[gk][k] : 0;
 
@@ -574,7 +579,7 @@ function quotaForm(values, { warnLowering = false } = {}) {
             const factor = f.factor || 1;
             const display = _qstored(values, g.key, f.k) / factor;
             grid.appendChild(h("label", { htmlFor: `q-${g.key}-${f.k}`, style: "margin:0" }, f.label));
-            grid.appendChild(h("input", { id: `q-${g.key}-${f.k}`, name: `${g.key}.${f.k}`, type: "number", min: "0", step: factor === 1 ? "1" : "any", value: String(display), className: "mono" }));
+            grid.appendChild(h("input", { id: `q-${g.key}-${f.k}`, name: `${g.key}.${f.k}`, type: "number", min: "0", max: String(Math.floor(QUOTA_MAX / factor)), step: factor === 1 ? "1" : "any", value: String(display), className: "mono" }));
         }
         form.appendChild(grid);
     }
@@ -590,7 +595,7 @@ function readQuotaForm(form) {
             const factor = f.factor || 1;
             const n = parseFloat(form.querySelector(`[name="${g.key}.${f.k}"]`).value);
             const display = Number.isFinite(n) && n >= 0 ? n : 0;
-            q[g.key][f.k] = Math.round(display * factor);
+            q[g.key][f.k] = Math.min(Math.round(display * factor), QUOTA_MAX);
         }
     }
     return q;
@@ -660,6 +665,7 @@ function renderCreateProject(contractNumber) {
             const description = identity.querySelector('[name="description"]').value.trim();
             const usersRaw = access.querySelector('[name="users"]').value.trim();
             const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+            if (!quota.reportValidity()) return;
             const quotas = readQuotaForm(quota);
             try {
                 await api(`/api/contracts/${contractNumber}/projects`, {
@@ -723,6 +729,7 @@ async function renderEditProject(contractNumber, resourceName) {
                 const description = identity.querySelector('[name="description"]').value.trim();
                 const usersRaw = access.querySelector('[name="users"]').value.trim();
                 const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+                if (!quota.reportValidity()) return;
                 const quotas = readQuotaForm(quota);
                 try {
                     await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
