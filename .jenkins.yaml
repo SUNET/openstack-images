@@ -4,6 +4,9 @@ clean_workspace: true
 triggers:
   cron: "@daily"
 
+environment_variables:
+  OPERATOR_VERSION: "0.1.1"
+
 extra_jobs:
   # Keystone with OIDC support
   - name: openstack-keystone
@@ -23,7 +26,7 @@ extra_jobs:
     docker_context_dir: openstack-operator
     docker_no_cache: true
     docker_tags:
-      - "0.1.0"
+      - "${OPERATOR_VERSION}"
       - "latest"
 
   # Customer self-service portal
@@ -56,4 +59,3 @@ extra_jobs:
     docker_tags:
       - "0.1.0"
       - "latest"
-
