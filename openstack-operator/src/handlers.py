@@ -207,7 +207,9 @@ def _list_project_crs() -> list[dict[str, Any]] | None:
             plural="openstackprojects",
         )
         return crs.get("items", [])
-    except k8s_client.ApiException as e:
+    except Exception as e:
+        # Not just ApiException: apiserver flakiness surfaces as urllib3
+        # timeouts/TLS errors, which callers must also treat as "unknown".
         logger.warning(f"Failed to list OpenstackProject CRs: {e}")
         return None
 
@@ -695,10 +697,17 @@ def delete_project_handler(
     # If another CR references the same project, deleting the OpenStack
     # resources would destroy them out from under it. Only remove this CR.
     cr_items = _list_project_crs()
-    duplicates = (
-        find_duplicate_project_crs(cr_items, namespace, name, project_name, domain)
-        if cr_items is not None
-        else []
+    if cr_items is None:
+        # Fail closed: without the CR list we cannot prove the project is
+        # unreferenced, and deleting a live shared project is unrecoverable.
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
+        raise kopf.TemporaryError(
+            f"Could not list OpenstackProject CRs to verify project "
+            f"{project_name} is unreferenced; refusing to delete",
+            delay=60,
+        )
+    duplicates = find_duplicate_project_crs(
+        cr_items, namespace, name, project_name, domain
     )
     if duplicates:
         others = ", ".join(
