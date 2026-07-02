@@ -31,7 +31,13 @@ from notification_listener import start_notification_listener
 from resources.role_binding import apply_role_bindings, get_users_from_role_bindings
 from resources.security_group import delete_security_groups, ensure_security_groups
 from state import state, get_openstack_client, get_registry
-from utils import is_valid_uuid, make_group_name, now_iso
+from utils import (
+    find_duplicate_project_crs,
+    find_project_owner_cr,
+    is_valid_uuid,
+    make_group_name,
+    now_iso,
+)
 from metrics import (
     RECONCILE_TOTAL,
     RECONCILE_DURATION,
@@ -186,6 +192,26 @@ def get_federation_config(
         return None
 
 
+def _list_project_crs() -> list[dict[str, Any]] | None:
+    """List all OpenstackProject CRs cluster-wide.
+
+    Returns None if the listing fails, so callers can distinguish
+    'no CRs' from 'could not check'.
+    """
+    state.get_k8s_core_api()  # Ensure k8s config is loaded
+    try:
+        api = k8s_client.CustomObjectsApi()
+        crs = api.list_cluster_custom_object(
+            group="sunet.se",
+            version="v1alpha1",
+            plural="openstackprojects",
+        )
+        return crs.get("items", [])
+    except k8s_client.ApiException as e:
+        logger.warning(f"Failed to list OpenstackProject CRs: {e}")
+        return None
+
+
 @kopf.on.startup()
 async def configure(settings: kopf.OperatorSettings, **_: Any) -> None:
     """Configure operator settings on startup."""
@@ -328,6 +354,26 @@ def create_project(
         domain = spec.get("domain")
         if not project_name or not domain:
             raise kopf.PermanentError("spec.name and spec.domain are required")
+
+        # Refuse to provision when another CR already claims this project.
+        # Duplicate names (e.g. portal-created CR + direct ArgoCD CR) would
+        # otherwise silently share one Keystone project.
+        cr_items = _list_project_crs()
+        if cr_items is not None:
+            owner = find_project_owner_cr(
+                cr_items,
+                namespace,
+                name,
+                meta.get("creationTimestamp", ""),
+                project_name,
+                domain,
+            )
+            if owner:
+                raise RuntimeError(
+                    f"Project {project_name} in domain {domain} is already "
+                    f"managed by OpenstackProject {owner}; refusing to adopt. "
+                    f"Remove one of the CRs to resolve the conflict."
+                )
 
         description = spec.get("description", "")
         enabled = spec.get("enabled", True)
@@ -494,6 +540,7 @@ def update_project(
                 namespace=namespace,
                 name=name,
                 meta=meta,
+                body=body,
             )
             return
 
@@ -642,6 +689,29 @@ def delete_project_handler(
         logger.warning(
             f"No project_id in status for {namespace}/{name}, nothing to delete"
         )
+        RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
+        return
+
+    # If another CR references the same project, deleting the OpenStack
+    # resources would destroy them out from under it. Only remove this CR.
+    cr_items = _list_project_crs()
+    duplicates = (
+        find_duplicate_project_crs(cr_items, namespace, name, project_name, domain)
+        if cr_items is not None
+        else []
+    )
+    if duplicates:
+        others = ", ".join(
+            f"{d.get('metadata', {}).get('namespace', '')}/"
+            f"{d.get('metadata', {}).get('name', '')}"
+            for d in duplicates
+        )
+        msg = (
+            f"Skipping OpenStack deletion for project {project_name}: "
+            f"still referenced by OpenstackProject {others}"
+        )
+        logger.warning(msg)
+        kopf.warn(body, reason="DeletionSkipped", message=msg[:200])
         RECONCILE_IN_PROGRESS.labels(resource="OpenstackProject").dec()
         return
 

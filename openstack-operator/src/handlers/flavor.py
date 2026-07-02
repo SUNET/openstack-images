@@ -142,7 +142,7 @@ def update_flavor_handler(
         if not flavor_id:
             # No flavor ID, treat as create
             RECONCILE_IN_PROGRESS.labels(resource="OpenstackFlavor").dec()
-            create_flavor_handler(spec=spec, patch=patch, name=name)
+            create_flavor_handler(spec=spec, patch=patch, name=name, body=body)
             return
 
         # Check if immutable properties changed

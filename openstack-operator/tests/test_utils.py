@@ -1,7 +1,40 @@
 """Tests for utility functions."""
 
 import datetime
-from utils import is_valid_uuid, sanitize_name, make_group_name, now_iso, set_condition
+from utils import (
+    find_duplicate_project_crs,
+    find_project_owner_cr,
+    is_valid_uuid,
+    make_group_name,
+    now_iso,
+    sanitize_name,
+    set_condition,
+)
+
+
+def _make_cr(
+    namespace: str,
+    name: str,
+    project_name: str,
+    domain: str = "sso-users",
+    created: str = "2026-01-01T00:00:00Z",
+    project_id: str | None = None,
+    deleting: bool = False,
+) -> dict:
+    cr: dict = {
+        "metadata": {
+            "namespace": namespace,
+            "name": name,
+            "creationTimestamp": created,
+        },
+        "spec": {"name": project_name, "domain": domain},
+        "status": {},
+    }
+    if project_id:
+        cr["status"]["projectId"] = project_id
+    if deleting:
+        cr["metadata"]["deletionTimestamp"] = "2026-01-02T00:00:00Z"
+    return cr
 
 
 class TestIsValidUuid:
@@ -141,3 +174,159 @@ class TestSetCondition:
         assert len(status["conditions"]) == 2
         types = {c["type"] for c in status["conditions"]}
         assert types == {"Ready", "NetworkReady"}
+
+
+class TestFindDuplicateProjectCrs:
+    """Tests for find_duplicate_project_crs function."""
+
+    def test_no_duplicates(self):
+        crs = [_make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se")]
+        assert (
+            find_duplicate_project_crs(
+                crs, "customer-projects", "drive-sunet-se", "drive.sunet.se", "sso-users"
+            )
+            == []
+        )
+
+    def test_excludes_self(self):
+        crs = [
+            _make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se"),
+            _make_cr("openstack-operator", "drive", "drive.sunet.se"),
+        ]
+        dups = find_duplicate_project_crs(
+            crs, "customer-projects", "drive-sunet-se", "drive.sunet.se", "sso-users"
+        )
+        assert len(dups) == 1
+        assert dups[0]["metadata"]["name"] == "drive"
+
+    def test_same_cr_name_other_namespace_is_duplicate(self):
+        crs = [
+            _make_cr("customer-projects", "drive", "drive.sunet.se"),
+            _make_cr("openstack-operator", "drive", "drive.sunet.se"),
+        ]
+        dups = find_duplicate_project_crs(
+            crs, "customer-projects", "drive", "drive.sunet.se", "sso-users"
+        )
+        assert len(dups) == 1
+        assert dups[0]["metadata"]["namespace"] == "openstack-operator"
+
+    def test_different_domain_not_duplicate(self):
+        crs = [
+            _make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se"),
+            _make_cr("openstack-operator", "drive", "drive.sunet.se", domain="other"),
+        ]
+        assert (
+            find_duplicate_project_crs(
+                crs, "customer-projects", "drive-sunet-se", "drive.sunet.se", "sso-users"
+            )
+            == []
+        )
+
+    def test_different_project_name_not_duplicate(self):
+        crs = [
+            _make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se"),
+            _make_cr("customer-projects", "jupyter-sunet-se", "jupyter.sunet.se"),
+        ]
+        assert (
+            find_duplicate_project_crs(
+                crs, "customer-projects", "drive-sunet-se", "drive.sunet.se", "sso-users"
+            )
+            == []
+        )
+
+
+class TestFindProjectOwnerCr:
+    """Tests for find_project_owner_cr function."""
+
+    def test_single_cr_may_proceed(self):
+        crs = [_make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se")]
+        assert (
+            find_project_owner_cr(
+                crs,
+                "customer-projects",
+                "drive-sunet-se",
+                "2026-01-01T00:00:00Z",
+                "drive.sunet.se",
+                "sso-users",
+            )
+            is None
+        )
+
+    def test_provisioned_duplicate_owns(self):
+        crs = [
+            _make_cr("customer-projects", "drive-sunet-se", "drive.sunet.se",
+                     created="2026-01-01T00:00:00Z"),
+            _make_cr("openstack-operator", "drive", "drive.sunet.se",
+                     created="2026-06-01T00:00:00Z", project_id="abc123"),
+        ]
+        # Even though the other CR is newer, it already provisioned the project
+        owner = find_project_owner_cr(
+            crs,
+            "customer-projects",
+            "drive-sunet-se",
+            "2026-01-01T00:00:00Z",
+            "drive.sunet.se",
+            "sso-users",
+        )
+        assert owner == "openstack-operator/drive"
+
+    def test_older_unprovisioned_duplicate_owns(self):
+        crs = [
+            _make_cr("openstack-operator", "drive", "drive.sunet.se",
+                     created="2026-01-01T00:00:00Z"),
+        ]
+        owner = find_project_owner_cr(
+            crs,
+            "customer-projects",
+            "drive-sunet-se",
+            "2026-06-01T00:00:00Z",
+            "drive.sunet.se",
+            "sso-users",
+        )
+        assert owner == "openstack-operator/drive"
+
+    def test_newer_unprovisioned_duplicate_does_not_own(self):
+        crs = [
+            _make_cr("openstack-operator", "drive", "drive.sunet.se",
+                     created="2026-06-01T00:00:00Z"),
+        ]
+        assert (
+            find_project_owner_cr(
+                crs,
+                "customer-projects",
+                "drive-sunet-se",
+                "2026-01-01T00:00:00Z",
+                "drive.sunet.se",
+                "sso-users",
+            )
+            is None
+        )
+
+    def test_terminating_duplicate_ignored(self):
+        crs = [
+            _make_cr("openstack-operator", "drive", "drive.sunet.se",
+                     created="2026-01-01T00:00:00Z", project_id="abc123",
+                     deleting=True),
+        ]
+        assert (
+            find_project_owner_cr(
+                crs,
+                "customer-projects",
+                "drive-sunet-se",
+                "2026-06-01T00:00:00Z",
+                "drive.sunet.se",
+                "sso-users",
+            )
+            is None
+        )
+
+    def test_timestamp_tie_breaks_on_namespace_name(self):
+        ts = "2026-01-01T00:00:00Z"
+        crs = [
+            _make_cr("a-namespace", "drive", "drive.sunet.se", created=ts),
+        ]
+        owner = find_project_owner_cr(
+            crs, "customer-projects", "drive-sunet-se", ts,
+            "drive.sunet.se", "sso-users",
+        )
+        assert owner == "a-namespace/drive"

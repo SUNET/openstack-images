@@ -45,6 +45,76 @@ def now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+def _cr_identity(cr: dict[str, Any]) -> str:
+    """Return 'namespace/name' for a CR dict."""
+    meta = cr.get("metadata", {})
+    return f"{meta.get('namespace', '')}/{meta.get('name', '')}"
+
+
+def _cr_precedence_key(cr: dict[str, Any]) -> tuple[str, str, str]:
+    """Ordering key for competing CRs: oldest first, then namespace/name."""
+    meta = cr.get("metadata", {})
+    return (
+        meta.get("creationTimestamp") or "",
+        meta.get("namespace") or "",
+        meta.get("name") or "",
+    )
+
+
+def find_duplicate_project_crs(
+    cr_items: list[dict[str, Any]],
+    namespace: str,
+    name: str,
+    project_name: str,
+    domain: str,
+) -> list[dict[str, Any]]:
+    """Find other CRs whose spec targets the same OpenStack project.
+
+    Returns every OpenstackProject CR (except namespace/name itself) with
+    the same spec.name and spec.domain — i.e. CRs that would adopt the
+    same Keystone project.
+    """
+    duplicates = []
+    for cr in cr_items:
+        meta = cr.get("metadata", {})
+        if meta.get("namespace") == namespace and meta.get("name") == name:
+            continue
+        spec = cr.get("spec", {})
+        if spec.get("name") == project_name and spec.get("domain") == domain:
+            duplicates.append(cr)
+    return duplicates
+
+
+def find_project_owner_cr(
+    cr_items: list[dict[str, Any]],
+    namespace: str,
+    name: str,
+    creation_timestamp: str,
+    project_name: str,
+    domain: str,
+) -> str | None:
+    """Find another CR with a prior claim on (project_name, domain).
+
+    A competing CR has a prior claim if it already provisioned the project
+    (status.projectId set) or is older than this CR. CRs being deleted are
+    ignored — their delete handler leaves the shared project alone as long
+    as this CR exists.
+
+    Returns the owner's 'namespace/name', or None if this CR may proceed.
+    """
+    my_key = (creation_timestamp or "", namespace or "", name or "")
+    for cr in find_duplicate_project_crs(
+        cr_items, namespace, name, project_name, domain
+    ):
+        if cr.get("metadata", {}).get("deletionTimestamp"):
+            continue
+        if cr.get("status", {}).get("projectId"):
+            return _cr_identity(cr)
+        if _cr_precedence_key(cr) < my_key:
+            return _cr_identity(cr)
+    return None
+
+
 def set_condition(
     status: dict[str, Any],
     condition_type: str,

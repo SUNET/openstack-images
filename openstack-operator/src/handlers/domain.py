@@ -155,7 +155,7 @@ def update_domain_handler(
         if not domain_id:
             # No domain ID, treat as create
             RECONCILE_IN_PROGRESS.labels(resource="OpenstackDomain").dec()
-            create_domain_handler(spec=spec, patch=patch, name=name, meta=meta)
+            create_domain_handler(spec=spec, patch=patch, name=name, meta=meta, body=body)
             return
 
         # Update existing domain

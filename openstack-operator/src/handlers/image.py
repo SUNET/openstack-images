@@ -187,7 +187,7 @@ def update_image_handler(
         if not image_id:
             # No image ID, treat as create
             RECONCILE_IN_PROGRESS.labels(resource="OpenstackImage").dec()
-            create_image_handler(spec=spec, patch=patch, name=name)
+            create_image_handler(spec=spec, patch=patch, name=name, body=body)
             return
 
         # Update mutable properties
