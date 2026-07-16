@@ -18,6 +18,25 @@ extra_jobs:
       - "2025.1-ubuntu_noble-2"
       - "latest"
 
+  # Keystone with OIDC support, OpenStack 2025.2 (test runs 2025.2
+  # while prod is still on 2025.1; both lines need daily rebuilds)
+  - name: openstack-keystone-2025.2
+    builders:
+      - docker
+    docker_name: platform/openstack-keystone
+    docker_context_dir: keystone-2025.2
+    docker_tags:
+      - "2025.2-ubuntu_noble-2"
+
+  # Libvirt with QEMU SPICE support, OpenStack 2025.2
+  - name: openstack-libvirt-2025.2
+    builders:
+      - docker
+    docker_name: platform/openstack-libvirt
+    docker_context_dir: libvirt-2025.2
+    docker_tags:
+      - "2025.2-ubuntu_noble-1"
+
   # OpenStack Operator (Kopf-based K8s operator)
   - name: openstack-operator
     builders:
