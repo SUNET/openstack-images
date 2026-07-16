@@ -1,6 +1,6 @@
 # Libvirt with QEMU SPICE support
 # Adds qemu-system-modules-spice for SPICE console graphics
-FROM quay.io/airshipit/libvirt:2025.2-ubuntu_noble
+FROM quay.io/airshipit/libvirt:2025.1-ubuntu_noble
 
 USER root
 

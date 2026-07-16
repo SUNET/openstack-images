@@ -1156,14 +1156,9 @@ class OpenStackClient:
 
     @retry_on_error()
     def get_archive_policy(self, name: str) -> dict | None:
-        """Get an archive policy by name.
-
-        raise_exc=False: the keystoneauth session raises on any 4xx by
-        default, which would turn "policy absent" into an exception before
-        the 404 check below can return None.
-        """
+        """Get an archive policy by name."""
         url = f"{self._gnocchi_url()}/v1/archive_policy/{name}"
-        resp = self.conn.session.get(url, raise_exc=False)
+        resp = self.conn.session.get(url)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -1209,8 +1204,7 @@ class OpenStackClient:
         """Delete an archive policy."""
         logger.info("Deleting archive policy: %s", name)
         url = f"{self._gnocchi_url()}/v1/archive_policy/{name}"
-        # raise_exc=False: see get_archive_policy.
-        resp = self.conn.session.delete(url, raise_exc=False)
+        resp = self.conn.session.delete(url)
         if resp.status_code == 404:
             logger.debug("Archive policy %s already deleted", name)
             return
