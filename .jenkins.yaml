@@ -15,7 +15,7 @@ extra_jobs:
     docker_name: platform/openstack-keystone
     docker_context_dir: keystone
     docker_tags:
-      - "2025.1-ubuntu_noble-2"
+      - "2025.2-ubuntu_noble-2"
       - "latest"
 
   # OpenStack Operator (Kopf-based K8s operator)
@@ -47,7 +47,7 @@ extra_jobs:
     docker_name: platform/openstack-libvirt
     docker_context_dir: libvirt
     docker_tags:
-      - "2025.1-ubuntu_noble-1"
+      - "2025.2-ubuntu_noble-1"
       - "latest"
 
   # Runner for the monitoring end-to-end tests (OpenStack client + kubectl)
