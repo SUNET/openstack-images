@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title="Customer Portal API", version="0.1.3", lifespan=lifespan)
+app = FastAPI(title="Customer Portal API", version="0.1.4", lifespan=lifespan)
 
 _settings = get_settings()
 _BASE_ORIGIN = (

@@ -416,7 +416,7 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
     assert report == "CO-001;Example project;instance (b2.c1r2);2,00 hour;4\r\n"
 
 
-def test_generate_billing_csv_resolves_volume_type_id_before_pricing(monkeypatch) -> None:
+def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monkeypatch) -> None:
     price = SimpleNamespace(
         resource_type="volume.size",
         metadata_field="volume_type",
@@ -459,8 +459,15 @@ def test_generate_billing_csv_resolves_volume_type_id_before_pricing(monkeypatch
                 "metric": "volume.size",
                 "metadata": {"volume_type": "type-uuid"},
                 "hours": Decimal(1),
-                "size_months": Decimal(10),
-            }
+                "size_months": Decimal("4.648569"),
+            },
+            {
+                "project_id": "project-1",
+                "metric": "volume.size",
+                "metadata": {"volume_type": "rbd1"},
+                "hours": Decimal(1),
+                "size_months": Decimal("40.311108"),
+            },
         ],
     )
 
@@ -472,7 +479,7 @@ def test_generate_billing_csv_resolves_volume_type_id_before_pricing(monkeypatch
         datetime(2026, 8, 1),
     )
 
-    assert report == "CO-001;Example project;volume.size (rbd1);10,00 GB-month;17\r\n"
+    assert report == "CO-001;Example project;volume.size (rbd1);44,96 GB-month;78\r\n"
 
 
 def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:

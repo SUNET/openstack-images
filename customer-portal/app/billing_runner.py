@@ -102,6 +102,37 @@ def _resolve_cinder_volume_type(value: str, type_names: dict[str, str]) -> str:
     )
 
 
+def _canonicalize_volume_usage(usage: list[dict], type_names: dict[str, str]) -> list[dict]:
+    """Resolve Cinder type IDs and roll equivalent historical groups together."""
+    canonical: dict[tuple, dict] = {}
+    for entry in usage:
+        metadata = dict(entry.get("metadata", {}))
+        raw_volume_type = metadata.get("volume_type")
+        if not isinstance(raw_volume_type, str) or not raw_volume_type:
+            raise BillingGenerationError("Volume usage is missing volume_type")
+        metadata["volume_type"] = _resolve_cinder_volume_type(
+            raw_volume_type, type_names
+        )
+
+        key = (
+            entry["project_id"],
+            tuple((field, metadata[field]) for field in sorted(metadata)),
+        )
+        result = canonical.setdefault(
+            key,
+            {
+                "project_id": entry["project_id"],
+                "metric": entry["metric"],
+                "metadata": metadata,
+                "hours": Decimal(0),
+                "size_months": Decimal(0),
+            },
+        )
+        result["hours"] += Decimal(str(entry["hours"]))
+        result["size_months"] += Decimal(str(entry["size_months"]))
+    return list(canonical.values())
+
+
 def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
     """Discover available metric/resource types and their metadata values from Gnocchi.
 
@@ -870,6 +901,8 @@ def generate_billing_csv(
             )
             if metric == "volume.size" and usage and volume_type_names is None:
                 volume_type_names = _get_cinder_volume_type_names(conn)
+            if metric == "volume.size" and usage:
+                usage = _canonicalize_volume_usage(usage, volume_type_names)
 
             for entry in usage:
                 pid = entry["project_id"]
@@ -880,14 +913,6 @@ def generate_billing_csv(
                     continue
 
                 metadata = dict(entry.get("metadata", {}))
-                if metric == "volume.size":
-                    if volume_type_names is None:
-                        raise BillingGenerationError(
-                            "Cinder volume types were not loaded for volume usage"
-                        )
-                    metadata["volume_type"] = _resolve_cinder_volume_type(
-                        metadata["volume_type"], volume_type_names
-                    )
 
                 # Find the best matching price (specific metadata > base)
                 price = _find_price(prices, metric, metadata)
