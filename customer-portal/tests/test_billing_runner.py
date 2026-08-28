@@ -13,7 +13,9 @@ from app.billing_runner import (
     BILLING_GRANULARITY_SECONDS,
     GNOCCHI_METRIC_SOURCES,
     BillingGenerationError,
+    _get_cinder_volume_type_names,
     _query_gnocchi_usage,
+    _resolve_cinder_volume_type,
     generate_and_deliver,
     generate_billing_csv,
 )
@@ -129,6 +131,29 @@ def test_gnocchi_exception_fails_billing(monkeypatch) -> None:
 
 def test_instance_product_uses_cpu_metric() -> None:
     assert GNOCCHI_METRIC_SOURCES["instance"] == ("instance", "cpu")
+
+
+def test_cinder_volume_type_resolution_accepts_id_or_name_and_rejects_unknown() -> None:
+    type_names = {"type-uuid": "rbd1"}
+
+    assert _resolve_cinder_volume_type("type-uuid", type_names) == "rbd1"
+    assert _resolve_cinder_volume_type("rbd1", type_names) == "rbd1"
+    with pytest.raises(BillingGenerationError, match="unknown or no longer active"):
+        _resolve_cinder_volume_type("deleted-type", type_names)
+
+
+@pytest.mark.parametrize(
+    ("volume_types", "message"),
+    [
+        ([], "no active volume types"),
+        ([SimpleNamespace(id=None, name="rbd1")], "without an ID"),
+    ],
+)
+def test_cinder_volume_type_catalog_fails_closed(volume_types, message) -> None:
+    connection = SimpleNamespace(block_storage=SimpleNamespace(types=lambda: volume_types))
+
+    with pytest.raises(BillingGenerationError, match=message):
+        _get_cinder_volume_type_names(connection)
 
 
 def test_unsupported_metered_product_fails_closed(monkeypatch) -> None:
@@ -389,6 +414,65 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
         "project_ids": ["project-1"],
     }
     assert report == "CO-001;Example project;instance (b2.c1r2);2,00 hour;4\r\n"
+
+
+def test_generate_billing_csv_resolves_volume_type_id_before_pricing(monkeypatch) -> None:
+    price = SimpleNamespace(
+        resource_type="volume.size",
+        metadata_field="volume_type",
+        metadata_value="rbd1",
+        unit_price=Decimal("1.73"),
+        unit="GB-month",
+    )
+    project = SimpleNamespace(
+        id="project-1",
+        name="Example project",
+        tags=["contract:CO-001"],
+    )
+    connection = SimpleNamespace(
+        identity=SimpleNamespace(projects=lambda: [project]),
+        block_storage=SimpleNamespace(
+            types=lambda: [SimpleNamespace(id="type-uuid", name="rbd1")]
+        ),
+    )
+    database = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(dispose=lambda: None)
+
+    monkeypatch.setattr(billing_runner, "create_engine", lambda *args: engine)
+    monkeypatch.setattr(billing_runner, "sessionmaker", lambda **kwargs: lambda: database)
+    monkeypatch.setattr(billing_runner, "_load_prices", lambda db: [price])
+    monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        billing_runner,
+        "_emit_synthetic_cluster_lines",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "_query_gnocchi_usage",
+        lambda *args: [
+            {
+                "project_id": "project-1",
+                "metric": "volume.size",
+                "metadata": {"volume_type": "type-uuid"},
+                "hours": Decimal(1),
+                "size_months": Decimal(10),
+            }
+        ],
+    )
+
+    report = generate_billing_csv(
+        "postgresql://unused",
+        "openstack",
+        ["CO-001"],
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+    )
+
+    assert report == "CO-001;Example project;volume.size (rbd1);10,00 GB-month;17\r\n"
 
 
 def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:

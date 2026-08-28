@@ -1883,8 +1883,9 @@ function renderPricingDocs() {
         <h3>Metadata-based pricing</h3>
         <p>Some metrics have <strong>metadata fields</strong> that allow more granular pricing. For example,
         the <code>instance</code> metric includes <code>flavor_name</code>, so you can set different prices
-        for different VM sizes. The <code>volume.size</code> metric includes <code>volume_type</code>
-        for differentiating fast vs large storage.</p>
+        for different VM sizes. Gnocchi records <code>volume_type</code> as a Cinder ID; the portal
+        resolves that ID to the active Cinder type name before matching a price. The deployed block
+        storage type is <code>rbd1</code>.</p>
         <p>When billing, the system matches prices in this order:</p>
         <ol>
             <li><strong>Specific price</strong> — matches both the metric type AND the metadata value.</li>

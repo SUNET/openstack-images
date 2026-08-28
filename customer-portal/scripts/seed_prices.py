@@ -59,14 +59,7 @@ def _desired_prices() -> list[dict]:
             "unit_price": Decimal("1.73"),
             "unit": "GB-month",
             "field": "volume_type",
-            "value": "large",
-        },
-        {
-            "resource_type": "volume.size",
-            "unit_price": Decimal("5.18"),
-            "unit": "GB-month",
-            "field": "volume_type",
-            "value": "fast",
+            "value": "rbd1",
         },
         # --- Object storage S3 (per GB-month, no binding) ---
         {

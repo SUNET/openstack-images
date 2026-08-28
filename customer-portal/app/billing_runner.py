@@ -64,6 +64,44 @@ class BillingGenerationError(RuntimeError):
     """Raised when a billing report cannot be generated completely."""
 
 
+def _get_cinder_volume_type_names(conn) -> dict[str, str]:
+    """Return active Cinder volume type IDs mapped to their canonical names."""
+    try:
+        result: dict[str, str] = {}
+        for volume_type in conn.block_storage.types():
+            type_id = getattr(volume_type, "id", None)
+            name = getattr(volume_type, "name", None)
+            if not isinstance(type_id, str) or not type_id:
+                raise BillingGenerationError("Cinder returned a volume type without an ID")
+            if not isinstance(name, str) or not name:
+                raise BillingGenerationError(
+                    f"Cinder returned volume type {type_id} without a name"
+                )
+            if type_id in result and result[type_id] != name:
+                raise BillingGenerationError(
+                    f"Cinder returned conflicting names for volume type {type_id}"
+                )
+            result[type_id] = name
+        if not result:
+            raise BillingGenerationError("Cinder returned no active volume types")
+        return result
+    except BillingGenerationError:
+        raise
+    except Exception as exc:
+        raise BillingGenerationError("Failed to list Cinder volume types") from exc
+
+
+def _resolve_cinder_volume_type(value: str, type_names: dict[str, str]) -> str:
+    """Resolve Gnocchi's Cinder type ID while accepting canonical names."""
+    if value in type_names:
+        return type_names[value]
+    if value in type_names.values():
+        return value
+    raise BillingGenerationError(
+        f"Cinder volume type {value} is unknown or no longer active"
+    )
+
+
 def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
     """Discover available metric/resource types and their metadata values from Gnocchi.
 
@@ -76,6 +114,7 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
     try:
         conn = openstack.connect(cloud=cloud_name)
         token = conn.auth_token
+        volume_type_names = None
 
         # Known metric -> resource type mappings (from ceilometer config)
         METRIC_RESOURCE_MAP = {
@@ -117,10 +156,16 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
                     if resp.status_code == 200:
                         for resource in resp.json():
                             val = resource.get(field)
+                            if val and field == "volume_type":
+                                if volume_type_names is None:
+                                    volume_type_names = _get_cinder_volume_type_names(conn)
+                                val = _resolve_cinder_volume_type(val, volume_type_names)
                             if val:
                                 values.add(val)
                 except Exception:
-                    logger.warning("Failed to query Gnocchi for %s metadata", info["resource_type"])
+                    logger.exception(
+                        "Failed to query Gnocchi for %s metadata", info["resource_type"]
+                    )
 
                 entry["metadata_fields"].append({
                     "field": field,
@@ -804,6 +849,7 @@ def generate_billing_csv(
 
         output = io.StringIO()
         writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+        volume_type_names = None
 
         for metric, meta_fields in metric_metadata_fields.items():
             if metric in SYNTHETIC_RESOURCE_TYPES:
@@ -822,6 +868,8 @@ def generate_billing_csv(
                 conn, period_start, period_end,
                 resource_type, source_metric, groupby, project_ids,
             )
+            if metric == "volume.size" and usage and volume_type_names is None:
+                volume_type_names = _get_cinder_volume_type_names(conn)
 
             for entry in usage:
                 pid = entry["project_id"]
@@ -831,7 +879,15 @@ def generate_billing_csv(
                 if cn not in contract_set:
                     continue
 
-                metadata = entry.get("metadata", {})
+                metadata = dict(entry.get("metadata", {}))
+                if metric == "volume.size":
+                    if volume_type_names is None:
+                        raise BillingGenerationError(
+                            "Cinder volume types were not loaded for volume usage"
+                        )
+                    metadata["volume_type"] = _resolve_cinder_volume_type(
+                        metadata["volume_type"], volume_type_names
+                    )
 
                 # Find the best matching price (specific metadata > base)
                 price = _find_price(prices, metric, metadata)
