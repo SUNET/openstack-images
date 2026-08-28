@@ -14,6 +14,7 @@ from openstack.exceptions import (
     DuplicateResource,
     HttpException,
     ResourceNotFound,
+    raise_from_response,
 )
 from openstack.identity.v3.domain import Domain
 from openstack.identity.v3.group import Group
@@ -1175,10 +1176,13 @@ class OpenStackClient:
     def get_archive_policy(self, name: str) -> dict | None:
         """Get an archive policy by name."""
         url = f"{self._gnocchi_url()}/v1/archive_policy/{name}"
-        resp = self.conn.session.get(url)
+        # keystoneauth raises on HTTP errors by default, so disable that here
+        # to handle an expected 404 before converting all other errors to the
+        # OpenStack SDK exception hierarchy used by retry_on_error.
+        resp = self.conn.session.get(url, raise_exc=False)
         if resp.status_code == 404:
             return None
-        resp.raise_for_status()
+        raise_from_response(resp)
         return resp.json()
 
     @retry_on_error()
@@ -1198,8 +1202,8 @@ class OpenStackClient:
             "aggregation_methods": aggregation_methods,
             "back_window": back_window,
         }
-        resp = self.conn.session.post(url, json=body)
-        resp.raise_for_status()
+        resp = self.conn.session.post(url, json=body, raise_exc=False)
+        raise_from_response(resp)
         return resp.json()
 
     @retry_on_error()
@@ -1212,8 +1216,8 @@ class OpenStackClient:
         logger.info("Updating archive policy: %s", name)
         url = f"{self._gnocchi_url()}/v1/archive_policy/{name}"
         body = {"definition": definition}
-        resp = self.conn.session.patch(url, json=body)
-        resp.raise_for_status()
+        resp = self.conn.session.patch(url, json=body, raise_exc=False)
+        raise_from_response(resp)
         return resp.json()
 
     @retry_on_error()
@@ -1221,8 +1225,8 @@ class OpenStackClient:
         """Delete an archive policy."""
         logger.info("Deleting archive policy: %s", name)
         url = f"{self._gnocchi_url()}/v1/archive_policy/{name}"
-        resp = self.conn.session.delete(url)
+        resp = self.conn.session.delete(url, raise_exc=False)
         if resp.status_code == 404:
             logger.debug("Archive policy %s already deleted", name)
             return
-        resp.raise_for_status()
+        raise_from_response(resp)
