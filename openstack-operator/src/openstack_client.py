@@ -9,7 +9,12 @@ from typing import ParamSpec, TypeVar
 
 import openstack
 from openstack.connection import Connection
-from openstack.exceptions import ConflictException, DuplicateResource, HttpException, ResourceNotFound
+from openstack.exceptions import (
+    ConflictException,
+    DuplicateResource,
+    HttpException,
+    ResourceNotFound,
+)
 from openstack.identity.v3.domain import Domain
 from openstack.identity.v3.group import Group
 from openstack.identity.v3.project import Project
@@ -21,12 +26,12 @@ from openstack.network.v2.security_group import SecurityGroup
 from openstack.network.v2.security_group_rule import SecurityGroupRule
 from openstack.network.v2.subnet import Subnet
 
-from models import OpenStackAPIError, ResourceNotFoundError
 from metrics import (
     OPENSTACK_API_CALLS,
     OPENSTACK_API_DURATION,
     OPENSTACK_API_RETRIES,
 )
+from models import OpenStackAPIError, ResourceNotFoundError
 from ratelimit import get_rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -158,6 +163,7 @@ class OpenStackClient:
             os.environ["OS_CLIENT_CONFIG_FILE"] = clouds_config
 
         self._conn: Connection | None = None
+        self._gnocchi_endpoint: str | None = None
 
     @property
     def conn(self) -> Connection:
@@ -172,6 +178,7 @@ class OpenStackClient:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+            self._gnocchi_endpoint = None
 
     # -------------------------------------------------------------------------
     # Domain operations
@@ -1151,8 +1158,18 @@ class OpenStackClient:
 
     def _gnocchi_url(self) -> str:
         """Get the Gnocchi API base URL from the service catalog."""
-        endpoint = self.conn.session.get_endpoint(service_type="metric")
-        return endpoint.rstrip("/")
+        if self._gnocchi_endpoint is not None:
+            return self._gnocchi_endpoint
+
+        endpoint = self.conn.config.get_session_endpoint("metric")
+        if not endpoint:
+            raise OpenStackAPIError(
+                "No Gnocchi endpoint found for the configured region and interface"
+            )
+
+        self._gnocchi_endpoint = endpoint.rstrip("/")
+        logger.info("Using Gnocchi endpoint: %s", self._gnocchi_endpoint)
+        return self._gnocchi_endpoint
 
     @retry_on_error()
     def get_archive_policy(self, name: str) -> dict | None:

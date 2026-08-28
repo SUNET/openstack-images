@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 CONTRACT_TAG_PREFIX = "contract:"
 
 
+class BillingGenerationError(RuntimeError):
+    """Raised when a billing report cannot be generated completely."""
+
+
 def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
     """Discover available metric/resource types and their metadata values from Gnocchi.
 
@@ -456,8 +460,12 @@ def _query_gnocchi_usage(
             timeout=60,
         )
         if resp.status_code != 200:
-            logger.warning("Gnocchi aggregation for %s/%s returned %d", resource_type, metric_name, resp.status_code)
-            return []
+            message = (
+                f"Gnocchi aggregation for {resource_type}/{metric_name} "
+                f"returned HTTP {resp.status_code}"
+            )
+            logger.error(message)
+            raise BillingGenerationError(message)
 
         results = []
         granularity_detected = False
@@ -494,9 +502,13 @@ def _query_gnocchi_usage(
                 "size_months": size_months,
             })
         return results
-    except Exception:
+    except BillingGenerationError:
+        raise
+    except Exception as exc:
         logger.exception("Failed to query Gnocchi for %s/%s", resource_type, metric_name)
-        return []
+        raise BillingGenerationError(
+            f"Failed to query Gnocchi for {resource_type}/{metric_name}"
+        ) from exc
 
 
 def generate_billing_csv(
@@ -790,6 +802,10 @@ async def generate_and_deliver(
             settings.database_url, settings.openstack_cloud,
             contract_numbers, period_start, period_end,
         )
+        if not csv_content.strip():
+            raise BillingGenerationError(
+                "Billing report is empty; refusing to deliver an empty combined file"
+            )
         filename = resolve_template(filename_template, **template_vars)
         await _deliver(delivery_method, config, filename, csv_content)
         files_delivered = 1
