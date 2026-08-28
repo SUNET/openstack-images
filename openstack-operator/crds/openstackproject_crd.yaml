@@ -69,6 +69,7 @@ spec:
                 contractNumber:
                   type: string
                   description: "Contract number for billing"
+                  maxLength: 246
                   pattern: "^[A-Za-z0-9-]+$"
 
                 managed:

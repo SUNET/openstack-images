@@ -9,6 +9,7 @@ be fetched.
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import kopf
@@ -41,7 +42,11 @@ STATUS = {"projectId": "pid-123", "groupId": "gid-456"}
 
 def _run(namespace="openstack-operator", name="drive"):
     handlers.delete_project_handler(
-        spec=SPEC, status=STATUS, namespace=namespace, name=name, body={},
+        spec=SPEC,
+        status=STATUS,
+        namespace=namespace,
+        name=name,
+        body={},
     )
 
 
@@ -75,3 +80,48 @@ def test_sole_cr_deletes_project(delete_env, monkeypatch):
     delete_env["delete_project"].assert_called_once_with(
         delete_env["client"], "pid-123", "gid-456", "sso-users"
     )
+
+
+def test_contract_tag_annotation_runs_tag_only_update(monkeypatch):
+    """The repair trigger must not reconcile users or federation as a side effect."""
+    client = MagicMock()
+    apply_roles = MagicMock()
+    get_federation = MagicMock()
+    monkeypatch.setattr(handlers, "get_openstack_client", lambda: client)
+    monkeypatch.setattr(handlers, "_resolve_group_id", lambda *args: "gid-456")
+    monkeypatch.setattr(handlers, "apply_role_bindings", apply_roles)
+    monkeypatch.setattr(handlers, "get_federation_config", get_federation)
+
+    patch = SimpleNamespace(status={})
+    handlers.update_project(
+        spec={
+            "name": "platform.sunet.se",
+            "domain": "sso-users",
+            "contractNumber": "Platform-2615-40257",
+            "roleBindings": [{"role": "member", "users": ["user@sunet.se"]}],
+            "federationRef": {"configMapName": "federation-config"},
+        },
+        status=STATUS,
+        patch=patch,
+        namespace="customer-projects",
+        name="platform-sunet-se",
+        meta={"generation": 1},
+        diff=(
+            (
+                "change",
+                (
+                    "metadata",
+                    "annotations",
+                    handlers.CONTRACT_TAG_RECONCILE_ANNOTATION,
+                ),
+                None,
+                "openstack-operator-0.1.4-20260828-1",
+            ),
+        ),
+        body={},
+    )
+
+    client.set_project_contract_tag.assert_called_once_with("pid-123", "Platform-2615-40257")
+    apply_roles.assert_not_called()
+    get_federation.assert_not_called()
+    assert patch.status["phase"] == "Ready"

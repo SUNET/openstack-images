@@ -17,6 +17,7 @@ import kopf
 from kubernetes import client as k8s_client
 from prometheus_client import start_http_server
 
+from constants import CONTRACT_TAG_RECONCILE_ANNOTATION
 from resources.federation import FederationManager
 from resources.kms import ensure_transit_key
 from resources.network import delete_networks, ensure_networks
@@ -48,6 +49,7 @@ from metrics import (
     set_operator_info,
     init_metrics,
 )
+from src import __version__
 
 # Import cluster-scoped resource handlers (registers with Kopf)
 import handlers  # noqa: F401
@@ -55,7 +57,7 @@ import handlers  # noqa: F401
 logger = logging.getLogger(__name__)
 
 # Operator version
-OPERATOR_VERSION = "0.1.0"
+OPERATOR_VERSION = __version__
 
 
 def _set_patch_condition(
@@ -89,6 +91,25 @@ def _set_patch_condition(
             "lastTransitionTime": now_iso(),
         }
     )
+
+
+def _is_contract_tag_only_update(diff: kopf.Diff) -> bool:
+    """Return whether this update is solely the contract-tag repair trigger."""
+    annotation_changed = False
+    spec_changed = False
+    for _, field, old, new in diff:
+        if field and field[0] == "spec":
+            spec_changed = True
+        if field == ("metadata", "annotations", CONTRACT_TAG_RECONCILE_ANNOTATION):
+            annotation_changed = old != new
+        elif field == ("metadata", "annotations"):
+            old_annotations = old or {}
+            new_annotations = new or {}
+            annotation_changed = (
+                old_annotations.get(CONTRACT_TAG_RECONCILE_ANNOTATION)
+                != new_annotations.get(CONTRACT_TAG_RECONCILE_ANNOTATION)
+            )
+    return annotation_changed and not spec_changed
 
 
 def _resolve_group_id(
@@ -548,6 +569,7 @@ def update_project(
 
         # Check what changed and update accordingly
         changed_paths = {change[1] for change in diff}
+        contract_tag_only_update = _is_contract_tag_only_update(diff)
 
         # Update project description/enabled if changed
         if any(p[0] in ("description", "enabled") for p in changed_paths):
@@ -555,11 +577,9 @@ def update_project(
             enabled = spec.get("enabled", True)
             client.update_project(project_id, description=description, enabled=enabled)
 
-        # Update contract number tag if changed
-        if any("contractNumber" in str(p) for p in changed_paths):
-            contract_number = spec.get("contractNumber")
-            if contract_number:
-                client.add_project_tag(project_id, f"contract:{contract_number}")
+        # Reconcile on every update so metadata-only GitOps changes can repair
+        # stale tags left by contract moves made before exact reconciliation.
+        client.set_project_contract_tag(project_id, spec.get("contractNumber"))
 
         # Update quotas if changed
         if any("quotas" in str(p) for p in changed_paths):
@@ -599,7 +619,7 @@ def update_project(
         # This handles cases where the spec hasn't changed but state needs repair
         role_bindings = spec.get("roleBindings", [])
         is_managed = bool(spec.get("managed", False))
-        if role_bindings:
+        if role_bindings and not contract_tag_only_update:
             apply_role_bindings(
                 client, project_id, group_id, role_bindings, domain,
                 managed=is_managed,
@@ -608,7 +628,7 @@ def update_project(
         # Always update federation mapping (managed projects opt out — they
         # use direct user-role assignments, no project-group propagation)
         federation_ref = spec.get("federationRef")
-        if federation_ref and not is_managed:
+        if federation_ref and not is_managed and not contract_tag_only_update:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 users = get_users_from_role_bindings(role_bindings)

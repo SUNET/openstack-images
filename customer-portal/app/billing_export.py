@@ -22,9 +22,10 @@ from decimal import Decimal
 
 import openstack
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session as SyncSession, sessionmaker
+from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, Contract, ContractPriceOverride, ContractRebate, ResourcePrice
+from app.models import Contract, ContractPriceOverride, ContractRebate, ResourcePrice
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +74,17 @@ def get_project_contracts(conn: openstack.connection.Connection) -> dict[str, tu
     """Build project_id -> (project_name, contract_number) mapping."""
     project_map = {}
     for project in conn.identity.projects():
-        contract_number = None
-        for tag in (project.tags or []):
-            if tag.startswith(CONTRACT_TAG_PREFIX):
-                contract_number = tag[len(CONTRACT_TAG_PREFIX):]
-                break
-        if contract_number:
+        contract_tags = sorted(
+            tag for tag in (project.tags or []) if tag.startswith(CONTRACT_TAG_PREFIX)
+        )
+        if len(contract_tags) > 1:
+            raise RuntimeError(
+                f"Project {project.name} has multiple contract tags: {contract_tags}"
+            )
+        if contract_tags:
+            contract_number = contract_tags[0][len(CONTRACT_TAG_PREFIX) :]
+            if not contract_number:
+                raise RuntimeError(f"Project {project.name} has an empty contract tag")
             project_map[project.id] = (project.name, contract_number)
     return project_map
 
@@ -133,11 +139,13 @@ def query_cloudkitty_summary(
             if result.status_code == 200:
                 data = result.json()
                 for entry in data.get("results", []):
-                    summaries.append({
-                        "project_id": entry.get("project_id", ""),
-                        "metric": entry.get("type", metric_name),
-                        "quantity": entry.get("qty", 0),
-                    })
+                    summaries.append(
+                        {
+                            "project_id": entry.get("project_id", ""),
+                            "metric": entry.get("type", metric_name),
+                            "quantity": entry.get("qty", 0),
+                        }
+                    )
         except Exception:
             logger.exception("Failed to query CloudKitty for metric %s", metric_name)
 
@@ -200,12 +208,15 @@ def main() -> None:
     parser.add_argument("--output", "-o", help="Output file (default: stdout)")
     parser.add_argument("--cloud", default="openstack", help="OpenStack cloud name")
     parser.add_argument("--delimiter", default=";", help="CSV delimiter (default: ;)")
-    parser.add_argument("--database-url", default=None, help="Database URL (default: from DATABASE_URL env)")
+    parser.add_argument(
+        "--database-url", default=None, help="Database URL (default: from DATABASE_URL env)"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
     import os
+
     db_url = args.database_url or os.environ.get(
         "DATABASE_URL", "postgresql://portal:portal@localhost:5432/portal"
     )
@@ -224,8 +235,12 @@ def main() -> None:
     contract_overrides = load_contract_overrides(db_session)
     rebates = load_rebates(db_session)
     contract_ids = load_contract_ids(db_session)
-    logger.info("Loaded %d global prices, %d contracts with overrides, %d with rebates",
-                len(global_prices), len(contract_overrides), len(rebates))
+    logger.info(
+        "Loaded %d global prices, %d contracts with overrides, %d with rebates",
+        len(global_prices),
+        len(contract_overrides),
+        len(rebates),
+    )
 
     # Connect to OpenStack
     conn = openstack.connect(cloud=args.cloud)
@@ -239,8 +254,12 @@ def main() -> None:
     logger.info("Got %d summary entries", len(summaries))
 
     csv_output = generate_csv(
-        project_contracts, summaries,
-        global_prices, contract_overrides, rebates, contract_ids,
+        project_contracts,
+        summaries,
+        global_prices,
+        contract_overrides,
+        rebates,
+        contract_ids,
         args.delimiter,
     )
 

@@ -27,6 +27,7 @@ from openstack.network.v2.security_group import SecurityGroup
 from openstack.network.v2.security_group_rule import SecurityGroupRule
 from openstack.network.v2.subnet import Subnet
 
+from constants import CONTRACT_TAG_PREFIX
 from metrics import (
     OPENSTACK_API_CALLS,
     OPENSTACK_API_DURATION,
@@ -227,6 +228,40 @@ class OpenStackClient:
             current_tags.add(tag)
             self.conn.identity.update_project(project_id, tags=list(current_tags))
             logger.debug("Added tag %s to project %s", tag, project_id)
+
+    @retry_on_error(exceptions=(HttpException, OpenStackAPIError))
+    def set_project_contract_tag(self, project_id: str, contract_number: str | None) -> None:
+        """Replace all contract tags with the contract declared in Git."""
+        project = self.conn.identity.get_project(project_id)
+        project.fetch_tags(self.conn.identity)
+        current_contract_tags = {
+            tag for tag in (project.tags or []) if tag.startswith(CONTRACT_TAG_PREFIX)
+        }
+        desired_contract_tags = (
+            {f"{CONTRACT_TAG_PREFIX}{contract_number}"} if contract_number else set()
+        )
+
+        # Per-tag requests avoid overwriting unrelated tags added concurrently.
+        for tag in sorted(desired_contract_tags - current_contract_tags):
+            project.add_tag(self.conn.identity, tag)
+        for tag in sorted(current_contract_tags - desired_contract_tags):
+            project.remove_tag(self.conn.identity, tag)
+
+        project.fetch_tags(self.conn.identity)
+        final_contract_tags = {
+            tag for tag in (project.tags or []) if tag.startswith(CONTRACT_TAG_PREFIX)
+        }
+        if final_contract_tags != desired_contract_tags:
+            raise OpenStackAPIError(
+                f"Contract tag reconciliation failed for project {project_id}: "
+                f"expected {sorted(desired_contract_tags)}, got {sorted(final_contract_tags)}"
+            )
+        if current_contract_tags != desired_contract_tags:
+            logger.info(
+                "Reconciled contract tag on project %s to %s",
+                project_id,
+                contract_number,
+            )
 
     def project_has_tag(self, project_id: str, tag: str) -> bool:
         """Check if a project has a specific tag."""

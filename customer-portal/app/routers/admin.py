@@ -636,9 +636,9 @@ async def move_project(
 ):
     """Reassign a project to a different contract.
 
-    Only `spec.contractNumber` in the CR changes; the project keeps its name
-    and OpenStack identity, so no resources are touched. Billing follows the
-    new contract from the next run onward.
+    Only `spec.contractNumber` in the CR changes; the project keeps its name,
+    OpenStack identity, and workloads. Billing follows the new contract after
+    ArgoCD and the OpenStack operator have successfully reconciled the change.
     """
     result = await session.execute(
         select(Contract).where(Contract.contract_number == req.contract_number)

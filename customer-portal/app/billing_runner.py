@@ -263,10 +263,20 @@ def _get_project_contracts(conn: openstack.connection.Connection) -> dict[str, t
     """Build project_id -> (project_name, contract_number) mapping."""
     project_map = {}
     for project in conn.identity.projects():
-        for tag in (project.tags or []):
-            if tag.startswith(CONTRACT_TAG_PREFIX):
-                project_map[project.id] = (project.name, tag[len(CONTRACT_TAG_PREFIX):])
-                break
+        contract_tags = sorted(
+            tag for tag in (project.tags or []) if tag.startswith(CONTRACT_TAG_PREFIX)
+        )
+        if len(contract_tags) > 1:
+            raise BillingGenerationError(
+                f"Project {project.name} has multiple contract tags: {contract_tags}"
+            )
+        if contract_tags:
+            contract_number = contract_tags[0][len(CONTRACT_TAG_PREFIX):]
+            if not contract_number:
+                raise BillingGenerationError(
+                    f"Project {project.name} has an empty contract tag"
+                )
+            project_map[project.id] = (project.name, contract_number)
     return project_map
 
 

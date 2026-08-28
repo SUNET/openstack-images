@@ -38,10 +38,10 @@ def ensure_project(
         client.add_project_tag(project_id, MANAGED_BY_TAG)
         logger.info(f"Created project {name} with ID {project_id}")
 
-    # Set contract number tag for billing
-    if contract_number:
-        client.add_project_tag(project_id, f"contract:{contract_number}")
-        logger.info(f"Set contract tag contract:{contract_number} on project {name}")
+    # Git is authoritative for the project's single billing contract. This also
+    # removes stale contract tags left by an earlier contract move.
+    client.set_project_contract_tag(project_id, contract_number)
+    logger.info("Reconciled contract tag for project %s to %s", name, contract_number)
 
     # Ensure group exists for project users
     group_name = make_group_name(name)
@@ -90,9 +90,7 @@ def delete_project(
         logger.warning(f"Failed to delete project {project_id}: {e}")
 
 
-def get_project_info(
-    client: OpenStackClient, name: str, domain: str
-) -> dict[str, Any] | None:
+def get_project_info(client: OpenStackClient, name: str, domain: str) -> dict[str, Any] | None:
     """Get project and group information."""
     project = client.get_project(name, domain)
     if not project:

@@ -9,11 +9,13 @@ import httpx
 import pytest
 
 from app import billing_runner
+from app.billing_export import get_project_contracts as get_legacy_project_contracts
 from app.billing_runner import (
     BILLING_GRANULARITY_SECONDS,
     GNOCCHI_METRIC_SOURCES,
     BillingGenerationError,
     _get_cinder_volume_type_names,
+    _get_project_contracts,
     _query_gnocchi_usage,
     _resolve_cinder_volume_type,
     generate_and_deliver,
@@ -191,6 +193,40 @@ def test_unsupported_metered_product_fails_closed(monkeypatch) -> None:
             datetime(2026, 7, 1),
             datetime(2026, 8, 1),
         )
+
+
+def test_multiple_project_contract_tags_fail_closed() -> None:
+    project = SimpleNamespace(
+        id="project-1",
+        name="Ambiguous project",
+        tags=["contract:CONTRACT-2", "unrelated", "contract:CONTRACT-1"],
+    )
+    connection = SimpleNamespace(identity=SimpleNamespace(projects=lambda: [project]))
+
+    with pytest.raises(
+        BillingGenerationError,
+        match=r"Ambiguous project.*CONTRACT-1.*CONTRACT-2",
+    ):
+        _get_project_contracts(connection)
+    with pytest.raises(
+        RuntimeError,
+        match=r"Ambiguous project.*CONTRACT-1.*CONTRACT-2",
+    ):
+        get_legacy_project_contracts(connection)
+
+
+def test_empty_project_contract_tag_fails_closed() -> None:
+    project = SimpleNamespace(
+        id="project-1",
+        name="Empty contract project",
+        tags=["contract:"],
+    )
+    connection = SimpleNamespace(identity=SimpleNamespace(projects=lambda: [project]))
+
+    with pytest.raises(BillingGenerationError, match=r"Empty contract project.*empty"):
+        _get_project_contracts(connection)
+    with pytest.raises(RuntimeError, match=r"Empty contract project.*empty"):
+        get_legacy_project_contracts(connection)
 
 
 def test_gnocchi_usage_counts_each_resource_with_hourly_granularity(monkeypatch) -> None:

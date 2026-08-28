@@ -28,7 +28,7 @@ spec:
         - name: operator
           # Tag is pinned in kustomize base/kustomization.yaml `images:`.
           # Production overlays should override with a digest reference.
-          image: docker.sunet.se/platform/openstack-operator:v0.1.0
+          image: docker.sunet.se/platform/openstack-operator:0.1.4
           imagePullPolicy: IfNotPresent
           env:
             - name: OS_CLIENT_CONFIG_FILE
