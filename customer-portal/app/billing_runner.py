@@ -7,8 +7,8 @@ import json
 import logging
 import re
 import smtplib
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
@@ -39,6 +39,25 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 CONTRACT_TAG_PREFIX = "contract:"
+BILLING_GRANULARITY_SECONDS = 3600
+MAX_BILLING_PROJECTS = 1000
+MAX_GNOCCHI_GROUPS_PER_PROJECT = 10000
+MAX_GNOCCHI_MEASURES_PER_GROUP = 20000
+MAX_GNOCCHI_RESPONSE_BYTES = 10 * 1024 * 1024
+
+# Billing product -> (Gnocchi resource type, source metric).  The `instance`
+# product is billed from CPU sample presence because Ceilometer does not emit a
+# continuously sampled metric named `instance`.
+GNOCCHI_METRIC_SOURCES = {
+    "instance": ("instance", "cpu"),
+    "radosgw.objects.size": ("ceph_account", "radosgw.objects.size"),
+    "volume.size": ("volume", "volume.size"),
+}
+GNOCCHI_METRIC_METADATA_FIELDS = {
+    "instance": {"flavor_name"},
+    "radosgw.objects.size": set(),
+    "volume.size": {"volume_type"},
+}
 
 
 class BillingGenerationError(RuntimeError):
@@ -60,13 +79,21 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
 
         # Known metric -> resource type mappings (from ceilometer config)
         METRIC_RESOURCE_MAP = {
-            "instance": {"resource_type": "instance", "unit": "hours", "metadata": ["flavor_name"]},
-            "volume.size": {"resource_type": "volume", "unit": "GB", "metadata": ["volume_type"]},
-            "image.size": {"resource_type": "image", "unit": "MB", "metadata": ["disk_format"]},
-            "ip.floating": {"resource_type": "network", "unit": "hours", "metadata": []},
-            "radosgw.objects.size": {"resource_type": "ceph_account", "unit": "GB", "metadata": []},
-            "network.incoming.bytes.rate": {"resource_type": "instance_network_interface", "unit": "MB", "metadata": []},
-            "network.outgoing.bytes.rate": {"resource_type": "instance_network_interface", "unit": "MB", "metadata": []},
+            "instance": {
+                "resource_type": "instance",
+                "unit": "hour",
+                "metadata": ["flavor_name"],
+            },
+            "volume.size": {
+                "resource_type": "volume",
+                "unit": "GB-month",
+                "metadata": ["volume_type"],
+            },
+            "radosgw.objects.size": {
+                "resource_type": "ceph_account",
+                "unit": "GB-month",
+                "metadata": [],
+            },
         }
 
         results = []
@@ -418,90 +445,289 @@ def _emit_synthetic_cluster_lines(
         )
 
 
-def _detect_granularity_seconds(measures: list) -> float:
-    """Detect the granularity in seconds from Gnocchi measure timestamps."""
-    if len(measures) < 2:
-        return 300  # default to 5 minutes if we can't detect
-    from dateutil.parser import parse as parse_dt
-    t1 = parse_dt(measures[0][0]) if isinstance(measures[0][0], str) else measures[0][0]
-    t2 = parse_dt(measures[1][0]) if isinstance(measures[1][0], str) else measures[1][0]
-    return max((t2 - t1).total_seconds(), 1)
+def _project_had_gnocchi_resources(
+    token: str,
+    gnocchi: str,
+    resource_type: str,
+    project_id: str,
+    begin: datetime,
+    end: datetime,
+) -> bool:
+    """Return whether a project had this resource type during the period."""
+    response = httpx.post(
+        f"{gnocchi}/v1/search/resource/{resource_type}",
+        params=[("history", "true"), ("limit", "1"), ("attrs", "id")],
+        json={
+            "and": [
+                {"=": {"project_id": project_id}},
+                {"<": {"revision_start": end.isoformat()}},
+                {
+                    "or": [
+                        {">": {"revision_end": begin.isoformat()}},
+                        {"=": {"revision_end": None}},
+                    ]
+                },
+            ]
+        },
+        headers={"X-Auth-Token": token},
+        timeout=60,
+    )
+    if response.status_code != 200:
+        raise BillingGenerationError(
+            f"Unable to classify empty Gnocchi result for {resource_type}: "
+            f"HTTP {response.status_code}"
+        )
+    resources = response.json()
+    if not isinstance(resources, list):
+        raise BillingGenerationError(
+            f"Invalid Gnocchi resource search response for {resource_type}"
+        )
+    return bool(resources)
 
 
 def _query_gnocchi_usage(
     conn, begin: datetime, end: datetime, resource_type: str, metric_name: str,
-    groupby_fields: list[str],
+    groupby_fields: list[str], project_ids: list[str],
 ) -> list[dict]:
-    """Query Gnocchi for aggregated usage data grouped by project and metadata fields.
+    """Query history-aware per-resource usage and roll it up for pricing.
 
-    Returns a list of dicts with 'project_id', 'metadata' (dict), and 'hours'
-    (total hours of usage, calculated from data point count and detected granularity).
+    Each non-empty hourly series point represents one started resource-hour. Size
+    metrics additionally use the point value to calculate period-normalized size.
     """
     import httpx
+
     token = conn.auth_token
     gnocchi = "http://gnocchi-api.openstack.svc.cluster.local:8041"
 
-    params = [
-        ("start", begin.isoformat()),
-        ("stop", end.isoformat()),
-        ("aggregation", "mean"),
-        ("needed_overlap", "0"),
-        ("groupby", "project_id"),
-    ]
-    for field in groupby_fields:
-        params.append(("groupby", field))
-
     try:
-        resp = httpx.post(
-            f"{gnocchi}/v1/aggregation/resource/{resource_type}/metric/{metric_name}",
-            params=params,
-            json={},  # empty search = all resources
-            headers={"X-Auth-Token": token},
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            message = (
-                f"Gnocchi aggregation for {resource_type}/{metric_name} "
-                f"returned HTTP {resp.status_code}"
+        if len(project_ids) > MAX_BILLING_PROJECTS:
+            raise BillingGenerationError(
+                f"Billing scope has {len(project_ids)} projects; "
+                f"maximum is {MAX_BILLING_PROJECTS}"
             )
-            logger.error(message)
-            raise BillingGenerationError(message)
 
-        results = []
-        granularity_detected = False
-        granularity_seconds = 300  # default
-        period_seconds = max((end - begin).total_seconds(), 1)
+        results_by_group: dict[tuple, dict] = {}
+        begin_utc = begin.replace(tzinfo=UTC) if begin.tzinfo is None else begin.astimezone(UTC)
+        end_utc = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+        period_seconds = Decimal(str((end_utc - begin_utc).total_seconds()))
+        if period_seconds <= 0:
+            raise BillingGenerationError("Billing period must have positive duration")
 
-        for group in resp.json():
-            group_info = group.get("group", {})
-            measures = group.get("measures", [])
+        metadata_fields = [
+            field
+            for field in groupby_fields
+            if field not in {"project_id", "id", "original_resource_id"}
+        ]
+        groupby = ["project_id", "id", "original_resource_id", *metadata_fields]
 
-            # Detect granularity from the first group that has enough data
-            if not granularity_detected and len(measures) >= 2:
-                granularity_seconds = _detect_granularity_seconds(measures)
-                granularity_detected = True
-                logger.debug("Detected granularity: %ds for %s/%s", granularity_seconds, resource_type, metric_name)
+        for requested_project_id in sorted(set(project_ids)):
+            params = [
+                ("start", begin_utc.isoformat()),
+                ("stop", end_utc.isoformat()),
+                ("granularity", str(BILLING_GRANULARITY_SECONDS)),
+                ("fill", "dropna"),
+                ("use_history", "true"),
+                *(("groupby", field) for field in groupby),
+            ]
+            resp = httpx.post(
+                f"{gnocchi}/v1/aggregates",
+                params=params,
+                json={
+                    "resource_type": resource_type,
+                    "search": {"=": {"project_id": requested_project_id}},
+                    "operations": [
+                        "aggregate",
+                        "sum",
+                        ["metric", metric_name, "mean"],
+                    ],
+                },
+                headers={"X-Auth-Token": token},
+                timeout=60,
+            )
+            if resp.status_code == 404:
+                if not _project_had_gnocchi_resources(
+                    token,
+                    gnocchi,
+                    resource_type,
+                    requested_project_id,
+                    begin_utc,
+                    end_utc,
+                ):
+                    logger.debug(
+                        "No Gnocchi %s resources in project %s",
+                        resource_type,
+                        requested_project_id,
+                    )
+                    continue
+            if resp.status_code != 200:
+                message = (
+                    f"Gnocchi aggregation for {resource_type}/{metric_name} "
+                    f"returned HTTP {resp.status_code}"
+                )
+                logger.error(message)
+                raise BillingGenerationError(message)
 
-            # Convert data point count to hours (time-based metrics)
-            hours = len(measures) * granularity_seconds / 3600.0
+            response_content = getattr(resp, "content", b"")
+            if len(response_content) > MAX_GNOCCHI_RESPONSE_BYTES:
+                raise BillingGenerationError(
+                    f"Gnocchi response for {resource_type}/{metric_name} exceeds "
+                    f"{MAX_GNOCCHI_RESPONSE_BYTES} bytes"
+                )
+            groups = resp.json()
+            if not isinstance(groups, list):
+                raise BillingGenerationError(
+                    f"Invalid Gnocchi response for {resource_type}/{metric_name}"
+                )
+            if len(groups) > MAX_GNOCCHI_GROUPS_PER_PROJECT:
+                raise BillingGenerationError(
+                    f"Gnocchi returned {len(groups)} groups for project "
+                    f"{requested_project_id}; maximum is "
+                    f"{MAX_GNOCCHI_GROUPS_PER_PROJECT}"
+                )
 
-            # Time-weighted measured size, normalised to the billing period:
-            # for a size metric this is the per-period average value (= the
-            # GB-months held when the period is one month, pro-rated if the
-            # resource only existed part of it). Raw measure units; the caller
-            # scales to GB.
-            value_sum = sum(m[2] for m in measures if m[2] is not None)
-            size_months = value_sum * granularity_seconds / period_seconds
+            seen_resource_groups: set[tuple] = set()
+            for group in groups:
+                if not isinstance(group, dict) or not isinstance(group.get("group"), dict):
+                    raise BillingGenerationError(
+                        f"Invalid Gnocchi group for {resource_type}/{metric_name}"
+                    )
+                group_info = group["group"]
+                project_id = group_info.get("project_id")
+                resource_id = group_info.get("id")
+                original_resource_id = group_info.get("original_resource_id")
+                if (
+                    project_id != requested_project_id
+                    or not resource_id
+                    or not original_resource_id
+                ):
+                    raise BillingGenerationError(
+                        f"Incomplete Gnocchi group for {resource_type}/{metric_name}"
+                    )
 
-            project_id = group_info.pop("project_id", "")
-            results.append({
-                "project_id": project_id,
-                "metric": metric_name,
-                "metadata": group_info,
-                "hours": hours,
-                "size_months": size_months,
-            })
-        return results
+                metadata = {}
+                for field in metadata_fields:
+                    value = group_info.get(field)
+                    if value is None or value == "":
+                        raise BillingGenerationError(
+                            f"Gnocchi group for {resource_type}/{metric_name} "
+                            f"is missing {field}"
+                        )
+                    metadata[field] = value
+
+                resource_group_key = (
+                    project_id,
+                    resource_id,
+                    original_resource_id,
+                    tuple((field, metadata[field]) for field in sorted(metadata)),
+                )
+                if resource_group_key in seen_resource_groups:
+                    raise BillingGenerationError(
+                        f"Duplicate Gnocchi group for {resource_type}/{metric_name}"
+                    )
+                seen_resource_groups.add(resource_group_key)
+
+                try:
+                    measures = group["measures"]["measures"]["aggregated"]
+                except (KeyError, TypeError) as exc:
+                    raise BillingGenerationError(
+                        f"Invalid Gnocchi measures for {resource_type}/{metric_name}"
+                    ) from exc
+                if not isinstance(measures, list):
+                    raise BillingGenerationError(
+                        f"Invalid Gnocchi measures for {resource_type}/{metric_name}"
+                    )
+                if len(measures) > MAX_GNOCCHI_MEASURES_PER_GROUP:
+                    raise BillingGenerationError(
+                        f"Gnocchi returned too many measures for "
+                        f"{resource_type}/{metric_name}"
+                    )
+                if not measures:
+                    continue
+
+                hours = Decimal(0)
+                size_months = Decimal(0)
+                seen_timestamps: set[datetime] = set()
+                for measure in measures:
+                    if not isinstance(measure, (list, tuple)) or len(measure) != 3:
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi measure for {resource_type}/{metric_name}"
+                        )
+                    timestamp_raw, granularity_raw, value_raw = measure
+                    if not isinstance(timestamp_raw, str):
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
+                        )
+                    try:
+                        timestamp = datetime.fromisoformat(
+                            timestamp_raw.replace("Z", "+00:00")
+                        )
+                    except ValueError as exc:
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
+                        ) from exc
+                    if timestamp.tzinfo is None:
+                        raise BillingGenerationError(
+                            f"Naive Gnocchi timestamp for {resource_type}/{metric_name}"
+                        )
+                    timestamp = timestamp.astimezone(UTC)
+                    if (
+                        timestamp < begin_utc
+                        or timestamp >= end_utc
+                        or timestamp.minute != 0
+                        or timestamp.second != 0
+                        or timestamp.microsecond != 0
+                        or timestamp in seen_timestamps
+                    ):
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
+                        )
+                    seen_timestamps.add(timestamp)
+
+                    if (
+                        isinstance(granularity_raw, bool)
+                        or isinstance(value_raw, bool)
+                        or not isinstance(granularity_raw, (int, float))
+                        or not isinstance(value_raw, (int, float))
+                    ):
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi value for {resource_type}/{metric_name}"
+                        )
+                    try:
+                        granularity = Decimal(str(granularity_raw))
+                        value = Decimal(str(value_raw))
+                    except (InvalidOperation, ValueError) as exc:
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi value for {resource_type}/{metric_name}"
+                        ) from exc
+                    if (
+                        granularity != BILLING_GRANULARITY_SECONDS
+                        or not value.is_finite()
+                        or value < 0
+                    ):
+                        raise BillingGenerationError(
+                            f"Invalid Gnocchi value for {resource_type}/{metric_name}"
+                        )
+
+                    hours += Decimal(1)
+                    size_months += value * granularity / period_seconds
+
+                result_key = (
+                    project_id,
+                    tuple((field, metadata[field]) for field in sorted(metadata)),
+                )
+                result = results_by_group.setdefault(
+                    result_key,
+                    {
+                        "project_id": project_id,
+                        "metric": metric_name,
+                        "metadata": metadata,
+                        "hours": Decimal(0),
+                        "size_months": Decimal(0),
+                    },
+                )
+                result["hours"] += hours
+                result["size_months"] += size_months
+        return list(results_by_group.values())
     except BillingGenerationError:
         raise
     except Exception as exc:
@@ -553,19 +779,11 @@ def generate_billing_csv(
         conn = openstack.connect(cloud=cloud_name)
         project_contracts = _get_project_contracts(conn)
         contract_set = set(contract_numbers)
-
-        # Map metric types to Gnocchi resource types
-        # CloudKitty config uses these resource_type mappings
-        METRIC_RESOURCE_TYPES = {
-            "cpu": "instance",
-            "instance": "instance",
-            "image.size": "image",
-            "ip.floating": "network",
-            "network.incoming.bytes.rate": "instance_network_interface",
-            "network.outgoing.bytes.rate": "instance_network_interface",
-            "radosgw.objects.size": "ceph_account",
-            "volume.size": "volume",
-        }
+        project_ids = [
+            project_id
+            for project_id, (_, contract_number) in project_contracts.items()
+            if contract_number in contract_set
+        ]
 
         # These are computed from the DB by _emit_synthetic_cluster_lines,
         # not metered by Gnocchi; querying them only yields 404s.
@@ -590,12 +808,19 @@ def generate_billing_csv(
         for metric, meta_fields in metric_metadata_fields.items():
             if metric in SYNTHETIC_RESOURCE_TYPES:
                 continue
-            resource_type = METRIC_RESOURCE_TYPES.get(metric, metric)
-            groupby = list(meta_fields)
+            source = GNOCCHI_METRIC_SOURCES.get(metric)
+            if source is None:
+                raise BillingGenerationError(
+                    f"Unsupported metered billing resource type: {metric}"
+                )
+            resource_type, source_metric = source
+            groupby = sorted(
+                set(meta_fields) | GNOCCHI_METRIC_METADATA_FIELDS[metric]
+            )
 
             usage = _query_gnocchi_usage(
                 conn, period_start, period_end,
-                resource_type, metric, groupby,
+                resource_type, source_metric, groupby, project_ids,
             )
 
             for entry in usage:
@@ -611,7 +836,10 @@ def generate_billing_csv(
                 # Find the best matching price (specific metadata > base)
                 price = _find_price(prices, metric, metadata)
                 if not price:
-                    continue
+                    raise BillingGenerationError(
+                        f"No price for project {project_name}, product {metric}, "
+                        f"metadata {metadata}"
+                    )
 
                 unit = price.unit
                 if metric in SIZE_METRICS:

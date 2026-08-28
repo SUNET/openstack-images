@@ -1439,6 +1439,14 @@ async function renderAdminContractDetail(contractId) {
         // Price overrides
         let overrides = [];
         try { overrides = await api(`/api/admin/contracts/${contractId}/pricing`); } catch {}
+        let globalPrices = [];
+        try { globalPrices = await api("/api/admin/pricing"); } catch {}
+        const globalPriceByResource = new Map();
+        for (const price of globalPrices) {
+            if (!globalPriceByResource.has(price.resource_type)) {
+                globalPriceByResource.set(price.resource_type, price);
+            }
+        }
         app.appendChild(slbl("Price overrides", overrides.length, {
             help: { label: "How does pricing work?", href: "#/admin/pricing/docs" },
         }));
@@ -1446,12 +1454,13 @@ async function renderAdminContractDetail(contractId) {
             app.appendChild(h("p", { className: "hint", style: "margin-bottom:10px" }, "Using global default prices."));
         } else {
             for (const o of overrides) {
+                const unit = globalPriceByResource.get(o.resource_type)?.unit || "unit";
                 app.appendChild(h("div", { className: "pt-row" },
                     h("div", {},
                         h("div", { className: "name" }, o.resource_type),
                         h("div", { className: "meta" }, "Override"),
                     ),
-                    h("div", { className: "price" }, `${Number(o.unit_price).toFixed(4)} SEK `, h("span", { className: "unit" }, "/ hour")),
+                    h("div", { className: "price" }, `${Number(o.unit_price).toFixed(4)} SEK `, h("span", { className: "unit" }, `/ ${unit}`)),
                     h("button", { className: "btn ghost tiny", onclick: async () => {
                         if (!confirm(`Remove override for ${o.resource_type}?`)) return;
                         try {
@@ -1463,12 +1472,11 @@ async function renderAdminContractDetail(contractId) {
             }
         }
 
-        let globalPrices = [];
-        try { globalPrices = await api("/api/admin/pricing"); } catch {}
-        if (globalPrices.length) {
+        const globalProductPrices = [...globalPriceByResource.values()];
+        if (globalProductPrices.length) {
             const sel = h("select", { id: "rt", name: "resource_type", required: true },
                 h("option", { value: "" }, "— Select resource type —"),
-                ...globalPrices.map(p => h("option", { value: p.resource_type }, `${p.resource_type} (${p.unit_price} SEK / ${p.unit})`)),
+                ...globalProductPrices.map(p => h("option", { value: p.resource_type }, `${p.resource_type} (${p.unit_price} SEK / ${p.unit})`)),
             );
             const addOverride = h("form", { className: "form", style: "margin-top:14px", onsubmit: async (e) => {
                 e.preventDefault();
@@ -1788,7 +1796,7 @@ async function renderAdminPricing() {
         e.preventDefault();
         const rt = (addForm.querySelector('[name="resource_type"]').value || "").trim();
         const price = addForm.querySelector('[name="unit_price"]').value.trim();
-        const unit = metricUnits[rt] || "hours";
+        const unit = metricUnits[rt] || "unit";
         const metaField = addForm.querySelector('[name="metadata_field"]');
         const metaValue = addForm.querySelector('[name="metadata_value"]');
         if (!rt) return;
@@ -1809,12 +1817,12 @@ async function renderAdminPricing() {
                 metricSelect,
             ),
             h("div", { className: "field" },
-                h("label", { htmlFor: "up" }, "Unit price (SEK per hour)"),
+                h("label", { htmlFor: "up" }, "Unit price (SEK per displayed unit)"),
                 h("input", { id: "up", name: "unit_price", type: "number", step: "0.000001", min: "0", required: true, placeholder: "0.000000" }),
             ),
         ),
         metaContainer,
-        h("p", { className: "hint" }, "The billing system automatically detects the collection interval from Gnocchi and converts to hours."),
+        h("p", { className: "hint" }, "VMs use started one-hour UTC buckets. Storage is normalized to GB-month."),
         h("div", { className: "btn-row" },
             h("button", { type: "submit", className: "btn primary sm" }, "Add price"),
         ),
@@ -1848,14 +1856,16 @@ function renderPricingDocs() {
         <h3>How metering works</h3>
         <p>Ceilometer polls OpenStack services at a fixed interval and stores measurements in Gnocchi.
         Each measurement is a <strong>data point</strong> — one sample taken at one point in time.</p>
-        <p>The billing system <strong>automatically detects</strong> the collection interval by examining
-        the timestamps in Gnocchi's data. If the interval changes, billing adapts automatically. All usage
-        is converted to <strong>hours</strong> before pricing is applied.</p>
+        <p>The billing system requests history-aware <strong>one-hour UTC buckets</strong>. For a virtual
+        machine, every non-empty CPU bucket counts as one started hour for that VM's flavor. The cumulative
+        CPU value is not used as the quantity.</p>
+        <p>A VM running during any part of an hour is charged for that hour. The shutdown hour is charged;
+        later hours without CPU samples are not. A stop/start cycle in one hour counts once.</p>
 
         <h3>The four-step calculation</h3>
         <ol>
             <li>Each <strong>project</strong> belongs to exactly one <strong>contract</strong>.</li>
-            <li>Every billable <strong>resource</strong> the project consumes is metered hourly.</li>
+            <li>Every VM is grouped separately by its historical flavor; storage resources are measured separately by size.</li>
             <li>Each metered line is multiplied by the resource's <strong>unit price</strong>. By default this is the global price; if the contract has a price override for that resource, the override wins.</li>
             <li>The contract's <strong>rebate percent</strong> is applied to the line total. The result appears on the monthly CSV.</li>
         </ol>
@@ -1864,13 +1874,9 @@ function renderPricingDocs() {
         <table>
             <thead><tr><th>Metric</th><th>What it measures</th><th>Priced per</th></tr></thead>
             <tbody>
-                <tr><td><code>instance</code></td><td>Virtual machine existence</td><td>hour per instance</td></tr>
-                <tr><td><code>volume.size</code></td><td>Block storage volume size</td><td>hour per GB</td></tr>
-                <tr><td><code>image.size</code></td><td>Glance image size</td><td>hour per MB</td></tr>
-                <tr><td><code>ip.floating</code></td><td>Floating IP allocation</td><td>hour per IP</td></tr>
-                <tr><td><code>radosgw.objects.size</code></td><td>S3/object storage usage</td><td>hour per GB</td></tr>
-                <tr><td><code>network.incoming.bytes.rate</code></td><td>Inbound network traffic rate</td><td>hour per MB</td></tr>
-                <tr><td><code>network.outgoing.bytes.rate</code></td><td>Outbound network traffic rate</td><td>hour per MB</td></tr>
+                <tr><td><code>instance</code></td><td>Started VM hours by historical flavor</td><td>flavor-hour</td></tr>
+                <tr><td><code>volume.size</code></td><td>Time-weighted block storage size</td><td>GB-month</td></tr>
+                <tr><td><code>radosgw.objects.size</code></td><td>Time-weighted S3/object storage size</td><td>GB-month</td></tr>
             </tbody>
         </table>
 
@@ -1892,13 +1898,18 @@ function renderPricingDocs() {
             <p>2. Resource type: <code>instance</code></p>
             <p>3. Metadata: <code>flavor_name = b2.c4r8</code></p>
             <p>4. Unit price: <code>1.50</code></p>
-            <p>5. An instance running all month = 730 × 1.50 = 1,095 SEK</p>
+            <p>5. 730 started flavor-hours × 1.50 = 1,095 SEK</p>
         </div>
 
+        <h3>Telemetry limitations</h3>
+        <p>Ceilometer polls every five minutes. A resource created and deleted entirely between polls can
+        be missed, and a telemetry interruption can look like stopped or absent usage. Retention changes do
+        not recreate measurements that were never stored.</p>
+
         <h3>Contract overrides and rebates</h3>
-        <p><strong>Price overrides</strong> let you set a different hourly price for a specific contract.</p>
+        <p><strong>Price overrides</strong> let you set a different unit price for a specific contract and billing product.</p>
         <p><strong>Rebates</strong> are a percentage discount applied after the price calculation:
-        <code>hours × unit_price × (1 − rebate%/100) = cost</code></p>
+        <code>quantity × unit_price × (1 − rebate%/100) = cost</code></p>
 
         <h3>Delivery</h3>
         <p>Billing exports run as scheduled <strong>billing jobs</strong>. A job covers one or more contracts,

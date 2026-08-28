@@ -63,13 +63,13 @@ DB-backed test.
 
 | File | Surface | Count |
 |---|---|---|
-| `test_unit.py` | Pure-logic helpers: size labels, CSR/kubeconfig builders, OIDC-sub hashing, payload + slug-regex validation, issuance status. | 23 |
-| `test_billing_runner.py` | Fail-closed Gnocchi queries and empty combined-report delivery protection. | 3 |
+| `test_unit.py` | Pure-logic helpers: size labels, CSR/kubeconfig builders, OIDC-sub hashing, payload + slug-regex validation, issuance status. | 24 |
+| `test_billing_runner.py` | Fail-closed Gnocchi queries, history-aware per-resource usage aggregation, and empty combined-report delivery protection. | 17 |
 | `test_billing_synthetic.py` | DB-backed `_emit_synthetic_cluster_lines`: provisioning period, subsequent period, applied resize, per-contract override, addon disable boundary, unprovisioned cluster. | 6 |
 | `test_openbao_client.py` | HTTP shape contract with OpenBao: K8s-auth login body, creds POST (regression-proofs the GET→POST fix), 403 retry, error propagation. | 4 |
-| `test_api_clusters.py` | FastAPI router stack with tenant-cluster boundary mocked: cluster create/provision, access mgmt + RBAC negatives, kubeconfig issue + cascade-revoke, addon/resize/backup request flows, managed-project policy gate. | 10 |
+| `test_api_clusters.py` | FastAPI router stack with tenant-cluster boundary mocked: cluster create/provision, access mgmt + RBAC negatives, kubeconfig issue + cascade-revoke, addon/resize/backup request flows, managed-project policy gate. | 11 |
 
-Total: 46 tests.
+Total: 62 tests.
 
 ### What's deliberately mocked
 
