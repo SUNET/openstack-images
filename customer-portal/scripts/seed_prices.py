@@ -61,6 +61,20 @@ def _desired_prices() -> list[dict]:
             "field": "volume_type",
             "value": "rbd1",
         },
+        {
+            "resource_type": "volume.snapshot.size",
+            "unit_price": Decimal("1.73"),
+            "unit": "GB-month",
+            "field": None,
+            "value": None,
+        },
+        {
+            "resource_type": "volume.backup.size",
+            "unit_price": Decimal("1.73"),
+            "unit": "GB-month",
+            "field": None,
+            "value": None,
+        },
         # --- Object storage S3 (per GB-month, no binding) ---
         {
             "resource_type": "radosgw.objects.size",

@@ -12,7 +12,9 @@ from app import billing_runner
 from app.billing_export import get_project_contracts as get_legacy_project_contracts
 from app.billing_runner import (
     BILLING_GRANULARITY_SECONDS,
+    GNOCCHI_METRIC_METADATA_FIELDS,
     GNOCCHI_METRIC_SOURCES,
+    GNOCCHI_PRODUCT_REGISTRY,
     BillingGenerationError,
     _get_cinder_volume_type_names,
     _get_project_contracts,
@@ -45,6 +47,13 @@ def _group(
             **metadata,
         },
         "measures": {"measures": {"aggregated": measures}},
+    }
+
+
+def _resource(resource_id: str, *metric_names: str) -> dict:
+    return {
+        "id": resource_id,
+        "metrics": {name: f"metric-{resource_id}-{name}" for name in metric_names},
     }
 
 
@@ -89,26 +98,30 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
 
     assert usage == []
     assert requests[1][0].endswith("/v1/search/resource/volume")
-    assert requests[1][1]["params"] == [("limit", "1"), ("attrs", "id")]
-    assert requests[1][1]["json"] == {
-        "and": [
-            {"=": {"project_id": "project-1"}},
-            {"<": {"started_at": "2026-08-01T00:00:00+00:00"}},
-            {
-                "or": [
-                    {">": {"ended_at": "2026-07-01T00:00:00+00:00"}},
-                    {"=": {"ended_at": None}},
-                ]
-            },
-        ]
+    assert requests[1][1] == {
+        "params": [("limit", "100"), ("sort", "id:asc")],
+        "json": {
+            "and": [
+                {"=": {"project_id": "project-1"}},
+                {"<": {"started_at": "2026-08-01T00:00:00+00:00"}},
+                {
+                    "or": [
+                        {">": {"ended_at": "2026-07-01T00:00:00+00:00"}},
+                        {"=": {"ended_at": None}},
+                    ]
+                },
+            ]
+        },
+        "headers": {"X-Auth-Token": "test-token"},
+        "timeout": 60,
     }
 
 
-def test_gnocchi_404_with_existing_resource_fails_billing(monkeypatch) -> None:
+def test_gnocchi_404_with_expected_family_resource_fails_billing(monkeypatch) -> None:
     responses = iter(
         [
             _response([], status_code=404),
-            _response([{"id": "volume-1"}]),
+            _response([_resource("volume-1", "volume")]),
         ]
     )
     monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
@@ -121,6 +134,166 @@ def test_gnocchi_404_with_existing_resource_fails_billing(monkeypatch) -> None:
             "volume",
             "volume.size",
             ["volume_type"],
+            ["project-1"],
+        )
+
+
+def test_volume_404_ignores_snapshot_and_backup_resources(monkeypatch) -> None:
+    responses = iter(
+        [
+            _response([], status_code=404),
+            _response(
+                [
+                    _resource("backup-1", "backup.size"),
+                    _resource("snapshot-1", "volume.snapshot.size"),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
+
+    usage = _query_gnocchi_usage(
+        SimpleNamespace(auth_token="test-token"),
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+        "volume",
+        "volume.size",
+        ["volume_type"],
+        ["project-1"],
+    )
+
+    assert usage == []
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "other_metrics"),
+    [
+        ("volume.snapshot.size", ("volume", "backup.size")),
+        ("volume.backup.size", ("volume.size", "snapshot.size")),
+    ],
+)
+def test_snapshot_and_backup_404s_ignore_other_volume_families(
+    monkeypatch, metric_name, other_metrics
+) -> None:
+    responses = iter(
+        [
+            _response([], status_code=404),
+            _response(
+                [
+                    _resource("resource-1", other_metrics[0]),
+                    _resource("resource-2", other_metrics[1]),
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
+
+    usage = _query_gnocchi_usage(
+        SimpleNamespace(auth_token="test-token"),
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+        "volume",
+        metric_name,
+        [],
+        ["project-1"],
+    )
+
+    assert usage == []
+
+
+def test_non_cinder_404_with_any_resource_fails_billing(monkeypatch) -> None:
+    responses = iter(
+        [
+            _response([], status_code=404),
+            _response([_resource("instance-1", "unrelated")]),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
+
+    with pytest.raises(BillingGenerationError, match="returned HTTP 404"):
+        _query_gnocchi_usage(
+            SimpleNamespace(auth_token="test-token"),
+            datetime(2026, 7, 1),
+            datetime(2026, 8, 1),
+            "instance",
+            "cpu",
+            ["flavor_name"],
+            ["project-1"],
+        )
+
+
+def test_gnocchi_404_finds_expected_family_on_later_resource_page(monkeypatch) -> None:
+    monkeypatch.setattr(billing_runner, "GNOCCHI_RESOURCE_PAGE_SIZE", 2)
+    responses = iter(
+        [
+            _response([], status_code=404),
+            _response(
+                [
+                    _resource("resource-a", "volume"),
+                    _resource("resource-b", "backup.size"),
+                ]
+            ),
+            _response([_resource("resource-c", "snapshot.size")]),
+        ]
+    )
+    requests = []
+
+    def respond(*args, **kwargs):
+        requests.append((args[0], kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(httpx, "post", respond)
+
+    with pytest.raises(BillingGenerationError, match="returned HTTP 404"):
+        _query_gnocchi_usage(
+            SimpleNamespace(auth_token="test-token"),
+            datetime(2026, 7, 1),
+            datetime(2026, 8, 1),
+            "volume",
+            "volume.snapshot.size",
+            [],
+            ["project-1"],
+        )
+
+    assert requests[2][1]["params"] == [
+        ("limit", "2"),
+        ("sort", "id:asc"),
+        ("marker", "resource-b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("search_pages", "message"),
+    [
+        ([_response([{"id": "resource-a"}])], "Invalid Gnocchi resource"),
+        (
+            [
+                _response(
+                    [
+                        _resource("resource-a", "volume"),
+                        _resource("resource-b", "volume"),
+                    ]
+                ),
+                _response([_resource("resource-b", "volume")]),
+            ],
+            "Non-advancing Gnocchi resource marker",
+        ),
+    ],
+    ids=["malformed", "non-advancing"],
+)
+def test_gnocchi_404_resource_pagination_fails_closed(monkeypatch, search_pages, message) -> None:
+    monkeypatch.setattr(billing_runner, "GNOCCHI_RESOURCE_PAGE_SIZE", 2)
+    responses = iter([_response([], status_code=404), *search_pages])
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
+
+    with pytest.raises(BillingGenerationError, match=message):
+        _query_gnocchi_usage(
+            SimpleNamespace(auth_token="test-token"),
+            datetime(2026, 7, 1),
+            datetime(2026, 8, 1),
+            "volume",
+            "volume.snapshot.size",
+            [],
             ["project-1"],
         )
 
@@ -143,8 +316,26 @@ def test_gnocchi_exception_fails_billing(monkeypatch) -> None:
         )
 
 
-def test_instance_product_uses_cpu_metric() -> None:
+def test_gnocchi_product_mappings_and_storage_scaling() -> None:
     assert GNOCCHI_METRIC_SOURCES["instance"] == ("instance", "cpu")
+    assert GNOCCHI_METRIC_SOURCES["volume.snapshot.size"] == (
+        "volume",
+        "volume.snapshot.size",
+    )
+    assert GNOCCHI_METRIC_SOURCES["volume.backup.size"] == (
+        "volume",
+        "volume.backup.size",
+    )
+    assert GNOCCHI_METRIC_METADATA_FIELDS["volume.size"] == {"volume_type"}
+    assert GNOCCHI_METRIC_METADATA_FIELDS["volume.snapshot.size"] == set()
+    assert GNOCCHI_METRIC_METADATA_FIELDS["volume.backup.size"] == set()
+    assert GNOCCHI_PRODUCT_REGISTRY["volume.snapshot.size"]["unit"] == "GB-month"
+    assert GNOCCHI_PRODUCT_REGISTRY["volume.backup.size"]["unit"] == "GB-month"
+    assert GNOCCHI_PRODUCT_REGISTRY["volume.snapshot.size"]["size_gb_scale"] == Decimal(1)
+    assert GNOCCHI_PRODUCT_REGISTRY["volume.backup.size"]["size_gb_scale"] == Decimal(1)
+    assert GNOCCHI_PRODUCT_REGISTRY["radosgw.objects.size"]["size_gb_scale"] == Decimal(
+        1
+    ) / Decimal(10**9)
 
 
 def test_cinder_volume_type_resolution_accepts_id_or_name_and_rejects_unknown() -> None:
@@ -528,6 +719,74 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
     )
 
     assert report == "CO-001;Example project;volume.size (rbd1);44,96 GB-month;78\r\n"
+
+
+def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
+    monkeypatch,
+) -> None:
+    prices = [
+        SimpleNamespace(
+            resource_type=metric,
+            metadata_field=None,
+            metadata_value=None,
+            unit_price=Decimal("1.73"),
+            unit="GB-month",
+        )
+        for metric in ("volume.snapshot.size", "volume.backup.size")
+    ]
+    project = SimpleNamespace(
+        id="project-1",
+        name="Example project",
+        tags=["contract:CO-001"],
+    )
+    connection = SimpleNamespace(
+        identity=SimpleNamespace(projects=lambda: [project]),
+    )
+    database = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(dispose=lambda: None)
+
+    monkeypatch.setattr(billing_runner, "create_engine", lambda *args: engine)
+    monkeypatch.setattr(billing_runner, "sessionmaker", lambda **kwargs: lambda: database)
+    monkeypatch.setattr(billing_runner, "_load_prices", lambda db: prices)
+    monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        billing_runner,
+        "_emit_synthetic_cluster_lines",
+        lambda *args, **kwargs: None,
+    )
+
+    def query_usage(conn, begin, end, resource_type, metric_name, groupby_fields, project_ids):
+        quantity = {
+            "volume.snapshot.size": Decimal(10),
+            "volume.backup.size": Decimal(20),
+        }[metric_name]
+        return [
+            {
+                "project_id": "project-1",
+                "metric": metric_name,
+                "metadata": {},
+                "hours": Decimal(700),
+                "size_months": quantity,
+            }
+        ]
+
+    monkeypatch.setattr(billing_runner, "_query_gnocchi_usage", query_usage)
+
+    report = generate_billing_csv(
+        "postgresql://unused",
+        "openstack",
+        ["CO-001"],
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+    )
+
+    assert report == (
+        "CO-001;Example project;volume.snapshot.size;10,00 GB-month;17\r\n"
+        "CO-001;Example project;volume.backup.size;20,00 GB-month;35\r\n"
+    )
 
 
 def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:

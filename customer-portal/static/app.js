@@ -1876,9 +1876,14 @@ function renderPricingDocs() {
             <tbody>
                 <tr><td><code>instance</code></td><td>Started VM hours by historical flavor</td><td>flavor-hour</td></tr>
                 <tr><td><code>volume.size</code></td><td>Time-weighted block storage size</td><td>GB-month</td></tr>
+                <tr><td><code>volume.snapshot.size</code></td><td>Time-weighted logical snapshot size</td><td>GB-month</td></tr>
+                <tr><td><code>volume.backup.size</code></td><td>Time-weighted logical backup size</td><td>GB-month</td></tr>
                 <tr><td><code>radosgw.objects.size</code></td><td>Time-weighted S3/object storage size</td><td>GB-month</td></tr>
             </tbody>
         </table>
+        <p>Volume, snapshot, and backup storage use the logical provisioned size reported by Cinder.
+        Snapshot and backup quantities therefore describe customer-visible GB-month, not compressed,
+        deduplicated, or physical backend consumption.</p>
 
         <h3>Metadata-based pricing</h3>
         <p>Some metrics have <strong>metadata fields</strong> that allow more granular pricing. For example,

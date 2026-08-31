@@ -44,19 +44,61 @@ MAX_BILLING_PROJECTS = 1000
 MAX_GNOCCHI_GROUPS_PER_PROJECT = 10000
 MAX_GNOCCHI_MEASURES_PER_GROUP = 20000
 MAX_GNOCCHI_RESPONSE_BYTES = 10 * 1024 * 1024
+GNOCCHI_RESOURCE_PAGE_SIZE = 100
+MAX_GNOCCHI_RESOURCE_PAGES = 100
+MAX_GNOCCHI_RESOURCES_PER_SEARCH = 10000
 
-# Billing product -> (Gnocchi resource type, source metric).  The `instance`
-# product is billed from CPU sample presence because Ceilometer does not emit a
-# continuously sampled metric named `instance`.
+# The `instance` product is billed from CPU sample presence because Ceilometer
+# does not emit a continuously sampled metric named `instance`.
+GNOCCHI_PRODUCT_REGISTRY = {
+    "instance": {
+        "resource_type": "instance",
+        "source_metric": "cpu",
+        "metadata_fields": {"flavor_name"},
+        "unit": "hour",
+        "size_gb_scale": None,
+    },
+    "volume.size": {
+        "resource_type": "volume",
+        "source_metric": "volume.size",
+        "metadata_fields": {"volume_type"},
+        "unit": "GB-month",
+        "size_gb_scale": Decimal(1),
+    },
+    "volume.snapshot.size": {
+        "resource_type": "volume",
+        "source_metric": "volume.snapshot.size",
+        "metadata_fields": set(),
+        "unit": "GB-month",
+        "size_gb_scale": Decimal(1),
+    },
+    "volume.backup.size": {
+        "resource_type": "volume",
+        "source_metric": "volume.backup.size",
+        "metadata_fields": set(),
+        "unit": "GB-month",
+        "size_gb_scale": Decimal(1),
+    },
+    "radosgw.objects.size": {
+        "resource_type": "ceph_account",
+        "source_metric": "radosgw.objects.size",
+        "metadata_fields": set(),
+        "unit": "GB-month",
+        "size_gb_scale": Decimal(1) / Decimal(10**9),
+    },
+}
 GNOCCHI_METRIC_SOURCES = {
-    "instance": ("instance", "cpu"),
-    "radosgw.objects.size": ("ceph_account", "radosgw.objects.size"),
-    "volume.size": ("volume", "volume.size"),
+    product: (config["resource_type"], config["source_metric"])
+    for product, config in GNOCCHI_PRODUCT_REGISTRY.items()
 }
 GNOCCHI_METRIC_METADATA_FIELDS = {
-    "instance": {"flavor_name"},
-    "radosgw.objects.size": set(),
-    "volume.size": {"volume_type"},
+    product: set(config["metadata_fields"]) for product, config in GNOCCHI_PRODUCT_REGISTRY.items()
+}
+
+CINDER_METRIC_FAMILY_MARKERS = {
+    "volume.size": {"volume", "volume.size"},
+    "volume.snapshot.size": {"snapshot.size", "volume.snapshot.size"},
+    "volume.backup.size": {"backup.size", "volume.backup.size"},
 }
 
 
@@ -147,27 +189,8 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
         token = conn.auth_token
         volume_type_names = None
 
-        # Known metric -> resource type mappings (from ceilometer config)
-        METRIC_RESOURCE_MAP = {
-            "instance": {
-                "resource_type": "instance",
-                "unit": "hour",
-                "metadata": ["flavor_name"],
-            },
-            "volume.size": {
-                "resource_type": "volume",
-                "unit": "GB-month",
-                "metadata": ["volume_type"],
-            },
-            "radosgw.objects.size": {
-                "resource_type": "ceph_account",
-                "unit": "GB-month",
-                "metadata": [],
-            },
-        }
-
         results = []
-        for metric_type, info in METRIC_RESOURCE_MAP.items():
+        for metric_type, info in GNOCCHI_PRODUCT_REGISTRY.items():
             entry = {
                 "metric_type": metric_type,
                 "resource_type": info["resource_type"],
@@ -176,7 +199,7 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
             }
 
             # For each metadata field, query Gnocchi for distinct values
-            for field in info["metadata"]:
+            for field in sorted(info["metadata_fields"]):
                 values = set()
                 try:
                     resp = httpx.get(
@@ -535,44 +558,133 @@ def _project_had_gnocchi_resources(
     token: str,
     gnocchi: str,
     resource_type: str,
+    metric_name: str,
     project_id: str,
     begin: datetime,
     end: datetime,
 ) -> bool:
-    """Return whether a project had this resource type during the period.
+    """Return whether a project had resources expected to emit this metric.
 
     Search current resources because old revisions can retain a null ended_at
     after the resource's current revision has been closed.
     """
-    response = httpx.post(
-        f"{gnocchi}/v1/search/resource/{resource_type}",
-        params=[("limit", "1"), ("attrs", "id")],
-        json={
-            "and": [
-                {"=": {"project_id": project_id}},
-                {"<": {"started_at": end.isoformat()}},
-                {
-                    "or": [
-                        {">": {"ended_at": begin.isoformat()}},
-                        {"=": {"ended_at": None}},
-                    ]
-                },
-            ]
-        },
-        headers={"X-Auth-Token": token},
-        timeout=60,
+    search = {
+        "and": [
+            {"=": {"project_id": project_id}},
+            {"<": {"started_at": end.isoformat()}},
+            {
+                "or": [
+                    {">": {"ended_at": begin.isoformat()}},
+                    {"=": {"ended_at": None}},
+                ]
+            },
+        ]
+    }
+    family_markers = (
+        CINDER_METRIC_FAMILY_MARKERS.get(metric_name) if resource_type == "volume" else None
     )
-    if response.status_code != 200:
-        raise BillingGenerationError(
-            f"Unable to classify empty Gnocchi result for {resource_type}: "
-            f"HTTP {response.status_code}"
+    marker = None
+    previous_id = None
+    resource_count = 0
+
+    for page_number in range(1, MAX_GNOCCHI_RESOURCE_PAGES + 1):
+        params = [
+            ("limit", str(GNOCCHI_RESOURCE_PAGE_SIZE)),
+            ("sort", "id:asc"),
+        ]
+        if marker is not None:
+            params.append(("marker", marker))
+
+        response = httpx.post(
+            f"{gnocchi}/v1/search/resource/{resource_type}",
+            params=params,
+            json=search,
+            headers={"X-Auth-Token": token},
+            timeout=60,
         )
-    resources = response.json()
-    if not isinstance(resources, list):
-        raise BillingGenerationError(
-            f"Invalid Gnocchi resource search response for {resource_type}"
-        )
-    return bool(resources)
+        response_content = getattr(response, "content", b"")
+        if len(response_content) > MAX_GNOCCHI_RESPONSE_BYTES:
+            raise BillingGenerationError(
+                f"Gnocchi resource search response for {resource_type}/{metric_name} "
+                f"exceeds {MAX_GNOCCHI_RESPONSE_BYTES} bytes"
+            )
+        if response.status_code != 200:
+            raise BillingGenerationError(
+                f"Unable to classify empty Gnocchi result for "
+                f"{resource_type}/{metric_name}: HTTP {response.status_code}"
+            )
+        try:
+            resources = response.json()
+        except (TypeError, ValueError) as exc:
+            raise BillingGenerationError(
+                f"Invalid Gnocchi resource search response for {resource_type}/{metric_name}"
+            ) from exc
+        if not isinstance(resources, list) or len(resources) > GNOCCHI_RESOURCE_PAGE_SIZE:
+            raise BillingGenerationError(
+                f"Invalid Gnocchi resource search response for {resource_type}/{metric_name}"
+            )
+        if not resources:
+            return False
+
+        expected_family_found = False
+        for resource in resources:
+            if not isinstance(resource, dict):
+                raise BillingGenerationError(
+                    f"Invalid Gnocchi resource for {resource_type}/{metric_name}"
+                )
+            resource_id = resource.get("id")
+            metrics = resource.get("metrics")
+            if (
+                not isinstance(resource_id, str)
+                or not resource_id.strip()
+                or not isinstance(metrics, dict)
+                or any(
+                    not isinstance(name, str)
+                    or not name.strip()
+                    or not isinstance(metric_id, str)
+                    or not metric_id.strip()
+                    for name, metric_id in metrics.items()
+                )
+            ):
+                raise BillingGenerationError(
+                    f"Invalid Gnocchi resource for {resource_type}/{metric_name}"
+                )
+            if previous_id is not None and resource_id <= previous_id:
+                raise BillingGenerationError(
+                    f"Non-advancing Gnocchi resource marker for {resource_type}/{metric_name}"
+                )
+            previous_id = resource_id
+            resource_count += 1
+            if resource_count > MAX_GNOCCHI_RESOURCES_PER_SEARCH:
+                raise BillingGenerationError(
+                    f"Gnocchi resource search for {resource_type}/{metric_name} "
+                    f"exceeds {MAX_GNOCCHI_RESOURCES_PER_SEARCH} resources"
+                )
+            if family_markers is None or family_markers.intersection(metrics):
+                expected_family_found = True
+
+        if expected_family_found:
+            return True
+        if len(resources) < GNOCCHI_RESOURCE_PAGE_SIZE:
+            return False
+        if (
+            page_number == MAX_GNOCCHI_RESOURCE_PAGES
+            or resource_count == MAX_GNOCCHI_RESOURCES_PER_SEARCH
+        ):
+            raise BillingGenerationError(
+                f"Gnocchi resource search for {resource_type}/{metric_name} "
+                "exceeded pagination limits"
+            )
+        next_marker = resources[-1]["id"]
+        if next_marker == marker:
+            raise BillingGenerationError(
+                f"Non-advancing Gnocchi resource marker for {resource_type}/{metric_name}"
+            )
+        marker = next_marker
+
+    raise BillingGenerationError(
+        f"Gnocchi resource search for {resource_type}/{metric_name} exceeded pagination limits"
+    )
 
 
 def _query_gnocchi_usage(
@@ -639,6 +751,7 @@ def _query_gnocchi_usage(
                     token,
                     gnocchi,
                     resource_type,
+                    metric_name,
                     requested_project_id,
                     begin_utc,
                     end_utc,
@@ -883,15 +996,6 @@ def generate_billing_csv(
             "cluster_addon_fee",
         }
 
-        # Size-based metrics bill per GB-month; everything else by uptime
-        # hours. Scale each metric's raw measure value to GB. NOTE: verify
-        # radosgw.objects.size units against real measures (often bytes).
-        SIZE_METRICS = {"volume.size", "radosgw.objects.size"}
-        SIZE_METRIC_GB_SCALE = {
-            "volume.size": Decimal(1),                            # already GB
-            "radosgw.objects.size": Decimal(1) / Decimal(10**9),  # bytes->GB
-        }
-
         output = io.StringIO()
         writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
         volume_type_names = None
@@ -899,19 +1003,23 @@ def generate_billing_csv(
         for metric, meta_fields in metric_metadata_fields.items():
             if metric in SYNTHETIC_RESOURCE_TYPES:
                 continue
-            source = GNOCCHI_METRIC_SOURCES.get(metric)
-            if source is None:
+            product = GNOCCHI_PRODUCT_REGISTRY.get(metric)
+            if product is None:
                 raise BillingGenerationError(
                     f"Unsupported metered billing resource type: {metric}"
                 )
-            resource_type, source_metric = source
-            groupby = sorted(
-                set(meta_fields) | GNOCCHI_METRIC_METADATA_FIELDS[metric]
-            )
+            resource_type = product["resource_type"]
+            source_metric = product["source_metric"]
+            groupby = sorted(set(meta_fields) | set(product["metadata_fields"]))
 
             usage = _query_gnocchi_usage(
-                conn, period_start, period_end,
-                resource_type, source_metric, groupby, project_ids,
+                conn,
+                period_start,
+                period_end,
+                resource_type,
+                source_metric,
+                groupby,
+                project_ids,
             )
             if metric == "volume.size" and usage and volume_type_names is None:
                 volume_type_names = _get_cinder_volume_type_names(conn)
@@ -937,9 +1045,8 @@ def generate_billing_csv(
                     )
 
                 unit = price.unit
-                if metric in SIZE_METRICS:
-                    scale = SIZE_METRIC_GB_SCALE.get(metric, Decimal(1))
-                    quantity = Decimal(str(entry["size_months"])) * scale
+                if product["size_gb_scale"] is not None:
+                    quantity = Decimal(str(entry["size_months"])) * product["size_gb_scale"]
                 else:
                     quantity = Decimal(str(entry["hours"]))
 
