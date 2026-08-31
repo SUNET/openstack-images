@@ -539,18 +539,22 @@ def _project_had_gnocchi_resources(
     begin: datetime,
     end: datetime,
 ) -> bool:
-    """Return whether a project had this resource type during the period."""
+    """Return whether a project had this resource type during the period.
+
+    Search current resources because old revisions can retain a null ended_at
+    after the resource's current revision has been closed.
+    """
     response = httpx.post(
         f"{gnocchi}/v1/search/resource/{resource_type}",
-        params=[("history", "true"), ("limit", "1"), ("attrs", "id")],
+        params=[("limit", "1"), ("attrs", "id")],
         json={
             "and": [
                 {"=": {"project_id": project_id}},
-                {"<": {"revision_start": end.isoformat()}},
+                {"<": {"started_at": end.isoformat()}},
                 {
                     "or": [
-                        {">": {"revision_end": begin.isoformat()}},
-                        {"=": {"revision_end": None}},
+                        {">": {"ended_at": begin.isoformat()}},
+                        {"=": {"ended_at": None}},
                     ]
                 },
             ]

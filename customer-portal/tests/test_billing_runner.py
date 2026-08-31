@@ -89,7 +89,19 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
 
     assert usage == []
     assert requests[1][0].endswith("/v1/search/resource/volume")
-    assert ("history", "true") in requests[1][1]["params"]
+    assert requests[1][1]["params"] == [("limit", "1"), ("attrs", "id")]
+    assert requests[1][1]["json"] == {
+        "and": [
+            {"=": {"project_id": "project-1"}},
+            {"<": {"started_at": "2026-08-01T00:00:00+00:00"}},
+            {
+                "or": [
+                    {">": {"ended_at": "2026-07-01T00:00:00+00:00"}},
+                    {"=": {"ended_at": None}},
+                ]
+            },
+        ]
+    }
 
 
 def test_gnocchi_404_with_existing_resource_fails_billing(monkeypatch) -> None:
