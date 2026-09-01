@@ -251,8 +251,9 @@ def get_billing_period(year: int | None = None, month: int | None = None) -> tup
     if year and month:
         start = datetime(year, month, 1)
     else:
-        today = datetime.utcnow().replace(day=1)
-        start = (today - timedelta(days=1)).replace(day=1)
+        now = datetime.now(UTC)
+        this_month = datetime(now.year, now.month, 1)
+        start = (this_month - timedelta(days=1)).replace(day=1)
 
     if start.month == 12:
         end = start.replace(year=start.year + 1, month=1)

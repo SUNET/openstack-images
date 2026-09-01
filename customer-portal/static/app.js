@@ -1076,6 +1076,12 @@ function renderRunOnce() {
     }));
 
     const contracts = currentUser.contracts || [];
+    const now = new Date();
+    const previousMonth = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth() - 1,
+        1,
+    ));
 
     const contractSelect = h("select", { name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
         ...contracts.map(c => h("option", { value: String(c.id) }, `${c.contract_number} — ${c.customer.name}`)),
@@ -1100,14 +1106,13 @@ function renderRunOnce() {
         h("div", { className: "row-2" },
             h("div", { className: "field" },
                 h("label", { htmlFor: "ro-year" }, "Year"),
-                h("input", { id: "ro-year", name: "year", type: "number", className: "mono", placeholder: "previous month" }),
+                h("input", { id: "ro-year", name: "year", type: "number", className: "mono", value: String(previousMonth.getUTCFullYear()) }),
             ),
             h("div", { className: "field" },
                 h("label", { htmlFor: "ro-month" }, "Month"),
-                h("input", { id: "ro-month", name: "month", type: "number", min: "1", max: "12", className: "mono", placeholder: "previous month" }),
+                h("input", { id: "ro-month", name: "month", type: "number", min: "1", max: "12", className: "mono", value: String(previousMonth.getUTCMonth() + 1) }),
             ),
         ),
-        h("p", { className: "hint" }, "Leave blank to bill the previous calendar month."),
     );
 
     const webdavWrap = h("div", { id: "webdav-config" },

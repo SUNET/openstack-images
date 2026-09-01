@@ -21,6 +21,7 @@ from app.billing_runner import (
     _resolve_cinder_volume_type,
     generate_and_deliver,
     generate_billing_csv,
+    get_billing_period,
 )
 
 
@@ -54,6 +55,20 @@ def _resource(resource_id: str, *metric_names: str) -> dict:
         "id": resource_id,
         "metrics": {name: f"metric-{resource_id}-{name}" for name in metric_names},
     }
+
+
+def test_default_billing_period_is_previous_calendar_month(monkeypatch) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 1, 13, 42, 16, 722415, tzinfo=tz)
+
+    monkeypatch.setattr(billing_runner, "datetime", FixedDateTime)
+
+    start, end = get_billing_period()
+
+    assert start == datetime(2026, 8, 1)
+    assert end == datetime(2026, 9, 1)
 
 
 def test_gnocchi_http_error_fails_billing(monkeypatch) -> None:
