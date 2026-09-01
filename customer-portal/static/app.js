@@ -1150,7 +1150,7 @@ function renderRunOnce() {
     const downloadWrap = h("div", { id: "download-config" },
         h("p", { className: "hint" }, "The generated report will be downloaded by your browser."),
     );
-    const webdavWrap = h("div", { id: "webdav-config", style: "display:none" },
+    const webdavWrap = h("div", { id: "webdav-config", hidden: true },
         h("label", { htmlFor: "wurl" }, "WebDAV URL"),
         h("input", { id: "wurl", name: "webdav_url", type: "url", className: "mono", placeholder: "https://finance.example.se/webdav/billing/" }),
         h("div", { className: "row-2" },
@@ -1164,15 +1164,15 @@ function renderRunOnce() {
             ),
         ),
     );
-    const emailWrap = h("div", { id: "email-config", style: "display:none" },
+    const emailWrap = h("div", { id: "email-config", hidden: true },
         h("label", { htmlFor: "rcpt" }, "Recipient"),
         h("input", { id: "rcpt", name: "email_recipient", type: "email", placeholder: "billing@example.se" }),
     );
 
     const dmSelect = h("select", { id: "dm", name: "delivery_method", onchange: (e) => {
-        downloadWrap.style.display = e.target.value === "download" ? "block" : "none";
-        webdavWrap.style.display = e.target.value === "webdav" ? "block" : "none";
-        emailWrap.style.display = e.target.value === "email" ? "block" : "none";
+        downloadWrap.hidden = e.target.value !== "download";
+        webdavWrap.hidden = e.target.value !== "webdav";
+        emailWrap.hidden = e.target.value !== "email";
         submitBtn.textContent = e.target.value === "download"
             ? "Generate & download now"
             : "Generate & deliver now";
