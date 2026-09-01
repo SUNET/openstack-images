@@ -32,6 +32,7 @@ from app.models import (
     ContractAccess,
     ContractPriceOverride,
     ContractRebate,
+    Customer,
     ResourcePrice,
     TenantCluster,
 )
@@ -47,6 +48,14 @@ MAX_GNOCCHI_RESPONSE_BYTES = 10 * 1024 * 1024
 GNOCCHI_RESOURCE_PAGE_SIZE = 100
 MAX_GNOCCHI_RESOURCE_PAGES = 100
 MAX_GNOCCHI_RESOURCES_PER_SEARCH = 10000
+BILLING_CSV_HEADER = [
+    "# Customer",
+    "ContractNumber",
+    "Project",
+    "ResourceType",
+    "Volume",
+    "Cost",
+]
 
 # The `instance` product is billed from CPU sample presence because Ceilometer
 # does not emit a continuously sampled metric named `instance`.
@@ -352,6 +361,16 @@ def _load_contract_ids(sync_session: SyncSession) -> dict[str, int]:
     return {c.contract_number: c.id for c in result.scalars()}
 
 
+def _load_contract_customers(sync_session: SyncSession) -> dict[str, str]:
+    """Load contract_number -> customer name mapping."""
+    result = sync_session.execute(
+        select(Contract.contract_number, Customer.name).join(
+            Customer, Customer.id == Contract.customer_id
+        )
+    )
+    return dict(result.all())
+
+
 def _price_after_override_and_rebate(
     *,
     base_price: Decimal,
@@ -380,6 +399,7 @@ def _emit_synthetic_cluster_lines(
     contract_overrides: dict[int, dict[str, Decimal]],
     rebates: dict[int, Decimal],
     contract_id_map: dict[str, int],
+    contract_customer_map: dict[str, str],
     writer,
 ) -> None:
     """Emit cluster management/setup/addon fee lines for the given period.
@@ -404,6 +424,9 @@ def _emit_synthetic_cluster_lines(
         cn = contract_id_to_number.get(cluster.contract_id)
         if not cn or cn not in contract_set:
             continue
+        customer_name = contract_customer_map.get(cn)
+        if customer_name is None:
+            raise BillingGenerationError(f"No customer found for contract {cn}")
         contract_id = cluster.contract_id
         project_label = f"managed-cluster:{cluster.slug}"
 
@@ -421,7 +444,14 @@ def _emit_synthetic_cluster_lines(
             cost = qty * unit_price
             volume = f"{qty:.0f} {mgmt.unit}"
             writer.writerow(
-                [cn, project_label, "Cluster management fee", volume, round(cost)]
+                [
+                    customer_name,
+                    cn,
+                    project_label,
+                    "Cluster management fee",
+                    volume,
+                    round(cost),
+                ]
             )
 
         # 2. Initial setup fee: only in the period the cluster was provisioned.
@@ -439,6 +469,7 @@ def _emit_synthetic_cluster_lines(
                 )
                 writer.writerow(
                     [
+                        customer_name,
                         cn,
                         project_label,
                         "Controller setup fee",
@@ -460,6 +491,7 @@ def _emit_synthetic_cluster_lines(
                 )
                 writer.writerow(
                     [
+                        customer_name,
                         cn,
                         project_label,
                         f"Worker setup fee (initial, {cluster.initial_worker_groups} groups)",
@@ -489,6 +521,9 @@ def _emit_synthetic_cluster_lines(
         cn = contract_id_to_number.get(cluster.contract_id)
         if not cn or cn not in contract_set:
             continue
+        customer_name = contract_customer_map.get(cn)
+        if customer_name is None:
+            raise BillingGenerationError(f"No customer found for contract {cn}")
         try:
             payload = json.loads(cr.payload)
         except (TypeError, ValueError):
@@ -507,6 +542,7 @@ def _emit_synthetic_cluster_lines(
         )
         writer.writerow(
             [
+                customer_name,
                 cn,
                 f"managed-cluster:{cluster.slug}",
                 f"Worker setup fee (expansion, +{int(delta)} groups)",
@@ -531,6 +567,9 @@ def _emit_synthetic_cluster_lines(
         cn = contract_id_to_number.get(cluster.contract_id)
         if not cn or cn not in contract_set:
             continue
+        customer_name = contract_customer_map.get(cn)
+        if customer_name is None:
+            raise BillingGenerationError(f"No customer found for contract {cn}")
         price = _find_price(
             prices, "cluster_addon_fee", {"addon": addon.addon_type}
         )
@@ -545,6 +584,7 @@ def _emit_synthetic_cluster_lines(
         )
         writer.writerow(
             [
+                customer_name,
                 cn,
                 f"managed-cluster:{cluster.slug}",
                 f"Addon: {addon.addon_type}",
@@ -963,6 +1003,7 @@ def generate_billing_csv(
         contract_overrides = _load_contract_overrides(db)
         rebates = _load_rebates(db)
         contract_id_map = _load_contract_ids(db)
+        contract_customer_map = _load_contract_customers(db)
 
         # Determine which metric types to query, and their metadata fields
         # Group prices by resource_type to find which metadata fields are used
@@ -1033,6 +1074,9 @@ def generate_billing_csv(
                 project_name, cn = project_contracts[pid]
                 if cn not in contract_set:
                     continue
+                customer_name = contract_customer_map.get(cn)
+                if customer_name is None:
+                    raise BillingGenerationError(f"No customer found for contract {cn}")
 
                 metadata = dict(entry.get("metadata", {}))
 
@@ -1069,7 +1113,7 @@ def generate_billing_csv(
                     label = f"{metric} ({meta_str})"
 
                 volume = f"{quantity:.2f} {unit}".replace(".", ",")
-                writer.writerow([cn, project_name, label, volume, round(cost)])
+                writer.writerow([customer_name, cn, project_name, label, volume, round(cost)])
 
         # Synthetic cluster billing lines (management fee, setup fees, addons).
         _emit_synthetic_cluster_lines(
@@ -1081,10 +1125,19 @@ def generate_billing_csv(
             contract_overrides,
             rebates,
             contract_id_map,
+            contract_customer_map,
             writer,
         )
 
-        return output.getvalue()
+        data_rows = output.getvalue()
+        if not data_rows:
+            return ""
+
+        report = io.StringIO()
+        report_writer = csv.writer(report, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+        report_writer.writerow(BILLING_CSV_HEADER)
+        report.write(data_rows)
+        return report.getvalue()
     finally:
         db.close()
         engine.dispose()

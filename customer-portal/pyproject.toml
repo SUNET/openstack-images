@@ -1,6 +1,6 @@
 [project]
 name = "customer-portal-api"
-version = "0.1.6"
+version = "0.1.7"
 description = "SUNET OpenStack Customer Self-Service Portal API"
 requires-python = ">=3.12"
 dependencies = [

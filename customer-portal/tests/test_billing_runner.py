@@ -9,7 +9,6 @@ import httpx
 import pytest
 
 from app import billing_runner
-from app.billing_export import get_project_contracts as get_legacy_project_contracts
 from app.billing_runner import (
     BILLING_GRANULARITY_SECONDS,
     GNOCCHI_METRIC_METADATA_FIELDS,
@@ -386,6 +385,11 @@ def test_unsupported_metered_product_fails_closed(monkeypatch) -> None:
     monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(
+        billing_runner,
+        "_load_contract_customers",
+        lambda db: {"CO-001": "Acme"},
+    )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
 
     with pytest.raises(BillingGenerationError, match="Unsupported metered"):
@@ -411,11 +415,6 @@ def test_multiple_project_contract_tags_fail_closed() -> None:
         match=r"Ambiguous project.*CONTRACT-1.*CONTRACT-2",
     ):
         _get_project_contracts(connection)
-    with pytest.raises(
-        RuntimeError,
-        match=r"Ambiguous project.*CONTRACT-1.*CONTRACT-2",
-    ):
-        get_legacy_project_contracts(connection)
 
 
 def test_empty_project_contract_tag_fails_closed() -> None:
@@ -428,8 +427,6 @@ def test_empty_project_contract_tag_fails_closed() -> None:
 
     with pytest.raises(BillingGenerationError, match=r"Empty contract project.*empty"):
         _get_project_contracts(connection)
-    with pytest.raises(RuntimeError, match=r"Empty contract project.*empty"):
-        get_legacy_project_contracts(connection)
 
 
 def test_gnocchi_usage_counts_each_resource_with_hourly_granularity(monkeypatch) -> None:
@@ -612,6 +609,11 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
     monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(
+        billing_runner,
+        "_load_contract_customers",
+        lambda db: {"CO-001": "Acme"},
+    )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
@@ -652,7 +654,10 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
         "groupby_fields": ["flavor_name"],
         "project_ids": ["project-1"],
     }
-    assert report == "CO-001;Example project;instance (b2.c1r2);2,00 hour;4\r\n"
+    assert report == (
+        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
+        "Acme;CO-001;Example project;instance (b2.c1r2);2,00 hour;4\r\n"
+    )
 
 
 def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monkeypatch) -> None:
@@ -683,6 +688,11 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
     monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(
+        billing_runner,
+        "_load_contract_customers",
+        lambda db: {"CO-001": "Acme"},
+    )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
@@ -718,7 +728,10 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
         datetime(2026, 8, 1),
     )
 
-    assert report == "CO-001;Example project;volume.size (rbd1);44,96 GB-month;78\r\n"
+    assert report == (
+        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
+        "Acme;CO-001;Example project;volume.size (rbd1);44,96 GB-month;78\r\n"
+    )
 
 
 def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
@@ -751,6 +764,11 @@ def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
     monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(
+        billing_runner,
+        "_load_contract_customers",
+        lambda db: {"CO-001": "Acme"},
+    )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
@@ -784,8 +802,9 @@ def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
     )
 
     assert report == (
-        "CO-001;Example project;volume.snapshot.size;10,00 GB-month;17\r\n"
-        "CO-001;Example project;volume.backup.size;20,00 GB-month;35\r\n"
+        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
+        "Acme;CO-001;Example project;volume.snapshot.size;10,00 GB-month;17\r\n"
+        "Acme;CO-001;Example project;volume.backup.size;20,00 GB-month;35\r\n"
     )
 
 
@@ -814,6 +833,11 @@ def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:
     monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
     monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {"CO-001": 1})
+    monkeypatch.setattr(
+        billing_runner,
+        "_load_contract_customers",
+        lambda db: {"CO-001": "Acme"},
+    )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
@@ -837,6 +861,38 @@ def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:
             datetime(2026, 7, 1),
             datetime(2026, 8, 1),
         )
+
+
+def test_generate_billing_csv_does_not_return_header_without_data(monkeypatch) -> None:
+    connection = SimpleNamespace(
+        identity=SimpleNamespace(projects=lambda: []),
+    )
+    database = SimpleNamespace(close=lambda: None)
+    engine = SimpleNamespace(dispose=lambda: None)
+
+    monkeypatch.setattr(billing_runner, "create_engine", lambda *args: engine)
+    monkeypatch.setattr(billing_runner, "sessionmaker", lambda **kwargs: lambda: database)
+    monkeypatch.setattr(billing_runner, "_load_prices", lambda db: [])
+    monkeypatch.setattr(billing_runner, "_load_contract_overrides", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_rebates", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_contract_ids", lambda db: {})
+    monkeypatch.setattr(billing_runner, "_load_contract_customers", lambda db: {})
+    monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
+    monkeypatch.setattr(
+        billing_runner,
+        "_emit_synthetic_cluster_lines",
+        lambda *args, **kwargs: None,
+    )
+
+    report = generate_billing_csv(
+        "postgresql://unused",
+        "openstack",
+        [],
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+    )
+
+    assert report == ""
 
 
 @pytest.mark.asyncio

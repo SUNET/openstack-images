@@ -59,8 +59,18 @@ def _emit(s, period_start: datetime, period_end: datetime, contracts: set[str]):
     buf, writer = _writer()
     prices = _load_prices(s)
     contract_id_map = {c.contract_number: c.id for c in s.query(Contract).all()}
+    contract_customer_map = {c.contract_number: c.customer.name for c in s.query(Contract).all()}
     _emit_synthetic_cluster_lines(
-        s, period_start, period_end, contracts, prices, {}, {}, contract_id_map, writer
+        s,
+        period_start,
+        period_end,
+        contracts,
+        prices,
+        {},
+        {},
+        contract_id_map,
+        contract_customer_map,
+        writer,
     )
     return buf.getvalue().splitlines()
 
@@ -69,8 +79,18 @@ def _emit_with_overrides(s, period_start, period_end, contracts, overrides, reba
     buf, writer = _writer()
     prices = _load_prices(s)
     contract_id_map = {c.contract_number: c.id for c in s.query(Contract).all()}
+    contract_customer_map = {c.contract_number: c.customer.name for c in s.query(Contract).all()}
     _emit_synthetic_cluster_lines(
-        s, period_start, period_end, contracts, prices, overrides, rebates, contract_id_map, writer
+        s,
+        period_start,
+        period_end,
+        contracts,
+        prices,
+        overrides,
+        rebates,
+        contract_id_map,
+        contract_customer_map,
+        writer,
     )
     return buf.getvalue().splitlines()
 
@@ -109,28 +129,29 @@ def test_provisioning_period_emits_management_setup_addon(sync_session):
     #   controller setup: 1 × 1000
     #   worker setup (initial 2 groups): 2 × 2000 = 4000
     #   addon jupyterhub: 1 × 3450
-    by_label = {line.split(";")[2]: line for line in lines}
+    by_label = {line.split(";")[3]: line for line in lines}
     assert "Cluster management fee" in by_label
     assert "Controller setup fee" in by_label
     assert any("Worker setup fee (initial" in line for line in lines)
     assert "Addon: jupyterhub" in by_label
 
     mgmt = by_label["Cluster management fee"].split(";")
-    assert mgmt[0] == "CO-001"
-    assert mgmt[3] == "9 vm-month"
-    assert mgmt[4] == "4500"
+    assert mgmt[0] == "Acme"
+    assert mgmt[1] == "CO-001"
+    assert mgmt[4] == "9 vm-month"
+    assert mgmt[5] == "4500"
 
     ctrl = by_label["Controller setup fee"].split(";")
-    assert ctrl[3] == "1 cluster"
-    assert ctrl[4] == "1000"
+    assert ctrl[4] == "1 cluster"
+    assert ctrl[5] == "1000"
 
     wkr = next(line for line in lines if "Worker setup fee (initial" in line).split(";")
-    assert wkr[3] == "2 worker-group"
-    assert wkr[4] == "4000"
+    assert wkr[4] == "2 worker-group"
+    assert wkr[5] == "4000"
 
     addon = by_label["Addon: jupyterhub"].split(";")
-    assert addon[3] == "1 month"
-    assert addon[4] == "3450"
+    assert addon[4] == "1 month"
+    assert addon[5] == "3450"
 
 
 def test_subsequent_period_emits_management_and_addon_only(sync_session):
@@ -163,15 +184,17 @@ def test_subsequent_period_emits_management_and_addon_only(sync_session):
     # April — provisioning was in March, so no setup line in April.
     lines = _emit(s, datetime(2026, 4, 1), datetime(2026, 5, 1), {"CO-001"})
 
-    labels = [line.split(";")[2] for line in lines]
+    labels = [line.split(";")[3] for line in lines]
     assert "Cluster management fee" in labels
     assert "Addon: jupyterhub" in labels
     assert "Controller setup fee" not in labels
     assert not any("Worker setup fee" in la for la in labels)
 
-    mgmt = next(line.split(";") for line in lines if line.split(";")[2] == "Cluster management fee")
-    assert mgmt[3] == "6 vm-month"
-    assert mgmt[4] == "3000"  # 6 × 500
+    mgmt = next(
+        line.split(";") for line in lines if line.split(";")[3] == "Cluster management fee"
+    )
+    assert mgmt[4] == "6 vm-month"
+    assert mgmt[5] == "3000"  # 6 × 500
 
 
 def test_resize_period_emits_expansion_fee(sync_session):
@@ -184,7 +207,7 @@ def test_resize_period_emits_expansion_fee(sync_session):
         api_url="https://x",
         ca_bundle="dummy",
         openbao_mount="kubernetes/tenant-acme-prod",
-        worker_groups=3,            # current
+        worker_groups=3,  # current
         initial_worker_groups=1,
         provisioned_at=datetime(2026, 1, 5),
         created_by_sub="admin@test",
@@ -220,9 +243,9 @@ def test_resize_period_emits_expansion_fee(sync_session):
     expansion_lines = [line for line in lines if "Worker setup fee (expansion" in line]
     assert len(expansion_lines) == 1
     cols = expansion_lines[0].split(";")
-    assert cols[2] == "Worker setup fee (expansion, +1 groups)"
-    assert cols[3] == "1 worker-group"
-    assert cols[4] == "2000"
+    assert cols[3] == "Worker setup fee (expansion, +1 groups)"
+    assert cols[4] == "1 worker-group"
+    assert cols[5] == "2000"
 
 
 def test_per_contract_override_applies(sync_session):
@@ -253,12 +276,18 @@ def test_per_contract_override_applies(sync_session):
 
     overrides = {contract.id: {"cluster_management_fee": 400}}
     lines = _emit_with_overrides(
-        s, datetime(2026, 4, 1), datetime(2026, 5, 1),
-        {"CO-001"}, overrides, rebates={},
+        s,
+        datetime(2026, 4, 1),
+        datetime(2026, 5, 1),
+        {"CO-001"},
+        overrides,
+        rebates={},
     )
-    mgmt = next(line.split(";") for line in lines if line.split(";")[2] == "Cluster management fee")
+    mgmt = next(
+        line.split(";") for line in lines if line.split(";")[3] == "Cluster management fee"
+    )
     # 6 VMs × 400 (override) = 2400
-    assert mgmt[4] == "2400"
+    assert mgmt[5] == "2400"
 
 
 def test_disabled_addon_not_billed_after_disable(sync_session):
@@ -292,7 +321,7 @@ def test_disabled_addon_not_billed_after_disable(sync_session):
 
     # April — addon was disabled on March 31 (before April 1), so no bill.
     lines = _emit(s, datetime(2026, 4, 1), datetime(2026, 5, 1), {"CO-001"})
-    labels = [line.split(";")[2] for line in lines]
+    labels = [line.split(";")[3] for line in lines]
     assert "Addon: jupyterhub" not in labels
 
 
