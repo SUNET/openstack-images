@@ -1,12 +1,11 @@
 """Pydantic request/response schemas."""
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-import re
-
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # --- Admin: Customers ---
 
@@ -19,7 +18,9 @@ class CreateCustomerRequest(BaseModel):
 
 class UpdateCustomerRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    domain: str | None = Field(default=None, min_length=1, max_length=255, pattern=r"^[a-z0-9.-]+$")
+    domain: str | None = Field(
+        default=None, min_length=1, max_length=255, pattern=r"^[a-z0-9.-]+$"
+    )
     description: str | None = None
 
 
@@ -312,17 +313,31 @@ class ManualRunRequest(BaseModel):
     month: int | None = None
 
 
-class RunOnceRequest(BaseModel):
-    """Ad-hoc billing run: generate + deliver once, without saving a job."""
-
+class RunOnceBaseRequest(BaseModel):
+    """Shared scope and output settings for an ad-hoc billing run."""
     all_contracts: bool = False
     contract_ids: list[int] = Field(default_factory=list)
-    delivery_method: str = Field(pattern=r"^(webdav|email)$")
-    delivery_config: dict
     filename_template: str = Field(default="billing-{year}-{month}.csv", max_length=255)
     per_contract: bool = False
-    year: int | None = None
-    month: int | None = None
+    year: int | None = Field(default=None, ge=1, le=9999)
+    month: int | None = Field(default=None, ge=1, le=12)
+
+    @model_validator(mode="after")
+    def validate_complete_period(self):
+        if (self.year is None) != (self.month is None):
+            raise ValueError("year and month must be provided together")
+        return self
+
+
+class RunOnceRequest(RunOnceBaseRequest):
+    """Ad-hoc billing run delivered to WebDAV or email."""
+
+    delivery_method: str = Field(pattern=r"^(webdav|email)$")
+    delivery_config: dict
+
+
+class RunOnceDownloadRequest(RunOnceBaseRequest):
+    """Ad-hoc billing run returned as a direct download."""
 
 
 class RunOnceResponse(BaseModel):

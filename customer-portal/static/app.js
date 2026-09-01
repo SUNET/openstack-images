@@ -193,6 +193,38 @@ async function api(path, opts = {}) {
     return resp.json();
 }
 
+async function downloadApi(path, body) {
+    const resp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (resp.status === 401) {
+        currentUser = null;
+        renderLogin();
+        return null;
+    }
+    if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(formatApiError(err.detail) || "Download failed");
+    }
+
+    const disposition = resp.headers.get("Content-Disposition") || "";
+    const utf8Name = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const plainName = disposition.match(/filename="([^"]+)"/i);
+    let filename = "billing.csv";
+    if (utf8Name) filename = decodeURIComponent(utf8Name[1]);
+    else if (plainName) filename = plainName[1];
+
+    const url = URL.createObjectURL(await resp.blob());
+    const link = h("a", { href: url, download: filename });
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return filename;
+}
+
 // ---------- Shell ----------
 
 function navKeyFromHash() {
@@ -1072,7 +1104,7 @@ function renderRunOnce() {
     app.appendChild(phead({
         eyebrow: "Run once",
         title: "Ad-hoc billing export",
-        lead: "Generate and deliver a billing CSV a single time, without saving a recurring job.",
+        lead: "Generate and download or deliver a billing CSV without saving a recurring job.",
     }));
 
     const contracts = currentUser.contracts || [];
@@ -1115,7 +1147,10 @@ function renderRunOnce() {
         ),
     );
 
-    const webdavWrap = h("div", { id: "webdav-config" },
+    const downloadWrap = h("div", { id: "download-config" },
+        h("p", { className: "hint" }, "The generated report will be downloaded by your browser."),
+    );
+    const webdavWrap = h("div", { id: "webdav-config", style: "display:none" },
         h("label", { htmlFor: "wurl" }, "WebDAV URL"),
         h("input", { id: "wurl", name: "webdav_url", type: "url", className: "mono", placeholder: "https://finance.example.se/webdav/billing/" }),
         h("div", { className: "row-2" },
@@ -1135,9 +1170,14 @@ function renderRunOnce() {
     );
 
     const dmSelect = h("select", { id: "dm", name: "delivery_method", onchange: (e) => {
+        downloadWrap.style.display = e.target.value === "download" ? "block" : "none";
         webdavWrap.style.display = e.target.value === "webdav" ? "block" : "none";
         emailWrap.style.display = e.target.value === "email" ? "block" : "none";
+        submitBtn.textContent = e.target.value === "download"
+            ? "Generate & download now"
+            : "Generate & deliver now";
     }},
+        h("option", { value: "download" }, "Download"),
         h("option", { value: "webdav" }, "WebDAV"),
         h("option", { value: "email" }, "Email"),
     );
@@ -1146,6 +1186,7 @@ function renderRunOnce() {
         h("h3", {}, "Delivery"),
         h("label", { htmlFor: "dm" }, "Method"),
         dmSelect,
+        downloadWrap,
         webdavWrap,
         emailWrap,
         h("label", { htmlFor: "tpl" }, "Filename template"),
@@ -1181,16 +1222,25 @@ function renderRunOnce() {
         const body = {
             all_contracts: allContracts,
             contract_ids: allContracts ? [] : contractIds,
-            delivery_method: deliveryMethod,
-            delivery_config: deliveryConfig,
             filename_template: filenameTemplate,
             per_contract: perContract,
             year: Number.isNaN(yearVal) ? null : yearVal,
             month: Number.isNaN(monthVal) ? null : monthVal,
         };
+        if (deliveryMethod !== "download") {
+            body.delivery_method = deliveryMethod;
+            body.delivery_config = deliveryConfig;
+        }
         submitBtn.disabled = true;
         clear(result);
         try {
+            if (deliveryMethod === "download") {
+                const filename = await downloadApi("/api/billing/run-once/download", body);
+                if (filename) {
+                    result.appendChild(h("p", { className: "ok" }, `Downloaded ${filename}.`));
+                }
+                return;
+            }
             const r = await api("/api/billing/run-once", { method: "POST", body: JSON.stringify(body) });
             const periodLabel = r.billing_period_start.substring(0, 7);
             if (r.status === "success") {
@@ -1200,7 +1250,7 @@ function renderRunOnce() {
             }
         } catch (err) { showAlert(err.message); }
         finally { submitBtn.disabled = false; }
-    }}, "Generate & deliver now");
+    }}, "Generate & download now");
 
     const cancel = h("a", { className: "btn ghost", href: "#/billing" }, "Cancel");
 

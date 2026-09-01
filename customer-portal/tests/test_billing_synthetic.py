@@ -138,20 +138,24 @@ def test_provisioning_period_emits_management_setup_addon(sync_session):
     mgmt = by_label["Cluster management fee"].split(";")
     assert mgmt[0] == "Acme"
     assert mgmt[1] == "CO-001"
-    assert mgmt[4] == "9 vm-month"
-    assert mgmt[5] == "4500"
+    assert mgmt[4] == "9"
+    assert mgmt[5] == "vm-month"
+    assert mgmt[6] == "4500"
 
     ctrl = by_label["Controller setup fee"].split(";")
-    assert ctrl[4] == "1 cluster"
-    assert ctrl[5] == "1000"
+    assert ctrl[4] == "1"
+    assert ctrl[5] == "cluster"
+    assert ctrl[6] == "1000"
 
     wkr = next(line for line in lines if "Worker setup fee (initial" in line).split(";")
-    assert wkr[4] == "2 worker-group"
-    assert wkr[5] == "4000"
+    assert wkr[4] == "2"
+    assert wkr[5] == "worker-group"
+    assert wkr[6] == "4000"
 
     addon = by_label["Addon: jupyterhub"].split(";")
-    assert addon[4] == "1 month"
-    assert addon[5] == "3450"
+    assert addon[4] == "1"
+    assert addon[5] == "month"
+    assert addon[6] == "3450"
 
 
 def test_subsequent_period_emits_management_and_addon_only(sync_session):
@@ -193,8 +197,9 @@ def test_subsequent_period_emits_management_and_addon_only(sync_session):
     mgmt = next(
         line.split(";") for line in lines if line.split(";")[3] == "Cluster management fee"
     )
-    assert mgmt[4] == "6 vm-month"
-    assert mgmt[5] == "3000"  # 6 × 500
+    assert mgmt[4] == "6"
+    assert mgmt[5] == "vm-month"
+    assert mgmt[6] == "3000"  # 6 × 500
 
 
 def test_resize_period_emits_expansion_fee(sync_session):
@@ -244,8 +249,9 @@ def test_resize_period_emits_expansion_fee(sync_session):
     assert len(expansion_lines) == 1
     cols = expansion_lines[0].split(";")
     assert cols[3] == "Worker setup fee (expansion, +1 groups)"
-    assert cols[4] == "1 worker-group"
-    assert cols[5] == "2000"
+    assert cols[4] == "1"
+    assert cols[5] == "worker-group"
+    assert cols[6] == "2000"
 
 
 def test_per_contract_override_applies(sync_session):
@@ -287,7 +293,7 @@ def test_per_contract_override_applies(sync_session):
         line.split(";") for line in lines if line.split(";")[3] == "Cluster management fee"
     )
     # 6 VMs × 400 (override) = 2400
-    assert mgmt[5] == "2400"
+    assert mgmt[6] == "2400"
 
 
 def test_disabled_addon_not_billed_after_disable(sync_session):

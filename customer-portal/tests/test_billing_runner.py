@@ -19,8 +19,12 @@ from app.billing_runner import (
     _get_project_contracts,
     _query_gnocchi_usage,
     _resolve_cinder_volume_type,
+    deliver_email,
+    deliver_webdav,
+    encode_billing_csv,
     generate_and_deliver,
     generate_billing_csv,
+    generate_billing_files,
     get_billing_period,
 )
 
@@ -627,7 +631,7 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
     monkeypatch.setattr(
         billing_runner,
         "_load_contract_customers",
-        lambda db: {"CO-001": "Acme"},
+        lambda db: {"CO-001": "SND-Svensk Nationell Datatjänst"},
     )
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
@@ -670,9 +674,11 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
         "project_ids": ["project-1"],
     }
     assert report == (
-        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
-        "Acme;CO-001;Example project;instance (b2.c1r2);2,00 hour;4\r\n"
+        "\ufeff# Customer;ContractNumber;Project;ResourceType;Quantity;Unit;Cost\r\n"
+        "SND-Svensk Nationell Datatjänst;CO-001;Example project;"
+        "instance (b2.c1r2);2.00;hour;4\r\n"
     )
+    assert encode_billing_csv(report).startswith(b"\xef\xbb\xbf")
 
 
 def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monkeypatch) -> None:
@@ -744,8 +750,8 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
     )
 
     assert report == (
-        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
-        "Acme;CO-001;Example project;volume.size (rbd1);44,96 GB-month;78\r\n"
+        "\ufeff# Customer;ContractNumber;Project;ResourceType;Quantity;Unit;Cost\r\n"
+        "Acme;CO-001;Example project;volume.size (rbd1);44.96;GB-month;78\r\n"
     )
 
 
@@ -817,9 +823,9 @@ def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
     )
 
     assert report == (
-        "# Customer;ContractNumber;Project;ResourceType;Volume;Cost\r\n"
-        "Acme;CO-001;Example project;volume.snapshot.size;10,00 GB-month;17\r\n"
-        "Acme;CO-001;Example project;volume.backup.size;20,00 GB-month;35\r\n"
+        "\ufeff# Customer;ContractNumber;Project;ResourceType;Quantity;Unit;Cost\r\n"
+        "Acme;CO-001;Example project;volume.snapshot.size;10.00;GB-month;17\r\n"
+        "Acme;CO-001;Example project;volume.backup.size;20.00;GB-month;35\r\n"
     )
 
 
@@ -930,3 +936,110 @@ async def test_empty_combined_report_is_not_delivered(monkeypatch) -> None:
         )
 
     deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_per_contract_files_get_unique_default_names(monkeypatch) -> None:
+    monkeypatch.setattr(
+        billing_runner,
+        "generate_billing_csv",
+        lambda db, cloud, contracts, start, end: f"\ufeffreport for {contracts[0]}",
+    )
+    settings = SimpleNamespace(
+        database_url="postgresql://unused",
+        openstack_cloud="openstack",
+    )
+
+    files = await generate_billing_files(
+        settings,
+        ["CO-001", "CO-002"],
+        "billing-{year}-{month}.csv",
+        True,
+        datetime(2026, 7, 1),
+        datetime(2026, 8, 1),
+    )
+
+    assert files == [
+        ("billing-2026-07-CO-001.csv", "\ufeffreport for CO-001"),
+        ("billing-2026-07-CO-002.csv", "\ufeffreport for CO-002"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_webdav_delivery_declares_utf8_csv(monkeypatch) -> None:
+    from app import url_safety
+
+    request = {}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def put(self, url, **kwargs):
+            request.update(url=url, **kwargs)
+            return SimpleNamespace(is_success=True, status_code=201)
+
+    monkeypatch.setattr(url_safety, "validate_webdav_url", lambda *args: None)
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(webdav_allowed_hosts=["dav.example.invalid"]),
+    )
+    monkeypatch.setattr(billing_runner.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    await deliver_webdav(
+        "https://dav.example.invalid/reports",
+        "user",
+        "password",
+        "billing.csv",
+        "\ufeffDatatjänst",
+    )
+
+    assert request["headers"] == {"Content-Type": "text/csv; charset=utf-8"}
+    assert request["content"] == b"\xef\xbb\xbfDatatj\xc3\xa4nst"
+
+
+@pytest.mark.asyncio
+async def test_email_delivery_declares_utf8_csv(monkeypatch) -> None:
+    messages = []
+
+    class FakeSmtp:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def send_message(self, message):
+            messages.append(message)
+
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(
+            smtp_host="smtp.example.invalid",
+            smtp_port=25,
+            smtp_from="billing@example.invalid",
+            smtp_username="",
+            smtp_password="",
+        ),
+    )
+    monkeypatch.setattr(billing_runner.smtplib, "SMTP", FakeSmtp)
+
+    await deliver_email(
+        "customer@example.invalid",
+        "Billing report",
+        "billing.csv",
+        "\ufeffDatatjänst",
+    )
+
+    attachment = next(messages[0].iter_attachments())
+    assert attachment.get_content_type() == "text/csv"
+    assert attachment.get_content_charset() == "utf-8"
+    assert attachment.get_payload(decode=True) == b"\xef\xbb\xbfDatatj\xc3\xa4nst"

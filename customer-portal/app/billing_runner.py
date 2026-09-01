@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import smtplib
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
@@ -53,9 +54,11 @@ BILLING_CSV_HEADER = [
     "ContractNumber",
     "Project",
     "ResourceType",
-    "Volume",
+    "Quantity",
+    "Unit",
     "Cost",
 ]
+UTF8_BOM = "\ufeff"
 
 # The `instance` product is billed from CPU sample presence because Ceilometer
 # does not emit a continuously sampled metric named `instance`.
@@ -246,7 +249,9 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
 # --- Billing period ---
 
 
-def get_billing_period(year: int | None = None, month: int | None = None) -> tuple[datetime, datetime]:
+def get_billing_period(
+    year: int | None = None, month: int | None = None
+) -> tuple[datetime, datetime]:
     """Return (start, end) for a billing period. Defaults to previous month."""
     if year and month:
         start = datetime(year, month, 1)
@@ -443,14 +448,14 @@ def _emit_synthetic_cluster_lines(
                 rebates=rebates,
             )
             cost = qty * unit_price
-            volume = f"{qty:.0f} {mgmt.unit}"
             writer.writerow(
                 [
                     customer_name,
                     cn,
                     project_label,
                     "Cluster management fee",
-                    volume,
+                    f"{qty:.0f}",
+                    mgmt.unit,
                     round(cost),
                 ]
             )
@@ -474,7 +479,8 @@ def _emit_synthetic_cluster_lines(
                         cn,
                         project_label,
                         "Controller setup fee",
-                        f"1 {ctrl.unit}",
+                        "1",
+                        ctrl.unit,
                         round(unit_price),
                     ]
                 )
@@ -496,7 +502,8 @@ def _emit_synthetic_cluster_lines(
                         cn,
                         project_label,
                         f"Worker setup fee (initial, {cluster.initial_worker_groups} groups)",
-                        f"{qty:.0f} {wkr.unit}",
+                        f"{qty:.0f}",
+                        wkr.unit,
                         round(qty * unit_price),
                     ]
                 )
@@ -547,7 +554,8 @@ def _emit_synthetic_cluster_lines(
                 cn,
                 f"managed-cluster:{cluster.slug}",
                 f"Worker setup fee (expansion, +{int(delta)} groups)",
-                f"{delta:.0f} {wkr.unit}",
+                f"{delta:.0f}",
+                wkr.unit,
                 round(delta * unit_price),
             ]
         )
@@ -589,7 +597,8 @@ def _emit_synthetic_cluster_lines(
                 cn,
                 f"managed-cluster:{cluster.slug}",
                 f"Addon: {addon.addon_type}",
-                f"1 {price.unit}",
+                "1",
+                price.unit,
                 round(unit_price),
             ]
         )
@@ -1113,8 +1122,17 @@ def generate_billing_csv(
                     meta_str = ", ".join(f"{v}" for v in metadata.values())
                     label = f"{metric} ({meta_str})"
 
-                volume = f"{quantity:.2f} {unit}".replace(".", ",")
-                writer.writerow([customer_name, cn, project_name, label, volume, round(cost)])
+                writer.writerow(
+                    [
+                        customer_name,
+                        cn,
+                        project_name,
+                        label,
+                        f"{quantity:.2f}",
+                        unit,
+                        round(cost),
+                    ]
+                )
 
         # Synthetic cluster billing lines (management fee, setup fees, addons).
         _emit_synthetic_cluster_lines(
@@ -1138,7 +1156,7 @@ def generate_billing_csv(
         report_writer = csv.writer(report, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
         report_writer.writerow(BILLING_CSV_HEADER)
         report.write(data_rows)
-        return report.getvalue()
+        return UTF8_BOM + report.getvalue()
     finally:
         db.close()
         engine.dispose()
@@ -1160,7 +1178,14 @@ def resolve_template(template: str, **kwargs: str) -> str:
 # --- Delivery methods ---
 
 
-async def deliver_webdav(url: str, username: str, password: str, filename: str, content: str) -> None:
+def encode_billing_csv(content: str) -> bytes:
+    """Encode generated billing CSV text without altering its UTF-8 BOM."""
+    return content.encode("utf-8")
+
+
+async def deliver_webdav(
+    url: str, username: str, password: str, filename: str, content: str
+) -> None:
     """Upload a file to a WebDAV endpoint.
 
     Re-runs the SSRF allowlist check at delivery time as defence-in-depth
@@ -1173,7 +1198,12 @@ async def deliver_webdav(url: str, username: str, password: str, filename: str, 
 
     full_url = url.rstrip("/") + "/" + filename
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-        resp = await client.put(full_url, content=content.encode(), auth=(username, password))
+        resp = await client.put(
+            full_url,
+            content=encode_billing_csv(content),
+            auth=(username, password),
+            headers={"Content-Type": "text/csv; charset=utf-8"},
+        )
         # WebDAV success is 200/201/204. Treat anything else (including an
         # unfollowed 3xx) as a failure. raise_for_status() discards the
         # response body, but Nextcloud/Sabre puts the actual cause there
@@ -1206,7 +1236,13 @@ async def deliver_email(recipient: str, subject: str, filename: str, content: st
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain=settings.smtp_from.rsplit("@", 1)[-1])
     msg.set_content(f"Billing report: {filename}")
-    msg.add_attachment(content.encode(), maintype="text", subtype="csv", filename=filename)
+    msg.add_attachment(
+        encode_billing_csv(content),
+        maintype="text",
+        subtype="csv",
+        filename=filename,
+        params={"charset": "utf-8"},
+    )
 
     def _send():
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as smtp:
@@ -1239,32 +1275,32 @@ def _decrypt_config(delivery_config_json: str) -> dict:
     return config
 
 
-async def generate_and_deliver(
+async def iter_billing_files(
     settings,
     contract_numbers: list[str],
-    delivery_method: str,
-    config: dict,
     filename_template: str,
     per_contract: bool,
     period_start: datetime,
     period_end: datetime,
-) -> int:
-    """Generate billing CSV(s) and deliver them. Returns files delivered.
-
-    Shared by scheduled jobs and ad-hoc run-once. `config` must already be
-    decrypted (passwords in plaintext).
-    """
+) -> AsyncIterator[tuple[str, str]]:
+    """Generate named billing CSV files one at a time."""
+    now = datetime.now(UTC)
     template_vars = {
         "year": f"{period_start.year:04d}",
         "month": f"{period_start.month:02d}",
-        "day": f"{datetime.utcnow().day:02d}",
-        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "day": f"{now.day:02d}",
+        "date": now.strftime("%Y-%m-%d"),
     }
 
-    files_delivered = 0
+    filenames = set()
 
     if per_contract:
-        # One file per contract
+        if "{contract}" not in filename_template:
+            stem, separator, suffix = filename_template.rpartition(".")
+            if separator:
+                filename_template = f"{stem}-{{contract}}.{suffix}"
+            else:
+                filename_template = f"{filename_template}-{{contract}}"
         for cn in contract_numbers:
             csv_content = await asyncio.to_thread(
                 generate_billing_csv,
@@ -1276,24 +1312,73 @@ async def generate_and_deliver(
 
             cn_vars = {**template_vars, "contract": cn}
             filename = resolve_template(filename_template, **cn_vars)
-
-            await _deliver(delivery_method, config, filename, csv_content)
-            files_delivered += 1
+            if filename in filenames:
+                raise BillingGenerationError(
+                    "Per-contract filename template produced duplicate filenames"
+                )
+            filenames.add(filename)
+            yield filename, csv_content
     else:
-        # Single file with all contracts
         csv_content = await asyncio.to_thread(
             generate_billing_csv,
             settings.database_url, settings.openstack_cloud,
             contract_numbers, period_start, period_end,
         )
         if not csv_content.strip():
-            raise BillingGenerationError(
-                "Billing report is empty; refusing to deliver an empty combined file"
-            )
+            return
         filename = resolve_template(filename_template, **template_vars)
-        await _deliver(delivery_method, config, filename, csv_content)
-        files_delivered = 1
+        yield filename, csv_content
 
+
+async def generate_billing_files(
+    settings,
+    contract_numbers: list[str],
+    filename_template: str,
+    per_contract: bool,
+    period_start: datetime,
+    period_end: datetime,
+) -> list[tuple[str, str]]:
+    """Collect generated files for callers that need all files in memory."""
+    return [
+        item
+        async for item in iter_billing_files(
+            settings,
+            contract_numbers,
+            filename_template,
+            per_contract,
+            period_start,
+            period_end,
+        )
+    ]
+
+
+async def generate_and_deliver(
+    settings,
+    contract_numbers: list[str],
+    delivery_method: str,
+    config: dict,
+    filename_template: str,
+    per_contract: bool,
+    period_start: datetime,
+    period_end: datetime,
+) -> int:
+    """Generate billing CSV files and deliver them through a configured method."""
+    files_delivered = 0
+    async for filename, csv_content in iter_billing_files(
+        settings,
+        contract_numbers,
+        filename_template,
+        per_contract,
+        period_start,
+        period_end,
+    ):
+        await _deliver(delivery_method, config, filename, csv_content)
+        files_delivered += 1
+
+    if not per_contract and files_delivered == 0:
+        raise BillingGenerationError(
+            "Billing report is empty; refusing to deliver an empty combined file"
+        )
     return files_delivered
 
 
@@ -1370,7 +1455,13 @@ async def execute_job(
 async def _deliver(method: str, config: dict, filename: str, content: str) -> None:
     """Dispatch to the appropriate delivery method."""
     if method == "webdav":
-        await deliver_webdav(config["url"], config.get("username", ""), config.get("password", ""), filename, content)
+        await deliver_webdav(
+            config["url"],
+            config.get("username", ""),
+            config.get("password", ""),
+            filename,
+            content,
+        )
     elif method == "email":
         subject = f"Billing report: {filename}"
         await deliver_email(config["recipient"], subject, filename, content)

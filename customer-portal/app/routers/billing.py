@@ -1,12 +1,15 @@
 """Billing job API endpoints."""
 
 import hmac
+import io
 import json
 import logging
+import zipfile
 from typing import Any
+from urllib.parse import quote
 
 from croniter import croniter
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,9 +18,11 @@ from sqlalchemy.orm import selectinload
 from app.audit import audit_log
 from app.auth import get_current_user
 from app.billing_runner import (
+    encode_billing_csv,
     execute_job,
     generate_and_deliver,
     get_billing_period,
+    iter_billing_files,
     run_due_jobs,
 )
 from app.config import get_settings
@@ -30,6 +35,8 @@ from app.schemas import (
     BillingJobRunResponse,
     CreateBillingJobRequest,
     ManualRunRequest,
+    RunOnceBaseRequest,
+    RunOnceDownloadRequest,
     RunOnceRequest,
     RunOnceResponse,
     UpdateBillingJobRequest,
@@ -348,7 +355,7 @@ async def manual_run(
 
 
 async def _resolve_run_once_contracts(
-    req: RunOnceRequest, user_sub: str, is_admin: bool, session: AsyncSession
+    req: RunOnceBaseRequest, user_sub: str, is_admin: bool, session: AsyncSession
 ) -> list[str]:
     """Resolve contract numbers for an ad-hoc run, enforcing access."""
     if req.all_contracts:
@@ -367,6 +374,116 @@ async def _resolve_run_once_contracts(
         select(Contract.contract_number).where(Contract.id.in_(req.contract_ids))
     )
     return [r[0] for r in result]
+
+
+def _download_headers(filename: str) -> dict[str, str]:
+    """Build a safe Content-Disposition header with Unicode filename support."""
+    fallback = filename.encode("ascii", "replace").decode("ascii")
+    fallback = fallback.replace('"', "_").replace("\\", "_")
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{quote(filename)}'
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+@router.post("/run-once/download")
+async def download_run_once(
+    req: RunOnceDownloadRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Generate an ad-hoc billing export and return it as a direct download."""
+    settings = get_settings()
+    is_admin = user["sub"] in settings.admin_users
+    contract_numbers = await _resolve_run_once_contracts(
+        req, user["sub"], is_admin, session
+    )
+    period_start, period_end = get_billing_period(req.year, req.month)
+
+    if not contract_numbers:
+        audit_log(
+            user["sub"],
+            "billing.run_once",
+            files=0,
+            period=period_start.strftime("%Y-%m"),
+            status="empty",
+            delivery="download",
+        )
+        raise HTTPException(status_code=400, detail="No contracts available to bill")
+
+    response = None
+    files_generated = 0
+    try:
+        if req.per_contract:
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+                async for filename, content in iter_billing_files(
+                    settings,
+                    contract_numbers,
+                    req.filename_template,
+                    True,
+                    period_start,
+                    period_end,
+                ):
+                    output.writestr(filename, encode_billing_csv(content))
+                    files_generated += 1
+            if files_generated:
+                filename = f"billing-{period_start:%Y-%m}.zip"
+                response = Response(
+                    content=archive.getvalue(),
+                    media_type="application/zip",
+                    headers=_download_headers(filename),
+                )
+        else:
+            async for filename, content in iter_billing_files(
+                settings,
+                contract_numbers,
+                req.filename_template,
+                False,
+                period_start,
+                period_end,
+            ):
+                response = Response(
+                    content=encode_billing_csv(content),
+                    media_type="text/csv; charset=utf-8",
+                    headers=_download_headers(filename),
+                )
+                files_generated += 1
+    except Exception as exc:
+        logger.exception("Ad-hoc billing download failed for %s", user["sub"])
+        audit_log(
+            user["sub"],
+            "billing.run_once",
+            period=period_start.strftime("%Y-%m"),
+            status="error",
+            delivery="download",
+        )
+        raise HTTPException(
+            status_code=500, detail="Billing report generation failed"
+        ) from exc
+
+    if response is None:
+        audit_log(
+            user["sub"],
+            "billing.run_once",
+            files=0,
+            period=period_start.strftime("%Y-%m"),
+            status="empty",
+            delivery="download",
+        )
+        raise HTTPException(status_code=404, detail="Billing report is empty")
+
+    audit_log(
+        user["sub"],
+        "billing.run_once",
+        files=files_generated,
+        period=period_start.strftime("%Y-%m"),
+        status="success",
+        delivery="download",
+    )
+    return response
 
 
 @router.post("/run-once", response_model=RunOnceResponse)
