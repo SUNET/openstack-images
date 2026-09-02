@@ -1,0 +1,175 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: managedclusters.customer-clusters.sunet.se
+spec:
+  group: customer-clusters.sunet.se
+  scope: Namespaced
+  names:
+    plural: managedclusters
+    singular: managedcluster
+    kind: ManagedCluster
+    shortNames:
+      - mcluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Profile
+          type: string
+          jsonPath: .spec.profileRef.name
+        - name: Suspended
+          type: boolean
+          jsonPath: .spec.suspend
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - displayName
+                - contractNumber
+                - customerDomain
+                - workerGroups
+                - openstack
+              properties:
+                profileRef:
+                  type: object
+                  default:
+                    name: standard-v1
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      default: standard-v1
+                      minLength: 1
+                deletionPolicy:
+                  type: string
+                  default: Retain
+                  enum:
+                    - Retain
+                suspend:
+                  type: boolean
+                  default: false
+                displayName:
+                  type: string
+                  minLength: 1
+                contractNumber:
+                  type: string
+                  minLength: 1
+                customerDomain:
+                  type: string
+                  minLength: 1
+                workerGroups:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 80
+                openstack:
+                  type: object
+                  required:
+                    - projectName
+                    - projectResourceName
+                  properties:
+                    projectName:
+                      type: string
+                      minLength: 1
+                    projectResourceName:
+                      type: string
+                      minLength: 1
+                dns:
+                  type: object
+                  properties:
+                    zone:
+                      type: string
+                    apiHostname:
+                      type: string
+                    argocdHostname:
+                      type: string
+                openbao:
+                  type: object
+                  properties:
+                    mount:
+                      type: string
+                    secretRoot:
+                      type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                phase:
+                  type: string
+                  enum:
+                    - Suspended
+                    - PendingProject
+                    - PendingPrerequisites
+                    - ProvisioningInfrastructure
+                    - VirtualMachinesReady
+                    - Failed
+                jobName:
+                  type: string
+                  maxLength: 63
+                inputHash:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+                inventoryPath:
+                  type: string
+                  pattern: ^clusters/[^/]+/generated/ansible/hosts[.]yml$
+                inventoryCommit:
+                  type: string
+                  pattern: ^([0-9a-f]{40}|[0-9a-f]{64})$
+                lastVerifiedAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys:
+                    - type
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - reason
+                      - message
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - Ready
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                        minLength: 1
+                      message:
+                        type: string
+                        maxLength: 512
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

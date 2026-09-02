@@ -1,0 +1,208 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: clusterprofiles.customer-clusters.sunet.se
+spec:
+  group: customer-clusters.sunet.se
+  scope: Cluster
+  names:
+    plural: clusterprofiles
+    singular: clusterprofile
+    kind: ClusterProfile
+    shortNames:
+      - cprofile
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.openstack.image
+        - name: Network
+          type: string
+          jsonPath: .spec.network.cidr
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - projectNamespace
+                - maxWorkerGroups
+                - openstack
+                - network
+                - ssh
+                - git
+              properties:
+                projectNamespace:
+                  type: string
+                  minLength: 1
+                maxWorkerGroups:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 80
+                openstack:
+                  type: object
+                  required:
+                    - cloud
+                    - image
+                    - externalNetwork
+                    - credentialsSecret
+                    - controller
+                    - worker
+                    - jumphost
+                  properties:
+                    cloud:
+                      type: string
+                      minLength: 1
+                    image:
+                      type: string
+                      minLength: 1
+                    externalNetwork:
+                      type: string
+                      minLength: 1
+                    credentialsSecret:
+                      type: object
+                      required:
+                        - name
+                        - key
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        namespace:
+                          type: string
+                          default: openstack-operator
+                          enum:
+                            - openstack-operator
+                        key:
+                          type: string
+                          minLength: 1
+                    controller:
+                      type: object
+                      required:
+                        - flavor
+                        - rootVolumeGB
+                      properties:
+                        flavor:
+                          type: string
+                          minLength: 1
+                        rootVolumeGB:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                    worker:
+                      type: object
+                      required:
+                        - flavor
+                        - rootVolumeGB
+                      properties:
+                        flavor:
+                          type: string
+                          minLength: 1
+                        rootVolumeGB:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                    jumphost:
+                      type: object
+                      required:
+                        - flavor
+                        - rootVolumeGB
+                      properties:
+                        flavor:
+                          type: string
+                          minLength: 1
+                        rootVolumeGB:
+                          type: integer
+                          format: int32
+                          minimum: 1
+                network:
+                  type: object
+                  required:
+                    - cidr
+                    - dnsNameservers
+                    - sshAllowedCIDRs
+                  properties:
+                    cidr:
+                      type: string
+                      minLength: 1
+                    dnsNameservers:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                    apiVipAddress:
+                      type: string
+                      nullable: true
+                    ingressVipAddress:
+                      type: string
+                      nullable: true
+                    sshAllowedCIDRs:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                ssh:
+                  type: object
+                  required:
+                    - authorizedKeysConfigMap
+                  properties:
+                    authorizedKeysConfigMap:
+                      type: object
+                      required:
+                        - name
+                        - key
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        namespace:
+                          type: string
+                          default: openstack-operator
+                          enum:
+                            - openstack-operator
+                        key:
+                          type: string
+                          minLength: 1
+                git:
+                  type: object
+                  required:
+                    - repoUrl
+                    - branch
+                    - username
+                    - tokenSecret
+                  properties:
+                    repoUrl:
+                      type: string
+                      minLength: 1
+                      pattern: ^https://
+                    branch:
+                      type: string
+                      minLength: 1
+                    username:
+                      type: string
+                      minLength: 1
+                    tokenSecret:
+                      type: object
+                      required:
+                        - name
+                        - key
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        namespace:
+                          type: string
+                          default: openstack-operator
+                          enum:
+                            - openstack-operator
+                        key:
+                          type: string
+                          minLength: 1

@@ -124,13 +124,15 @@ pytest
 python -m compileall -q src tests
 ```
 
-No CRDs or deployment manifests are included in this component.
+Canonical `ManagedCluster` and `ClusterProfile` CRDs are stored under `crds/`.
+Deployment manifests consume these files from the repository; controller
+Deployment, service account, and RBAC manifests remain deployment-owned.
 
 Deployment manifests need one optional environment variable when exposing the
 new setting: `VERIFICATION_INTERVAL_SECONDS` (default `900`, minimum `60`). A
 structural status schema must permit `status.lastVerifiedAt` as a date-time
 string. Controller RBAC must grant `get`, `list`, `create`, and `delete` on
 `batch/jobs`; `get`, `list`, `create`, and `delete` on core `configmaps`; `get`
-on core `secrets`; and `list` on core `pods`. Pod deletion is not required
-because Job owner garbage
-collection removes historical Pods.
+on core `secrets`; `list` on core `pods`; and cluster-scoped `get`, `list`, and
+`watch` on core `namespaces` for Kopf discovery. Pod deletion is not required
+because Job owner garbage collection removes historical Pods.
