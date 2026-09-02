@@ -18,16 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.cluster_client import TenantClusterError
-from app.openbao_client import OpenBaoError
-
 from app.auth import get_current_user, get_user_contracts, init_oauth, oauth
+from app.cluster_client import TenantClusterError
+from app.cluster_git_backend import ClusterGitBackend
 from app.config import get_settings
 from app.crypto import init_crypto
 from app.db import close_db, get_session, init_db, run_migrations
 from app.git_backend import GitBackend
 from app.k8s import init_k8s
-from app.openbao_client import init_openbao, shutdown_openbao
+from app.openbao_client import OpenBaoError, init_openbao, shutdown_openbao
 from app.routers import admin, billing, cluster_requests, clusters, kubeconfig, projects
 from app.schemas import ContractWithCustomerResponse, UserInfo
 
@@ -49,6 +48,20 @@ async def lifespan(app: FastAPI):
     git_backend.init()
     app.state.git_backend = git_backend
     logger.info("Git backend initialized")
+
+    # Existing deployments can roll out the application before adding the
+    # second repository credential. Cluster planning remains unavailable
+    # until it is configured.
+    app.state.cluster_git_backend = None
+    if settings.cluster_git_repo_url:
+        cluster_git_backend = ClusterGitBackend(settings)
+        cluster_git_backend.init()
+        app.state.cluster_git_backend = cluster_git_backend
+        logger.info("Cluster git backend initialized")
+    else:
+        logger.warning(
+            "CLUSTER_GIT_REPO_URL is not configured; cluster planning is disabled"
+        )
 
     # Initialize Kubernetes client
     try:

@@ -1,9 +1,9 @@
 """FastAPI integration tests for the cluster + kubeconfig + request flows.
 
-Hits the real router stack and DB; mocks the two side-effecting boundaries:
+Hits the real router stack and DB; mocks the side-effecting boundaries:
   - app.kubeconfig_service.* (no real OpenBao or tenant cluster K8s API)
-The git_backend is replaced with a tiny in-memory stub so creating a cluster
-and the backup-enable flow don't try to push to a real git repo.
+The project and cluster-manifest git backends are replaced with tiny
+in-memory stubs so tests do not push to real repositories.
 
 Uses httpx.AsyncClient with ASGITransport so the app and the test share one
 asyncio event loop — fastapi.testclient.TestClient runs the ASGI app on its
@@ -22,15 +22,15 @@ from app import auth, kubeconfig_service
 from app.main import app as fastapi_app
 from app.models import Contract, ContractAccess, Customer, KubeconfigIssuance
 
-
 # ---------------- Stubs ----------------
 
 
 class StubGitBackend:
     """In-memory stand-in for the GitBackend used in tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, publication_order: list[str]) -> None:
         self.projects: dict[str, dict] = {}
+        self.publication_order = publication_order
 
     def write_project(self, *, contract_number, project_name, description, users, managed=False):
         from app.git_backend import _sanitize_name
@@ -46,6 +46,7 @@ class StubGitBackend:
             "users": list(users),
             "managed": managed,
         }
+        self.publication_order.append("project")
         return rn
 
     def get_project(self, resource_name):
@@ -57,9 +58,7 @@ class StubGitBackend:
             out = [p for p in out if p["contract_number"] == contract_number]
         return out
 
-    def update_project(
-        self, *, resource_name, description=None, users=None, role_bindings=None
-    ):
+    def update_project(self, *, resource_name, description=None, users=None, role_bindings=None):
         p = self.projects.get(resource_name)
         if not p:
             raise ValueError(f"Project '{resource_name}' not found")
@@ -81,13 +80,49 @@ class StubGitBackend:
         del self.projects[resource_name]
 
 
+class StubClusterGitBackend:
+    """In-memory stand-in for the cluster desired-state repository."""
+
+    def __init__(self, publication_order: list[str]) -> None:
+        self.clusters: dict[str, dict] = {}
+        self.publication_order = publication_order
+
+    def exists(self, slug):
+        return slug in self.clusters
+
+    def write_cluster(self, **values):
+        slug = values["slug"]
+        if self.exists(slug):
+            raise ValueError(f"Cluster manifest '{slug}' already exists")
+        self.clusters[slug] = values
+        self.publication_order.append("cluster")
+        return f"clusters/{slug}/cluster.yaml"
+
+    def delete_cluster(self, slug):
+        if slug not in self.clusters:
+            raise ValueError(f"Cluster manifest '{slug}' not found")
+        del self.clusters[slug]
+
+
 # ---------------- Fixtures ----------------
 
 
 @pytest.fixture
-def git_backend(monkeypatch):
-    backend = StubGitBackend()
+def publication_order():
+    return []
+
+
+@pytest.fixture
+def git_backend(monkeypatch, publication_order):
+    backend = StubGitBackend(publication_order)
     fastapi_app.state.git_backend = backend
+    return backend
+
+
+@pytest.fixture
+def cluster_git_backend(publication_order):
+    backend = StubClusterGitBackend(publication_order)
+    fastapi_app.state.cluster_git_backend = backend
     return backend
 
 
@@ -97,8 +132,9 @@ def mock_kubeconfig_service(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     async def fake_issue(cluster, *, user_sub, label, ttl_days, session):
-        from app.models import KubeconfigIssuance
         import uuid
+
+        from app.models import KubeconfigIssuance
 
         issuance_id = uuid.uuid4().hex
         iss = KubeconfigIssuance(
@@ -108,7 +144,9 @@ def mock_kubeconfig_service(monkeypatch):
             cert_serial=issuance_id[:16],
             rolebinding_name=f"portal-{issuance_id}",
             cert_group=f"tenant-cluster-{cluster.slug}-issuance-{issuance_id}",
-            expires_at=(datetime.now(timezone.utc) + timedelta(days=ttl_days)).replace(tzinfo=None),
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=ttl_days)).replace(
+                tzinfo=None
+            ),
         )
         session.add(iss)
         await session.flush()
@@ -118,6 +156,7 @@ def mock_kubeconfig_service(monkeypatch):
 
     async def fake_revoke(cluster, issuance, *, by_sub, session):
         from datetime import datetime, timezone
+
         if issuance.revoked_at is not None:
             return
         issuance.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -129,15 +168,22 @@ def mock_kubeconfig_service(monkeypatch):
 
     async def fake_cascade(cluster, *, user_sub, by_sub, session):
         from datetime import datetime, timezone
+
         from sqlalchemy import select
 
-        rows = (await session.execute(
-            select(KubeconfigIssuance).where(
-                KubeconfigIssuance.cluster_id == cluster.id,
-                KubeconfigIssuance.user_sub == user_sub,
-                KubeconfigIssuance.revoked_at.is_(None),
+        rows = (
+            (
+                await session.execute(
+                    select(KubeconfigIssuance).where(
+                        KubeconfigIssuance.cluster_id == cluster.id,
+                        KubeconfigIssuance.user_sub == user_sub,
+                        KubeconfigIssuance.revoked_at.is_(None),
+                    )
+                )
             )
-        )).scalars().all()
+            .scalars()
+            .all()
+        )
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         for r in rows:
             r.revoked_at = now
@@ -150,8 +196,9 @@ def mock_kubeconfig_service(monkeypatch):
     monkeypatch.setattr(kubeconfig_service, "revoke", fake_revoke)
     monkeypatch.setattr(kubeconfig_service, "cascade_revoke_for_user", fake_cascade)
     # Also monkeypatch where the routers imported them.
-    from app.routers import kubeconfig as kc_router
     from app.routers import clusters as cl_router
+    from app.routers import kubeconfig as kc_router
+
     monkeypatch.setattr(kc_router.kubeconfig_service, "issue", fake_issue)
     monkeypatch.setattr(kc_router.kubeconfig_service, "revoke", fake_revoke)
     monkeypatch.setattr(cl_router.kubeconfig_service, "cascade_revoke_for_user", fake_cascade)
@@ -162,7 +209,9 @@ def mock_kubeconfig_service(monkeypatch):
 def _login_as(sub: str):
     """Override get_current_user to return a fixed identity."""
     fastapi_app.dependency_overrides[auth.get_current_user] = lambda: {
-        "sub": sub, "name": sub, "email": sub,
+        "sub": sub,
+        "name": sub,
+        "email": sub,
     }
 
 
@@ -187,7 +236,9 @@ def _is_sunet_admin_for(admin_subs: set[str]):
     # Patch the function used by routers/auth.is_sunet_admin checks via Settings.
     # The simplest path: override get_settings() to return a Settings whose
     # admin_users includes our test admins. Tests below set this when needed.
-    from app.config import Settings as RealSettings, get_settings as real_get_settings
+    from app.config import Settings as RealSettings
+    from app.config import get_settings as real_get_settings
+
     real = real_get_settings()
     overridden = RealSettings(
         oidc_issuer=real.oidc_issuer,
@@ -196,14 +247,19 @@ def _is_sunet_admin_for(admin_subs: set[str]):
         oidc_redirect_uri=real.oidc_redirect_uri,
         secret_key=real.secret_key,
         database_url=real.database_url,
-        git_repo_url=real.git_repo_url,
+        project_git_repo_url=real.project_git_repo_url,
         admin_users=list(admin_subs),
     )
     fastapi_app.dependency_overrides[real_get_settings] = lambda: overridden
 
 
 @pytest.fixture
-async def client(session, git_backend, mock_kubeconfig_service):
+async def client(
+    session,
+    git_backend,
+    cluster_git_backend,
+    mock_kubeconfig_service,
+):
     """An httpx.AsyncClient against the FastAPI app sharing one event loop."""
     fastapi_app.dependency_overrides.clear()
 
@@ -211,16 +267,16 @@ async def client(session, git_backend, mock_kubeconfig_service):
         yield session
 
     from app.db import get_session as real_get_session
+
     fastapi_app.dependency_overrides[real_get_session] = _get_session
 
     # BASE_URL matches conftest; the CSRF middleware enforces Origin against
     # it, so all test requests send a same-origin Origin header by default.
     import os
+
     base = os.environ["BASE_URL"]
     transport = ASGITransport(app=fastapi_app)
-    async with AsyncClient(
-        transport=transport, base_url=base, headers={"Origin": base}
-    ) as ac:
+    async with AsyncClient(transport=transport, base_url=base, headers={"Origin": base}) as ac:
         yield ac
     fastapi_app.dependency_overrides.clear()
 
@@ -243,10 +299,27 @@ async def grant_contract_access(session, contract_id: int, user_sub: str):
     await session.flush()
 
 
+async def complete_cluster(client, slug: str):
+    response = await client.patch(
+        f"/api/admin/clusters/{slug}",
+        json={
+            "api_url": f"https://api.{slug}.test:6443",
+            "ca_bundle": "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
 # ---------------- Tests ----------------
 
 
-async def test_admin_creates_cluster_and_provisions(client, session):
+async def test_admin_plans_completes_and_provisions_cluster(
+    client,
+    session,
+    git_backend,
+    cluster_git_backend,
+    publication_order,
+):
     _, contract = await seed_customer_contract(session)
     await session.commit()
     _login_as("admin@test")
@@ -257,8 +330,6 @@ async def test_admin_creates_cluster_and_provisions(client, session):
         "contract_number": "CO-001",
         "name": "Acme prod",
         "slug": "acme-prod",
-        "api_url": "https://k8s.acme.test:6443",
-        "ca_bundle": "-----BEGIN CERTIFICATE-----\nXYZ\n-----END CERTIFICATE-----\n",
         "worker_groups": 2,
     }
     r = await client.post("/api/admin/clusters", json=payload)
@@ -268,9 +339,22 @@ async def test_admin_creates_cluster_and_provisions(client, session):
     assert data["size_label"] == "Mellan"
     assert data["total_servers"] == 9
     assert data["provisioned_at"] is None
+    assert data["api_url"] is None
+    assert data["connection_configured"] is False
     assert data["management_project_resource_name"] == "acme-prod-acme"
+    assert data["manifest_path"] == "clusters/acme-prod/cluster.yaml"
+    assert data["api_hostname"] == "api.acme-prod.k8s-test.sunetvdc.se"
+    assert data["argocd_hostname"] == "argocd.acme-prod.k8s-test.sunetvdc.se"
+    assert data["openbao_secret_root"] == "kv/customer-clusters/acme-prod"
+    assert git_backend.projects["acme-prod-acme"]["managed"] is True
+    assert cluster_git_backend.clusters["acme-prod"]["worker_groups"] == 2
+    assert publication_order == ["project", "cluster"]
 
-    # Mark provisioned.
+    # An incomplete planned cluster cannot be marked provisioned.
+    r = await client.post("/api/admin/clusters/acme-prod/provision")
+    assert r.status_code == 409
+
+    await complete_cluster(client, "acme-prod")
     r = await client.post("/api/admin/clusters/acme-prod/provision")
     assert r.status_code == 200
     assert r.json()["provisioned_at"] is not None
@@ -283,12 +367,18 @@ async def test_customer_admin_grants_user_access(client, session):
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
     # SUNET admin grants customer_admin
-    r = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    r = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
     assert r.status_code == 201, r.text
 
     # Now customer admin grants a regular user.
@@ -298,7 +388,9 @@ async def test_customer_admin_grants_user_access(client, session):
     assert r.status_code == 201, r.text
 
     # Customer admin can NOT grant another customer_admin.
-    r = await client.post("/api/clusters/c1/users", json={"user_sub": "eve@org", "role": "customer_admin"})
+    r = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "eve@org", "role": "customer_admin"}
+    )
     assert r.status_code == 403
 
 
@@ -311,14 +403,20 @@ async def test_cross_cluster_isolation(client, session):
     await session.commit()
 
     for slug, cn in [("ca", "CO-A"), ("cb", "CO-B")]:
-        r = await client.post("/api/admin/clusters", json={
-            "contract_number": cn, "name": slug, "slug": slug,
-            "api_url": "https://x", "ca_bundle": "X",
-        })
+        r = await client.post(
+            "/api/admin/clusters",
+            json={
+                "contract_number": cn,
+                "name": slug,
+                "slug": slug,
+            },
+        )
         assert r.status_code == 201, r.text
 
     # alice is customer_admin on A only.
-    _ = await client.post("/api/clusters/ca/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/ca/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
 
     _login_as("alice@org")
     _is_sunet_admin_for(set())
@@ -342,10 +440,14 @@ async def test_user_can_only_see_their_own_clusters(client, session):
     await session.commit()
 
     for slug, cn in [("c1", "CO-1"), ("c2", "CO-2")]:
-        _ = await client.post("/api/admin/clusters", json={
-            "contract_number": cn, "name": slug, "slug": slug,
-            "api_url": "https://x", "ca_bundle": "X",
-        })
+        _ = await client.post(
+            "/api/admin/clusters",
+            json={
+                "contract_number": cn,
+                "name": slug,
+                "slug": slug,
+            },
+        )
     _ = await client.post("/api/clusters/c1/users", json={"user_sub": "u@org", "role": "user"})
 
     _login_as("u@org")
@@ -363,10 +465,14 @@ async def test_issue_kubeconfig_requires_provisioning(client, session, mock_kube
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
     _ = await client.post("/api/clusters/c1/users", json={"user_sub": "user@org", "role": "user"})
 
     _login_as("user@org")
@@ -379,6 +485,7 @@ async def test_issue_kubeconfig_requires_provisioning(client, session, mock_kube
     _login_as("admin@test")
     _require_admin_for({"admin@test"})
     _is_sunet_admin_for({"admin@test"})
+    await complete_cluster(client, "c1")
     _ = await client.post("/api/admin/clusters/c1/provision")
 
     _login_as("user@org")
@@ -403,10 +510,15 @@ async def test_cascade_revoke_on_access_removal(client, session, mock_kubeconfig
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
+    await complete_cluster(client, "c1")
     _ = await client.post("/api/admin/clusters/c1/provision")
     _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "user"})
 
@@ -424,11 +536,17 @@ async def test_cascade_revoke_on_access_removal(client, session, mock_kubeconfig
     assert mock_kubeconfig_service["cascade_calls"] == [("c1", "alice@org", 2)]
 
     # Issuances are now all revoked.
-    rows = (await session.execute(
-        __import__("sqlalchemy").select(KubeconfigIssuance).where(
-            KubeconfigIssuance.user_sub == "alice@org"
+    rows = (
+        (
+            await session.execute(
+                __import__("sqlalchemy")
+                .select(KubeconfigIssuance)
+                .where(KubeconfigIssuance.user_sub == "alice@org")
+            )
         )
-    )).scalars().all()
+        .scalars()
+        .all()
+    )
     assert all(r.revoked_at is not None for r in rows)
     assert len(rows) == 2
 
@@ -440,20 +558,30 @@ async def test_addon_request_apply_and_disable_ui_state(client, session):
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
+    await complete_cluster(client, "c1")
     _ = await client.post("/api/admin/clusters/c1/provision")
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
 
     # Customer admin requests JupyterHub.
     _login_as("alice@org")
     _is_sunet_admin_for(set())
-    r = await client.post("/api/clusters/c1/requests", json={
-        "request_type": "addon",
-        "payload": {"action": "enable", "addon_type": "jupyterhub"},
-    })
+    r = await client.post(
+        "/api/clusters/c1/requests",
+        json={
+            "request_type": "addon",
+            "payload": {"action": "enable", "addon_type": "jupyterhub"},
+        },
+    )
     assert r.status_code == 201, r.text
     req_id = r.json()["id"]
     assert r.json()["status"] == "pending"
@@ -478,18 +606,30 @@ async def test_resize_apply_records_before_count(client, session):
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X", "worker_groups": 1,
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+            "worker_groups": 1,
+        },
+    )
+    await complete_cluster(client, "c1")
     _ = await client.post("/api/admin/clusters/c1/provision")
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
 
     _login_as("alice@org")
     _is_sunet_admin_for(set())
-    r = await client.post("/api/clusters/c1/requests", json={
-        "request_type": "resize", "payload": {"target_worker_groups": 3},
-    })
+    r = await client.post(
+        "/api/clusters/c1/requests",
+        json={
+            "request_type": "resize",
+            "payload": {"target_worker_groups": 3},
+        },
+    )
     assert r.status_code == 201, r.text
     req_id = r.json()["id"]
 
@@ -513,18 +653,30 @@ async def test_invalid_resize_target_rejected_at_request_time(client, session):
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X", "worker_groups": 3,
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+            "worker_groups": 3,
+        },
+    )
+    await complete_cluster(client, "c1")
     _ = await client.post("/api/admin/clusters/c1/provision")
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
 
     _login_as("alice@org")
     _is_sunet_admin_for(set())
-    r = await client.post("/api/clusters/c1/requests", json={
-        "request_type": "resize", "payload": {"target_worker_groups": 2},
-    })
+    r = await client.post(
+        "/api/clusters/c1/requests",
+        json={
+            "request_type": "resize",
+            "payload": {"target_worker_groups": 2},
+        },
+    )
     assert r.status_code == 400
     assert "must be > current" in r.json()["detail"]
 
@@ -538,10 +690,14 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
 
     rn = "c1-acme"
     # Initially, no customer_admins → roleBindings on the managed project
@@ -549,20 +705,26 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     assert git_backend.projects[rn]["users"] == []
 
     # Grant first customer_admin.
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "alice@org", "role": "customer_admin"}
+    )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org"], "userDomain": "sso-users"},
     ]
 
     # Grant a second customer_admin → both should appear, sorted.
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "bob@org", "role": "customer_admin"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "bob@org", "role": "customer_admin"}
+    )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
     ]
 
     # Grant a *regular* user — managed project should NOT change (regular
     # users only get K8s argocd access, not OpenStack reader).
-    _ = await client.post("/api/clusters/c1/users", json={"user_sub": "charlie@org", "role": "user"})
+    _ = await client.post(
+        "/api/clusters/c1/users", json={"user_sub": "charlie@org", "role": "user"}
+    )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
     ]
@@ -583,10 +745,14 @@ async def test_managed_project_blocks_customer_admin_mutation(client, session, g
     _is_sunet_admin_for({"admin@test"})
     await session.commit()
 
-    _ = await client.post("/api/admin/clusters", json={
-        "contract_number": "CO-001", "name": "c", "slug": "c1",
-        "api_url": "https://x", "ca_bundle": "X",
-    })
+    _ = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "c",
+            "slug": "c1",
+        },
+    )
     rn = "c1-acme"
     assert git_backend.projects[rn]["managed"] is True
 
@@ -606,5 +772,7 @@ async def test_managed_project_blocks_customer_admin_mutation(client, session, g
     # SUNET admin: PATCH allowed
     _login_as("admin@test")
     _is_sunet_admin_for({"admin@test"})
-    r = await client.patch(f"/api/contracts/CO-001/projects/{rn}", json={"description": "by admin"})
+    r = await client.patch(
+        f"/api/contracts/CO-001/projects/{rn}", json={"description": "by admin"}
+    )
     assert r.status_code == 200

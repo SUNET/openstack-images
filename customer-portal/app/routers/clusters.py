@@ -4,11 +4,12 @@
 - /api/clusters/*        : member-facing list/get + access management.
 """
 
+import asyncio
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,7 +23,7 @@ from app.auth import (
 )
 from app.config import Settings, get_settings
 from app.db import get_session
-from app.git_backend import GitBackend
+from app.git_backend import GitBackend, _sanitize_name
 from app.k8s import find_project_cr_by_spec_name
 from app.models import (
     ClusterAccess,
@@ -106,6 +107,7 @@ async def _to_response(
     session: AsyncSession,
 ) -> ClusterResponse:
     contract = cluster.contract
+    settings = get_settings()
     return ClusterResponse(
         id=cluster.id,
         contract_number=contract.contract_number if contract else "",
@@ -123,6 +125,11 @@ async def _to_response(
         created_at=cluster.created_at,
         caller_role=caller_role,
         active_addons=await _active_addons(cluster.id, session),
+        manifest_path=f"clusters/{cluster.slug}/cluster.yaml",
+        api_hostname=f"api.{cluster.slug}.{settings.cluster_dns_zone}",
+        argocd_hostname=f"argocd.{cluster.slug}.{settings.cluster_dns_zone}",
+        openbao_secret_root=f"kv/customer-clusters/{cluster.slug}",
+        connection_configured=bool(cluster.api_url and cluster.ca_bundle),
     )
 
 
@@ -146,6 +153,16 @@ async def admin_create_cluster(
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
 
+    # Serialize one slug across all portal replicas before checking the DB or
+    # publishing either Git resource. The lock is held until commit/rollback.
+    await session.execute(
+        text(
+            "SELECT pg_advisory_xact_lock("
+            "hashtext('tenant-cluster'), hashtext(:slug))"
+        ),
+        {"slug": req.slug},
+    )
+
     existing = (
         await session.execute(select(TenantCluster).where(TenantCluster.slug == req.slug))
     ).scalar_one_or_none()
@@ -153,24 +170,67 @@ async def admin_create_cluster(
         raise HTTPException(status_code=409, detail="Cluster slug already in use")
 
     git_backend: GitBackend = request.app.state.git_backend
-    project_name = f"{req.slug}.{contract.customer.domain}"
-
-    # Reject names already taken by a CR outside the portal's git repo
-    # (e.g. applied directly through ArgoCD) — a duplicate would fight
-    # over the same OpenStack project.
-    if find_project_cr_by_spec_name(project_name):
+    cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
+    if cluster_git_backend is None:
         raise HTTPException(
-            status_code=409,
-            detail=f"A project named '{project_name}' already exists",
+            status_code=503,
+            detail="Cluster manifest repository is not configured",
+        )
+    project_name = f"{req.slug}.{contract.customer.domain}"
+    if len(project_name) > 64:
+        raise HTTPException(
+            status_code=422,
+            detail="Cluster slug and customer domain exceed the OpenStack project name limit",
         )
 
+    management_resource_name = _sanitize_name(project_name)
+
+    existing_project = await asyncio.to_thread(
+        git_backend.get_project,
+        management_resource_name,
+    )
+    if existing_project:
+        expected = {
+            "name": project_name,
+            "contract_number": contract.contract_number,
+            "managed": True,
+        }
+        if any(existing_project.get(key) != value for key, value in expected.items()):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Project '{management_resource_name}' already exists with other values",
+            )
+    else:
+        # Reject names already taken by a CR outside the portal's project repo.
+        if find_project_cr_by_spec_name(project_name):
+            raise HTTPException(
+                status_code=409,
+                detail=f"A project named '{project_name}' already exists",
+            )
+
+    if not existing_project:
+        try:
+            management_resource_name = await asyncio.to_thread(
+                git_backend.write_project,
+                contract_number=contract.contract_number,
+                project_name=project_name,
+                description=f"SUNET-managed Kubernetes cluster {req.slug}",
+                users=[],
+                managed=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     try:
-        management_resource_name = git_backend.write_project(
+        await asyncio.to_thread(
+            cluster_git_backend.write_cluster,
+            slug=req.slug,
+            display_name=req.name,
             contract_number=contract.contract_number,
+            customer_domain=contract.customer.domain,
+            worker_groups=req.worker_groups,
             project_name=project_name,
-            description=f"SUNET-managed Kubernetes cluster {req.slug}",
-            users=[],
-            managed=True,
+            project_resource_name=management_resource_name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -179,8 +239,8 @@ async def admin_create_cluster(
         contract_id=contract.id,
         name=req.name,
         slug=req.slug,
-        api_url=req.api_url,
-        ca_bundle=req.ca_bundle,
+        api_url=None,
+        ca_bundle=None,
         openbao_mount=f"kubernetes/{req.slug}",
         openbao_role=req.openbao_role,
         argocd_role_name=req.argocd_role_name,
@@ -192,8 +252,17 @@ async def admin_create_cluster(
     )
     cluster.contract = contract
     session.add(cluster)
-    await session.flush()
-    await session.commit()
+    try:
+        await session.flush()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception(
+            "Cluster %s Git state was published but its database commit failed; "
+            "retry creation to adopt the matching manifests",
+            req.slug,
+        )
+        raise
 
     audit_log(
         user["sub"], "cluster.create",
@@ -283,6 +352,11 @@ async def admin_provision_cluster(
         raise HTTPException(status_code=404, detail="Cluster not found")
     if cluster.provisioned_at is not None:
         raise HTTPException(status_code=409, detail="Cluster already provisioned")
+    if not cluster.api_url or not cluster.ca_bundle:
+        raise HTTPException(
+            status_code=409,
+            detail="Cluster API URL and CA bundle must be configured first",
+        )
     from datetime import datetime, timezone
 
     cluster.provisioned_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -307,6 +381,17 @@ async def admin_delete_cluster(
         raise HTTPException(status_code=404, detail="Cluster not found")
 
     git_backend: GitBackend = request.app.state.git_backend
+    cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
+    if cluster_git_backend is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Cluster manifest repository is not configured",
+        )
+    try:
+        await asyncio.to_thread(cluster_git_backend.delete_cluster, cluster.slug)
+    except ValueError:
+        # Clusters created before migration 011 have no desired-state manifest.
+        logger.warning("Cluster manifest %s not in git", cluster.slug)
     for resource in (
         cluster.management_project_resource_name,
         cluster.backup_project_resource_name,
@@ -314,7 +399,7 @@ async def admin_delete_cluster(
         if not resource:
             continue
         try:
-            git_backend.delete_project(resource)
+            await asyncio.to_thread(git_backend.delete_project, resource)
         except ValueError:
             logger.warning("Managed project %s not in git", resource)
 

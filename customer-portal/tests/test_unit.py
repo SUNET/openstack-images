@@ -27,7 +27,6 @@ from app.schemas import (
     _size_label,
 )
 
-
 # --- _size_label ---
 
 
@@ -185,12 +184,12 @@ def test_create_cluster_request_slug_regex() -> None:
     base = dict(
         contract_number="CO-001",
         name="prod",
-        api_url="https://x",
-        ca_bundle="-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n",
-        openbao_mount="kubernetes/tenant-x",
     )
     CreateClusterRequest(slug="acme-prod", **base)
     CreateClusterRequest(slug="a", **base)
+    CreateClusterRequest(slug="a" * 63, **base)
+    with pytest.raises(ValidationError):
+        CreateClusterRequest(slug="a" * 64, **base)
     with pytest.raises(ValidationError):
         CreateClusterRequest(slug="-leading", **base)
     with pytest.raises(ValidationError):
@@ -227,7 +226,7 @@ def test_quota_values_capped_at_int32() -> None:
     """OpenStack quota APIs reject values above signed int32; a larger value
     in the CR wedges the operator's reconcile loop, so the schema must
     refuse it (regression: drive.sunet.se ramMB=4096000000)."""
-    from app.schemas import ComputeQuota, NetworkQuota, StorageQuota, _QUOTA_MAX
+    from app.schemas import _QUOTA_MAX, ComputeQuota, NetworkQuota, StorageQuota
 
     ComputeQuota(ramMB=_QUOTA_MAX)
     with pytest.raises(ValidationError):
@@ -245,10 +244,18 @@ def test_create_cluster_request_worker_groups_min() -> None:
         contract_number="CO-001",
         name="prod",
         slug="acme",
-        api_url="https://x",
-        ca_bundle="-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n",
-        openbao_mount="kubernetes/tenant-x",
     )
     CreateClusterRequest(worker_groups=1, **base)
     with pytest.raises(ValidationError):
         CreateClusterRequest(worker_groups=0, **base)
+
+
+def test_create_cluster_request_rejects_legacy_connection_fields() -> None:
+    with pytest.raises(ValidationError):
+        CreateClusterRequest(
+            contract_number="CO-001",
+            name="prod",
+            slug="acme-one",
+            api_url="https://api.acme-one.example:6443",
+            ca_bundle="test-ca",
+        )

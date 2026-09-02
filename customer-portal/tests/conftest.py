@@ -22,7 +22,10 @@ os.environ.setdefault("OIDC_CLIENT_ID", "portal-test")
 os.environ.setdefault("OIDC_CLIENT_SECRET", "test")
 os.environ.setdefault("OIDC_REDIRECT_URI", "http://localhost/callback")
 os.environ.setdefault("SECRET_KEY", secrets.token_hex(16))
-os.environ.setdefault("GIT_REPO_URL", "/dev/null")
+os.environ.setdefault("PROJECT_GIT_REPO_URL", "/dev/null")
+os.environ.setdefault("PROJECT_GIT_USERNAME", "test")
+os.environ.setdefault("PROJECT_GIT_TOKEN", "test")
+os.environ.setdefault("CLUSTER_DNS_ZONE", "k8s-test.sunetvdc.se")
 os.environ.setdefault("PORTAL_ADMIN_USERS", "admin@test")
 os.environ.setdefault("BASE_URL", "http://localhost")
 os.environ.setdefault(
@@ -66,8 +69,9 @@ def _migrate(portal_db_url: str) -> None:
     the tables it touched in its own teardown. That keeps tests fast and
     decoupled while still proving the migration matches the models.
     """
-    from alembic import command
     from alembic.config import Config
+
+    from alembic import command
 
     cfg = Config(os.path.join(os.path.dirname(__file__), os.pardir, "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", _sync_url(portal_db_url))

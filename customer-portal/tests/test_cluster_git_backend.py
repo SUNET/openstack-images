@@ -1,0 +1,208 @@
+"""Tests for rendering cluster desired-state manifests."""
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import git
+import pytest
+import yaml
+
+from app.cluster_git_backend import ClusterGitBackend
+from app.config import Settings
+from app.git_backend import GitBackend
+from app.git_url import git_auth_environment
+
+
+@pytest.fixture
+def backend(tmp_path: Path, monkeypatch) -> ClusterGitBackend:
+    settings = Settings(
+        project_git_repo_url="/unused",
+        project_git_username="project-bot",
+        project_git_token="project-token",
+        cluster_git_repo_url="/unused",
+        cluster_git_work_dir=str(tmp_path),
+        cluster_dns_zone="k8s-test.sunetvdc.se",
+    )
+    instance = ClusterGitBackend(settings)
+    instance.clusters_dir.mkdir()
+    monkeypatch.setattr(instance, "_pull", lambda: None)
+    monkeypatch.setattr(instance, "_commit_and_push", lambda _message: None)
+    return instance
+
+
+def test_write_cluster_renders_environment_specific_manifest(
+    backend: ClusterGitBackend,
+) -> None:
+    path = backend.write_cluster(
+        slug="umu-one",
+        display_name="UMU cluster one",
+        contract_number="CO-001",
+        customer_domain="umu.se",
+        worker_groups=2,
+        project_name="umu-one.umu.se",
+        project_resource_name="umu-one-umu-se",
+    )
+
+    assert path == "clusters/umu-one/cluster.yaml"
+    document = yaml.safe_load((backend.work_dir / path).read_text())
+    assert document["metadata"]["name"] == "umu-one"
+    assert document["spec"]["workerGroups"] == 2
+    assert document["spec"]["openstack"] == {
+        "projectName": "umu-one.umu.se",
+        "projectResourceName": "umu-one-umu-se",
+    }
+    assert document["spec"]["dns"] == {
+        "zone": "k8s-test.sunetvdc.se",
+        "apiHostname": "api.umu-one.k8s-test.sunetvdc.se",
+        "argocdHostname": "argocd.umu-one.k8s-test.sunetvdc.se",
+    }
+    assert document["spec"]["openbao"] == {
+        "mount": "kubernetes/umu-one",
+        "secretRoot": "kv/customer-clusters/umu-one",
+    }
+
+
+def test_write_cluster_rejects_existing_manifest(
+    backend: ClusterGitBackend,
+) -> None:
+    values = {
+        "slug": "umu-one",
+        "display_name": "UMU cluster one",
+        "contract_number": "CO-001",
+        "customer_domain": "umu.se",
+        "worker_groups": 1,
+        "project_name": "umu-one.umu.se",
+        "project_resource_name": "umu-one-umu-se",
+    }
+    backend.write_cluster(**values)
+
+    assert backend.write_cluster(**values) == "clusters/umu-one/cluster.yaml"
+
+    values["worker_groups"] = 2
+    with pytest.raises(ValueError, match="already exists"):
+        backend.write_cluster(**values)
+
+
+def test_delete_cluster_removes_manifest_directory(
+    backend: ClusterGitBackend,
+) -> None:
+    backend.write_cluster(
+        slug="umu-one",
+        display_name="UMU cluster one",
+        contract_number="CO-001",
+        customer_domain="umu.se",
+        worker_groups=1,
+        project_name="umu-one.umu.se",
+        project_resource_name="umu-one-umu-se",
+    )
+
+    backend.delete_cluster("umu-one")
+
+    assert not (backend.clusters_dir / "umu-one").exists()
+
+
+def test_rejected_push_raises_git_error(backend: ClusterGitBackend) -> None:
+    result = MagicMock()
+    result.flags = git.remote.PushInfo.REJECTED
+    result.summary = "non-fast-forward"
+    repo = MagicMock()
+    repo.remotes.origin.push.return_value = [result]
+    backend.repo = repo
+
+    with pytest.raises(git.GitCommandError, match="non-fast-forward"):
+        ClusterGitBackend._commit_and_push(backend, "test", max_retries=1)
+
+
+def test_failed_write_restores_disposable_clone(
+    backend: ClusterGitBackend,
+    monkeypatch,
+) -> None:
+    restored = []
+    monkeypatch.setattr(
+        backend,
+        "_commit_and_push",
+        lambda _message: (_ for _ in ()).throw(RuntimeError("push failed")),
+    )
+    monkeypatch.setattr(backend, "_restore_origin", lambda: restored.append(True))
+
+    with pytest.raises(RuntimeError, match="push failed"):
+        backend.write_cluster(
+            slug="umu-one",
+            display_name="UMU cluster one",
+            contract_number="CO-001",
+            customer_domain="umu.se",
+            worker_groups=1,
+            project_name="umu-one.umu.se",
+            project_resource_name="umu-one-umu-se",
+        )
+
+    assert restored == [True]
+
+
+def test_git_auth_environment_uses_independent_credentials() -> None:
+    environment = git_auth_environment(
+        "https://clusters.example.org/SUNET/customer-clusters-test.git",
+        "cluster bot",
+        "cluster/token",
+    )
+    assert environment["GIT_CONFIG_KEY_0"] == (
+        "http.https://clusters.example.org/.extraHeader"
+    )
+    assert environment["GIT_CONFIG_VALUE_0"] == (
+        "Authorization: Basic Y2x1c3RlciBib3Q6Y2x1c3Rlci90b2tlbg=="
+    )
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_git_auth_environment_rejects_embedded_credentials() -> None:
+    with pytest.raises(RuntimeError, match="must not contain credentials"):
+        git_auth_environment(
+            "https://old-token@platform.sunet.se/SUNET/customer-projects.git",
+            "project-bot",
+            "project-token",
+        )
+
+
+@pytest.mark.parametrize(
+    ("backend_type", "url_field", "work_dir_field", "repo_url"),
+    [
+        (
+            GitBackend,
+            "project_git_repo_url",
+            "project_git_work_dir",
+            "https://git.example.org/projects.git",
+        ),
+        (
+            ClusterGitBackend,
+            "cluster_git_repo_url",
+            "cluster_git_work_dir",
+            "https://git.example.org/clusters.git",
+        ),
+    ],
+)
+def test_existing_checkout_origin_is_replaced(
+    tmp_path: Path,
+    monkeypatch,
+    backend_type,
+    url_field: str,
+    work_dir_field: str,
+    repo_url: str,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    repo = MagicMock()
+    monkeypatch.setattr(git, "Repo", MagicMock(return_value=repo))
+    settings_values = {
+        "project_git_repo_url": "https://git.example.org/projects.git",
+        "project_git_username": "project-bot",
+        "project_git_token": "project-token",
+        "cluster_git_repo_url": "https://git.example.org/clusters.git",
+        "cluster_git_username": "cluster-bot",
+        "cluster_git_token": "cluster-token",
+        url_field: repo_url,
+        work_dir_field: str(tmp_path),
+    }
+    settings = Settings(**settings_values)
+
+    backend_type(settings).init()
+
+    repo.remotes.origin.set_url.assert_called_once_with(repo_url)

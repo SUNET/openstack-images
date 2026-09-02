@@ -9,6 +9,7 @@ import git
 import yaml
 
 from app.config import Settings
+from app.git_url import git_auth_environment
 from app.schemas import QuotaSpec
 
 logger = logging.getLogger(__name__)
@@ -49,55 +50,113 @@ class GitBackend:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.work_dir = Path(settings.git_work_dir)
+        self.work_dir = Path(settings.project_git_work_dir)
         self.projects_dir = self.work_dir / "projects"
         self.repo: git.Repo | None = None
         self._lock = threading.Lock()
+        self._auth_env = git_auth_environment(
+            settings.project_git_repo_url,
+            settings.project_git_username,
+            settings.project_git_token,
+        )
 
     def init(self) -> None:
         """Clone or pull the repository."""
         if (self.work_dir / ".git").exists():
             self.repo = git.Repo(self.work_dir)
-            self.repo.remotes.origin.pull(self.settings.git_branch)
-            logger.info("Pulled latest changes from %s", self.settings.git_repo_url)
+            self.repo.remotes.origin.set_url(self.settings.project_git_repo_url)
+            with self.repo.git.custom_environment(**self._auth_env):
+                self.repo.remotes.origin.pull(self.settings.project_git_branch)
+            logger.info(
+                "Pulled latest changes from %s",
+                self.settings.project_git_repo_url,
+            )
         else:
             self.repo = git.Repo.clone_from(
-                self.settings.git_repo_url,
+                self.settings.project_git_repo_url,
                 self.work_dir,
-                branch=self.settings.git_branch,
+                branch=self.settings.project_git_branch,
+                env=self._auth_env,
             )
-            logger.info("Cloned %s to %s", self.settings.git_repo_url, self.work_dir)
+            logger.info(
+                "Cloned %s to %s",
+                self.settings.project_git_repo_url,
+                self.work_dir,
+            )
 
         self.projects_dir.mkdir(exist_ok=True)
 
     def _pull(self) -> None:
         """Pull latest changes before writing."""
         if self.repo:
-            self.repo.remotes.origin.pull(self.settings.git_branch)
+            with self.repo.git.custom_environment(**self._auth_env):
+                self.repo.remotes.origin.pull(self.settings.project_git_branch)
 
     def _commit_and_push(self, message: str, max_retries: int = 3) -> None:
         """Stage all changes, commit, and push with retry on conflict."""
         if self.repo is None:
             raise RuntimeError("Git repo not initialized")
 
-        self.repo.git.add("-A")
-        self.repo.index.commit(
-            message,
-            author=git.Actor(self.settings.git_author_name, self.settings.git_author_email),
-            committer=git.Actor(self.settings.git_author_name, self.settings.git_author_email),
-        )
+        try:
+            self.repo.git.add("-A")
+            self.repo.index.commit(
+                message,
+                author=git.Actor(
+                    self.settings.git_author_name,
+                    self.settings.git_author_email,
+                ),
+                committer=git.Actor(
+                    self.settings.git_author_name,
+                    self.settings.git_author_email,
+                ),
+            )
 
-        for attempt in range(max_retries):
+            for attempt in range(max_retries):
+                try:
+                    with self.repo.git.custom_environment(**self._auth_env):
+                        results = self.repo.remotes.origin.push(
+                            self.settings.project_git_branch
+                        )
+                    failure_flags = (
+                        git.remote.PushInfo.ERROR
+                        | git.remote.PushInfo.REJECTED
+                        | git.remote.PushInfo.REMOTE_REJECTED
+                        | git.remote.PushInfo.REMOTE_FAILURE
+                    )
+                    failures = [
+                        result for result in results if result.flags & failure_flags
+                    ]
+                    if failures:
+                        summaries = "; ".join(
+                            result.summary for result in failures
+                        )
+                        raise git.GitCommandError("push", 1, stderr=summaries)
+                    logger.info("Pushed: %s", message)
+                    return
+                except git.GitCommandError:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(
+                        "Push failed (attempt %d), rebasing and retrying",
+                        attempt + 1,
+                    )
+                    with self.repo.git.custom_environment(**self._auth_env):
+                        self.repo.git.pull(
+                            "--rebase",
+                            "origin",
+                            self.settings.project_git_branch,
+                        )
+        except Exception:
             try:
-                self.repo.remotes.origin.push(self.settings.git_branch)
-                logger.info("Pushed: %s", message)
-                return
+                self.repo.git.rebase("--abort")
             except git.GitCommandError:
-                if attempt < max_retries - 1:
-                    logger.warning("Push failed (attempt %d), rebasing and retrying", attempt + 1)
-                    self.repo.git.pull("--rebase", "origin", self.settings.git_branch)
-                else:
-                    raise
+                pass
+            self.repo.git.reset(
+                "--hard",
+                f"origin/{self.settings.project_git_branch}",
+            )
+            self.repo.git.clean("-fd")
+            raise
 
     def _update_kustomization(self) -> None:
         """Update kustomization.yaml to list all project files."""

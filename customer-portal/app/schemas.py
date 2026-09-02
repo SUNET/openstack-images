@@ -404,11 +404,11 @@ def _size_label(worker_groups: int) -> str:
 
 
 class CreateClusterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     contract_number: str = Field(min_length=1, max_length=100)
     name: str = Field(min_length=1, max_length=255)
-    slug: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-    api_url: str = Field(min_length=1, max_length=512)
-    ca_bundle: str = Field(min_length=1)
+    slug: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     # openbao_mount is implicit: f"kubernetes/{slug}" — set server-side.
     openbao_role: str = Field(default="argocd-rbac-manager", max_length=255)
     argocd_role_name: str = Field(default="argocd-tenant", max_length=255)
@@ -431,7 +431,7 @@ class ClusterResponse(BaseModel):
     contract_number: str
     name: str
     slug: str
-    api_url: str
+    api_url: str | None
     worker_groups: int
     initial_worker_groups: int
     size_label: str
@@ -443,6 +443,11 @@ class ClusterResponse(BaseModel):
     created_at: datetime
     caller_role: str | None = None  # 'sunet_admin' | 'customer_admin' | 'user' | None
     active_addons: list[str] = []
+    manifest_path: str
+    api_hostname: str
+    argocd_hostname: str
+    openbao_secret_root: str
+    connection_configured: bool
 
 
 class ClusterAccessRequest(BaseModel):

@@ -196,8 +196,8 @@ class TenantCluster(Base):
     contract_id: Mapped[int] = mapped_column(ForeignKey("contract.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    api_url: Mapped[str] = mapped_column(String(512), nullable=False)
-    ca_bundle: Mapped[str] = mapped_column(Text, nullable=False)
+    api_url: Mapped[str | None] = mapped_column(String(512))
+    ca_bundle: Mapped[str | None] = mapped_column(Text)
     openbao_mount: Mapped[str] = mapped_column(String(255), nullable=False)
     openbao_role: Mapped[str] = mapped_column(
         String(255), nullable=False, default="argocd-rbac-manager"

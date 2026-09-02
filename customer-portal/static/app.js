@@ -2491,8 +2491,8 @@ async function renderAdminCreateCluster() {
     ));
     app.appendChild(phead({
         eyebrow: "Operator",
-        title: "Register tenant cluster",
-        lead: "After kubespray finishes, register the cluster here so the portal can mediate kubeconfig issuance and billing.",
+        title: "Plan tenant cluster",
+        lead: "Create the managed OpenStack project and write the initial cluster manifest before provisioning starts.",
     }));
 
     let contracts = [];
@@ -2536,25 +2536,11 @@ async function renderAdminCreateCluster() {
             }),
         ),
         h("label", { style: labelCss }, "Display name"),
-        h("input", { name: "name", required: true, placeholder: "Acme production cluster", style: inputCss }),
+        h("input", { name: "name", required: true, placeholder: "Acme cluster one", style: inputCss }),
         h("label", { style: labelCss }, "Slug (used in OpenBao mount path & cert O)"),
-        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "64", placeholder: "acme-prod", style: inputCss }),
-        h("label", { style: labelCss }, "API URL"),
-        h("input", { name: "api_url", required: true, placeholder: "https://k8s.acme.example.org:6443", style: inputCss }),
-        h("label", { style: labelCss }, "CA bundle (PEM)"),
-        h("div", { className: "meta", style: "margin-top:-2px" },
-            "On a control-plane node: ", h("code", {}, "cat /etc/kubernetes/pki/ca.crt"),
-            ". Or from an admin kubeconfig: ", h("code", {}, "kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d"), "."),
-        h("textarea", { name: "ca_bundle", required: true, placeholder: "-----BEGIN CERTIFICATE-----\n...",
-            style: inputCss + ";min-height:130px;font-family:var(--mono);font-size:12px" }),
+        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one", style: inputCss }),
         h("div", { className: "meta", style: "margin-top:6px" },
-            "OpenBao mount will be derived as ", h("code", {}, "kubernetes/<slug>"), "."),
-        h("label", { style: labelCss }, "OpenBao role"),
-        h("input", { name: "openbao_role", value: "argocd-rbac-manager", style: inputCss }),
-        h("label", { style: labelCss }, "ArgoCD Role name (in argocd ns)"),
-        h("input", { name: "argocd_role_name", value: "argocd-tenant", style: inputCss }),
-        h("label", { style: labelCss }, "ArgoCD namespace"),
-        h("input", { name: "argocd_namespace", value: "argocd", style: inputCss }),
+            "Use the customer key and sequence, for example ", h("code", {}, "umu-one"), ". OpenBao and DNS names are derived automatically."),
         h("label", { style: labelCss }, "Worker groups (3 workers per group)"),
         h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: true, style: inputCss }),
         h("div", { className: "btn-row" },
@@ -2579,7 +2565,7 @@ async function renderAdminClusterDetail(slug) {
             title: c.name,
             lead: c.provisioned_at ? "Provisioned and live." : "Not yet provisioned.",
             actions: [
-                !c.provisioned_at ? h("button", { className: "btn primary sm",
+                !c.provisioned_at && c.connection_configured ? h("button", { className: "btn primary sm",
                     onclick: async () => {
                         if (!confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) return;
                         try {
@@ -2603,12 +2589,42 @@ async function renderAdminClusterDetail(slug) {
         app.appendChild(kv(
             kvRowMono("Slug", c.slug),
             kvRow("Size", `${c.size_label} (${c.total_servers} servers)`),
-            kvRowMono("API", c.api_url),
+            kvRowMono("API", c.api_url || "(not configured)"),
+            kvRowMono("Planned API DNS", c.api_hostname),
+            kvRowMono("Planned ArgoCD DNS", c.argocd_hostname),
+            kvRowMono("OpenBao secrets", c.openbao_secret_root),
+            kvRowMono("Cluster manifest", c.manifest_path),
             kvRow("Contract", c.contract_number),
             kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
             kvRow("Management project", c.management_project_resource_name || "—"),
             kvRow("Backup project", c.backup_project_resource_name || "—"),
         ));
+
+        if (!c.provisioned_at) {
+            const inputCss = "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)";
+            const labelCss = "display:block;margin-top:14px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px";
+            app.appendChild(h("div", { className: "slbl" }, "Kubernetes connection"));
+            app.appendChild(h("form", { className: "card",
+                onsubmit: async (e) => {
+                    e.preventDefault();
+                    const data = Object.fromEntries(new FormData(e.target).entries());
+                    try {
+                        await api(`/api/admin/clusters/${slug}`, {
+                            method: "PATCH", body: JSON.stringify(data),
+                        });
+                        renderAdminClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }},
+                h("p", { className: "hint" }, "Complete these values after Kubespray has created the cluster. Both are required before it can be marked provisioned."),
+                h("label", { style: labelCss }, "API URL"),
+                h("input", { name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443`, style: inputCss }),
+                h("label", { style: labelCss }, "CA bundle (PEM)"),
+                h("textarea", { name: "ca_bundle", required: true, placeholder: "-----BEGIN CERTIFICATE-----\n...", style: inputCss + ";min-height:130px;font-family:var(--mono);font-size:12px" }),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Save connection details"),
+                ),
+            ));
+        }
     } catch (e) { showAlert(e.message); }
 }
 
@@ -2743,14 +2759,20 @@ function renderClusterSetupHelp() {
     app.appendChild(sect("Per-cluster bootstrap"));
     app.appendChild(h("p", { className: "hint" },
         "Run these every time you onboard a new tenant cluster. ",
-        h("code", {}, "<slug>"), " must match the slug entered in the Register Tenant Cluster form."));
+        h("code", {}, "<slug>"), " must match the slug entered in the Plan Tenant Cluster form."));
 
-    app.appendChild(sub("1. Provision the cluster"));
+    app.appendChild(sub("1. Plan the cluster in the portal"));
     app.appendChild(h("p", {},
-        "Spin up the K8s cluster with kubespray and install ArgoCD into the ",
-        h("code", {}, "argocd"), " namespace as usual. This guide picks up after that."));
+        "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
+        ". This creates the managed OpenStack project and writes ",
+        h("code", {}, "clusters/<slug>/cluster.yaml"), " to the customer-clusters repository."));
 
-    app.appendChild(sub("2. Apply RBAC inside the tenant cluster"));
+    app.appendChild(sub("2. Provision the cluster"));
+    app.appendChild(h("p", {},
+        "Use the generated cluster manifest to provision the OpenStack servers, run kubespray, and install ArgoCD into the ",
+        h("code", {}, "argocd"), " namespace. The remaining steps connect that cluster to the portal."));
+
+    app.appendChild(sub("3. Apply RBAC inside the tenant cluster"));
     app.appendChild(h("p", {},
         "Creates the Role customer kubeconfigs are bound to (",
         h("code", {}, "argocd-tenant"), " in the ",
@@ -2836,7 +2858,7 @@ function renderClusterSetupHelp() {
         "kubectl --context <tenant-cluster> apply -f /tmp/tenant-bootstrap.yaml"
     ));
 
-    app.appendChild(sub("3. Configure OpenBao secrets engine for the cluster"));
+    app.appendChild(sub("4. Configure OpenBao secrets engine for the cluster"));
     app.appendChild(codeBlock(
         "JWT=$(kubectl --context <tenant-cluster> -n kube-system get secret openbao-rbac-manager-token \\\n" +
         "        -o jsonpath='{.data.token}' | base64 -d)\n" +
@@ -2861,17 +2883,16 @@ function renderClusterSetupHelp() {
         ") because that's where ", h("code", {}, "openbao-rbac-manager"),
         " lives. TTL 600s is the K8s TokenRequest minimum; the portal uses the token only briefly per issuance."));
 
-    app.appendChild(sub("4. Register the cluster in the portal"));
+    app.appendChild(sub("5. Save the cluster connection details"));
     app.appendChild(h("p", {},
-        "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
-        ". Slug must match ", h("code", {}, "<slug>"), " from step 3."));
+        "Open the planned cluster's admin page and save the canonical Kubernetes API URL and CA bundle extracted above."));
 
-    app.appendChild(sub("5. Mark the cluster provisioned"));
+    app.appendChild(sub("6. Mark the cluster provisioned"));
     app.appendChild(h("p", {},
         "Click ", h("strong", {}, "Mark provisioned"), " on the cluster's admin detail page. Sets ",
         h("code", {}, "provisioned_at"), " and unlocks credential issuance for users + initial setup-fee billing."));
 
-    app.appendChild(sub("6. Grant the first customer admin"));
+    app.appendChild(sub("7. Grant the first customer admin"));
     app.appendChild(h("p", {},
         "Open the cluster's user-facing detail page, click ",
         h("strong", {}, "Manage users"),

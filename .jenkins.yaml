@@ -56,7 +56,7 @@ extra_jobs:
     docker_context_dir: customer-portal
     docker_no_cache: true
     docker_tags:
-      - "0.1.10"
+      - "0.1.11"
       - "latest"
 
   # Libvirt with QEMU SPICE support
