@@ -49,6 +49,25 @@ def _require_owned(resource: Any, uid: str, kind: str) -> Any:
     return resource
 
 
+def _server_uses_flavor(server: Any, flavor: Any) -> bool:
+    """Match Nova server flavor responses with or without a flavor UUID."""
+    embedded = getattr(server, "flavor", None) or {}
+    flavor_id = getattr(server, "flavor_id", None)
+    if flavor_id:
+        return flavor_id == flavor.id
+    original_name = (
+        embedded.get("original_name")
+        if isinstance(embedded, dict)
+        else getattr(embedded, "original_name", None)
+    )
+    if original_name:
+        return original_name == flavor.name
+    embedded_id = (
+        embedded.get("id") if isinstance(embedded, dict) else getattr(embedded, "id", None)
+    )
+    return bool(embedded_id) and embedded_id == flavor.id
+
+
 def read_public_keys(path: Path) -> list[str]:
     try:
         lines = path.read_text().splitlines()
@@ -435,8 +454,6 @@ class Provisioner:
     ) -> Any:
         server = self.conn.compute.get_server(server.id)
         _require_owned(server, self.uid, "server")
-        server_flavor = getattr(server, "flavor", None) or {}
-        flavor_id = getattr(server, "flavor_id", None) or server_flavor.get("id")
         attached = {
             item.get("id") if isinstance(item, dict) else item.id
             for item in (getattr(server, "attached_volumes", None) or [])
@@ -448,7 +465,7 @@ class Provisioner:
         metadata = getattr(server, "metadata", None) or {}
         current_port = self.conn.network.get_port(port.id)
         _require_owned(current_port, self.uid, "node port")
-        if flavor_id != flavor.id:
+        if not _server_uses_flavor(server, flavor):
             raise OwnershipError(f"owned server {server.name} has a different flavor")
         if metadata.get("customer_cluster_role") != role:
             raise OwnershipError(f"owned server {server.name} has a different role")

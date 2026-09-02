@@ -13,6 +13,7 @@ from customer_cluster_operator.errors import OwnershipError, ValidationError
 from customer_cluster_operator.openstack import (
     Provisioner,
     _exact,
+    _server_uses_flavor,
     read_public_keys,
     scoped_connection,
     stable_name,
@@ -33,6 +34,21 @@ def test_exact_fails_closed_on_duplicates():
     resources = [SimpleNamespace(name="same"), SimpleNamespace(name="same")]
     with pytest.raises(OwnershipError, match="multiple"):
         _exact(resources, "same", "network")
+
+
+@pytest.mark.parametrize(
+    ("server", "expected"),
+    [
+        (SimpleNamespace(flavor_id="flavor-id", flavor=None), True),
+        (Server(flavor={"original_name": "b2.c1r2"}), True),
+        (SimpleNamespace(flavor_id=None, flavor={"id": "flavor-id"}), True),
+        (Server(flavor={"original_name": "different"}), False),
+        (Server(flavor={}), False),
+    ],
+)
+def test_server_flavor_matches_nova_response_formats(server, expected):
+    flavor = SimpleNamespace(id="flavor-id", name="b2.c1r2")
+    assert _server_uses_flavor(server, flavor) is expected
 
 
 def test_public_keys_reject_private_material(tmp_path):
