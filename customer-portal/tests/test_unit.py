@@ -9,8 +9,14 @@ import pytest
 import yaml
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
+from fastapi import HTTPException
 from pydantic import ValidationError
 
+from app.cluster_quotas import managed_cluster_quotas
+from app.git_backend import (
+    MANAGED_CONTRACT_RENAME_DETAIL,
+    MANAGED_PROJECT_READ_ONLY_DETAIL,
+)
 from app.kubeconfig_service import (
     _build_csr,
     _build_kubeconfig,
@@ -19,6 +25,10 @@ from app.kubeconfig_service import (
     oidc_sub_label_hash,
 )
 from app.models import KubeconfigIssuance
+from app.routers.projects import (
+    _require_contract_renamable,
+    _require_project_mutable,
+)
 from app.schemas import (
     AddonRequestPayload,
     BackupRequestPayload,
@@ -65,9 +75,7 @@ def test_build_csr_round_trips() -> None:
     assert cn == "oidc:abc"
     assert org == "org-X"
     # Public-key match between CSR and the generated key.
-    assert (
-        csr.public_key().public_numbers() == key.public_key().public_numbers()
-    )
+    assert csr.public_key().public_numbers() == key.public_key().public_numbers()
 
 
 def test_build_kubeconfig_shape() -> None:
@@ -150,9 +158,7 @@ def test_issuance_status_expired() -> None:
 
 def test_issuance_status_revoked_takes_precedence() -> None:
     # Revoked + expired → still 'revoked' (not expired).
-    assert (
-        issuance_status(_issuance(expires_in_days=-1, revoked=True)) == "revoked"
-    )
+    assert issuance_status(_issuance(expires_in_days=-1, revoked=True)) == "revoked"
 
 
 # --- Schema payload validation ---
@@ -248,6 +254,39 @@ def test_create_cluster_request_worker_groups_min() -> None:
     CreateClusterRequest(worker_groups=1, **base)
     with pytest.raises(ValidationError):
         CreateClusterRequest(worker_groups=0, **base)
+    CreateClusterRequest(worker_groups=80, **base)
+    with pytest.raises(ValidationError):
+        CreateClusterRequest(worker_groups=81, **base)
+
+
+def test_resize_request_worker_groups_max() -> None:
+    ResizeRequestPayload(target_worker_groups=80)
+    with pytest.raises(ValidationError):
+        ResizeRequestPayload(target_worker_groups=81)
+
+
+def test_managed_project_is_read_only_in_generic_api() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _require_project_mutable({"managed": True})
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == MANAGED_PROJECT_READ_ONLY_DETAIL
+
+
+def test_unmanaged_project_is_mutable_in_generic_api() -> None:
+    _require_project_mutable({"managed": False})
+
+
+def test_contract_with_managed_project_is_read_only_for_rename() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _require_contract_renamable([{"managed": False}, {"managed": True}])
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == MANAGED_CONTRACT_RENAME_DETAIL
+
+
+def test_contract_with_unmanaged_projects_is_renamable() -> None:
+    _require_contract_renamable([{"managed": False}, {}])
 
 
 def test_create_cluster_request_rejects_legacy_connection_fields() -> None:
@@ -259,3 +298,36 @@ def test_create_cluster_request_rejects_legacy_connection_fields() -> None:
             api_url="https://api.acme-one.example:6443",
             ca_bundle="test-ca",
         )
+
+
+@pytest.mark.parametrize(
+    ("worker_groups", "expected"),
+    [
+        (1, (7, 19, 62 * 1024, 7, 620)),
+        (2, (10, 31, 110 * 1024, 10, 920)),
+        (3, (13, 43, 158 * 1024, 13, 1220)),
+    ],
+)
+def test_managed_cluster_quotas(worker_groups: int, expected: tuple[int, ...]) -> None:
+    quotas = managed_cluster_quotas(worker_groups)
+
+    assert (
+        quotas["compute"]["instances"],
+        quotas["compute"]["cores"],
+        quotas["compute"]["ramMB"],
+        quotas["storage"]["volumes"],
+        quotas["storage"]["volumesGB"],
+    ) == expected
+    assert quotas["storage"]["snapshots"] == 10
+    assert quotas["network"]["floatingIps"] >= 3
+    assert quotas["network"]["networks"] >= 1
+    assert quotas["network"]["subnets"] >= 1
+    assert quotas["network"]["routers"] >= 1
+    assert quotas["network"]["ports"] >= 2 * quotas["compute"]["instances"]
+    assert quotas["network"]["securityGroups"] == 10
+    assert quotas["network"]["securityGroupRules"] == 100
+
+
+def test_managed_cluster_quotas_rejects_invalid_worker_groups() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        managed_cluster_quotas(0)

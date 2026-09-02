@@ -11,12 +11,37 @@ import yaml
 from app.config import Settings
 from app.git_url import git_auth_environment
 from app.schemas import QuotaSpec
+from app.yaml_utils import dump_yaml
 
 logger = logging.getLogger(__name__)
 
 # Default quotas for self-service projects. Derived from QuotaSpec so the
 # CR defaults, the API validation bounds and the UI pre-fill never drift.
 DEFAULT_QUOTAS = QuotaSpec().model_dump()
+MANAGED_PROJECT_READ_ONLY_DETAIL = (
+    "This SUNET-managed project is read-only; changes, moves, or deletion require "
+    "the cluster workflow or coordinated decommissioning with SUNET"
+)
+MANAGED_CONTRACT_RENAME_DETAIL = (
+    "This contract contains a SUNET-managed project and is read-only for renaming; "
+    "coordinate decommissioning with SUNET before changing its contract number"
+)
+
+
+class ManagedProjectMutationError(ValueError):
+    """Raised when a generic mutation targets managed project state."""
+
+
+def require_project_mutable(project: dict) -> None:
+    """Reject mutation of a managed project."""
+    if project.get("managed"):
+        raise ManagedProjectMutationError(MANAGED_PROJECT_READ_ONLY_DETAIL)
+
+
+def require_contract_renamable(projects: list[dict]) -> None:
+    """Reject contract rename when any linked project is managed."""
+    if any(project.get("managed") for project in projects):
+        raise ManagedProjectMutationError(MANAGED_CONTRACT_RENAME_DETAIL)
 
 
 def _sanitize_name(name: str) -> str:
@@ -26,13 +51,32 @@ def _sanitize_name(name: str) -> str:
     return sanitized[:63]
 
 
+def managed_role_bindings(settings: Settings, users: list[str]) -> list[dict]:
+    """Build the customer-reader and cluster-provisioner binding contract."""
+    return [
+        {
+            "role": "reader",
+            "users": users,
+            "userDomain": settings.default_domain,
+        },
+        {
+            "role": "member",
+            "users": [settings.cluster_provisioner_user],
+            "userDomain": settings.cluster_provisioner_user_domain,
+        },
+    ]
+
+
 def _parse_project(doc: dict) -> dict:
     """Extract project info from a parsed YAML document."""
     spec = doc.get("spec", {})
     resource_name = doc.get("metadata", {}).get("name", "")
     role_bindings = spec.get("roleBindings", [])
+    managed = bool(spec.get("managed", False))
     users = []
     for rb in role_bindings:
+        if managed and rb.get("role") != "reader":
+            continue
         users.extend(rb.get("users", []))
     return {
         "resource_name": resource_name,
@@ -41,7 +85,7 @@ def _parse_project(doc: dict) -> dict:
         "contract_number": spec.get("contractNumber", ""),
         "users": users,
         "quotas": spec.get("quotas") or DEFAULT_QUOTAS,
-        "managed": bool(spec.get("managed", False)),
+        "managed": managed,
     }
 
 
@@ -114,22 +158,16 @@ class GitBackend:
             for attempt in range(max_retries):
                 try:
                     with self.repo.git.custom_environment(**self._auth_env):
-                        results = self.repo.remotes.origin.push(
-                            self.settings.project_git_branch
-                        )
+                        results = self.repo.remotes.origin.push(self.settings.project_git_branch)
                     failure_flags = (
                         git.remote.PushInfo.ERROR
                         | git.remote.PushInfo.REJECTED
                         | git.remote.PushInfo.REMOTE_REJECTED
                         | git.remote.PushInfo.REMOTE_FAILURE
                     )
-                    failures = [
-                        result for result in results if result.flags & failure_flags
-                    ]
+                    failures = [result for result in results if result.flags & failure_flags]
                     if failures:
-                        summaries = "; ".join(
-                            result.summary for result in failures
-                        )
+                        summaries = "; ".join(result.summary for result in failures)
                         raise git.GitCommandError("push", 1, stderr=summaries)
                     logger.info("Pushed: %s", message)
                     return
@@ -161,9 +199,7 @@ class GitBackend:
     def _update_kustomization(self) -> None:
         """Update kustomization.yaml to list all project files."""
         kustomization_path = self.work_dir / "kustomization.yaml"
-        project_files = sorted(
-            f"projects/{p.name}" for p in self.projects_dir.glob("*.yaml")
-        )
+        project_files = sorted(f"projects/{p.name}" for p in self.projects_dir.glob("*.yaml"))
 
         kustomization = {
             "apiVersion": "kustomize.config.k8s.io/v1beta1",
@@ -172,7 +208,7 @@ class GitBackend:
         }
 
         with open(kustomization_path, "w") as f:
-            yaml.dump(kustomization, f, default_flow_style=False, allow_unicode=True)
+            f.write(dump_yaml(kustomization))
 
     def _render_project_cr(
         self,
@@ -187,6 +223,16 @@ class GitBackend:
         """Render an OpenstackProject CR as a dict."""
         resource_name = _sanitize_name(project_name)
 
+        role_bindings = [
+            {
+                "role": "member",
+                "users": users,
+                "userDomain": self.settings.default_domain,
+            }
+        ]
+        if managed:
+            role_bindings = managed_role_bindings(self.settings, users)
+
         spec: dict = {
             "name": project_name,
             "domain": self.settings.default_domain,
@@ -194,13 +240,7 @@ class GitBackend:
             "enabled": True,
             "contractNumber": contract_number,
             "quotas": quotas if quotas is not None else DEFAULT_QUOTAS,
-            "roleBindings": [
-                {
-                    "role": "member",
-                    "users": users,
-                    "userDomain": self.settings.default_domain,
-                }
-            ],
+            "roleBindings": role_bindings,
             "federationRef": {
                 "configMapName": self.settings.federation_config_map,
                 "configMapNamespace": self.settings.federation_config_namespace,
@@ -231,7 +271,7 @@ class GitBackend:
         """Write a YAML document to a file."""
         with open(file_path, "w") as f:
             f.write("---\n")
-            yaml.dump(doc, f, default_flow_style=False, allow_unicode=True)
+            f.write(dump_yaml(doc))
 
     # --- Public API ---
 
@@ -291,8 +331,12 @@ class GitBackend:
                 raise ValueError(f"Project '{resource_name}' already exists")
 
             cr = self._render_project_cr(
-                contract_number, project_name, description, users,
-                managed=managed, quotas=quotas,
+                contract_number,
+                project_name,
+                description,
+                users,
+                managed=managed,
+                quotas=quotas,
             )
             self._write_yaml(file_path, cr)
             self._update_kustomization()
@@ -312,8 +356,9 @@ class GitBackend:
     ) -> dict:
         """Update an existing project YAML, commit, and push.
 
-        - `users` keeps backward compatibility: replaces roleBindings with a
-          single `member` binding for those users (the self-service shape).
+        - `users` replaces customer role bindings. Managed projects retain the
+          provisioner `member` binding and assign customers `reader`; other
+          projects use the self-service `member` shape.
         - `role_bindings` (kwarg) takes a fully-formed list and replaces the
           existing roleBindings verbatim — used by the cluster admin sync
           path to set `{role: reader, users: [...customer admins...]}` on
@@ -344,13 +389,16 @@ class GitBackend:
                 spec["roleBindings"] = role_bindings
                 changed.append("roleBindings")
             elif users is not None:
-                spec["roleBindings"] = [
-                    {
-                        "role": "member",
-                        "users": users,
-                        "userDomain": self.settings.default_domain,
-                    }
-                ]
+                if spec.get("managed", False):
+                    spec["roleBindings"] = managed_role_bindings(self.settings, users)
+                else:
+                    spec["roleBindings"] = [
+                        {
+                            "role": "member",
+                            "users": users,
+                            "userDomain": self.settings.default_domain,
+                        }
+                    ]
                 changed.append("users")
 
             self._write_yaml(file_path, doc)
@@ -363,6 +411,7 @@ class GitBackend:
     def move_project(self, resource_name: str, new_contract_number: str) -> dict:
         """Reassign a project to a different contract, commit, and push.
 
+        Managed projects are read-only and cannot be moved through this path.
         Only `spec.contractNumber` changes — the CR name (and thus the
         OpenStack project identity the operator keys on) is untouched, so the
         move is non-destructive. Returns the updated project dict.
@@ -376,6 +425,7 @@ class GitBackend:
 
             file_path, doc = result
             spec = doc["spec"]
+            require_project_mutable(_parse_project(doc))
             old_contract = spec.get("contractNumber", "")
             spec["contractNumber"] = new_contract_number
 
@@ -390,15 +440,16 @@ class GitBackend:
     def rename_contract(self, old_contract_number: str, new_contract_number: str) -> int:
         """Re-point every project of a contract to a new contract number.
 
-        Rewrites `spec.contractNumber` from old to new across all matching
-        project YAMLs in a single commit. CR names (the OpenStack project
-        identity the operator keys on) are untouched, so this is
-        non-destructive. Returns the number of projects re-pointed.
+        Rejects the entire operation before writing if any matching project is
+        managed. Otherwise, rewrites `spec.contractNumber` from old to new
+        across all matching project YAMLs in a single commit. CR names (the
+        OpenStack project identity the operator keys on) are untouched, so
+        this is non-destructive. Returns the number of projects re-pointed.
         """
         with self._lock:
             self._pull()
 
-            changed = 0
+            matching_projects = []
             for path in self.projects_dir.glob("*.yaml"):
                 with open(path) as f:
                     doc = yaml.safe_load(f)
@@ -407,17 +458,22 @@ class GitBackend:
                 spec = doc.get("spec", {})
                 if spec.get("contractNumber") != old_contract_number:
                     continue
+                matching_projects.append((path, doc))
+
+            require_contract_renamable([_parse_project(doc) for _, doc in matching_projects])
+
+            for path, doc in matching_projects:
+                spec = doc["spec"]
                 spec["contractNumber"] = new_contract_number
                 self._write_yaml(path, doc)
-                changed += 1
 
-            if changed:
+            if matching_projects:
                 self._commit_and_push(
                     f"Rename contract {old_contract_number} to "
-                    f"{new_contract_number} ({changed} project(s))"
+                    f"{new_contract_number} ({len(matching_projects)} project(s))"
                 )
 
-            return changed
+            return len(matching_projects)
 
     def delete_project(self, resource_name: str) -> None:
         """Delete a project YAML file, commit, and push."""

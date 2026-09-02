@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.audit import audit_log
 from app.auth import require_admin
 from app.db import get_session
+from app.git_backend import ManagedProjectMutationError
 from app.models import (
     Contract,
     ContractAccess,
@@ -17,6 +18,11 @@ from app.models import (
     ContractRebate,
     Customer,
     ResourcePrice,
+)
+from app.routers.projects import (
+    _enrich_project,
+    _require_contract_renamable,
+    _require_project_mutable,
 )
 from app.schemas import (
     ContractDetailResponse,
@@ -38,7 +44,6 @@ from app.schemas import (
     UpdateContractRequest,
     UpdateCustomerRequest,
 )
-from app.routers.projects import _enrich_project
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -298,10 +303,11 @@ async def rename_contract(
 ):
     """Change a contract's number, re-pointing all its projects.
 
-    The new number must be unused. Every project linked to the old number has
-    its `spec.contractNumber` rewritten in git; CR names (OpenStack identity)
-    are untouched, so the rename is non-destructive. The DB change is committed
-    only after the git rewrite succeeds.
+    The new number must be unused and the contract must not contain managed
+    projects. Other projects have their `spec.contractNumber` rewritten in
+    git; CR names (OpenStack identity) are untouched, so the rename is
+    non-destructive. The DB change is committed only after the git rewrite
+    succeeds.
     """
     contract = await session.get(Contract, contract_id)
     if not contract:
@@ -312,6 +318,10 @@ async def rename_contract(
     if new_number == old_number:
         raise HTTPException(status_code=409, detail="Contract already has this number")
 
+    git_backend = request.app.state.git_backend
+    projects = git_backend.list_projects(old_number)
+    _require_contract_renamable(projects)
+
     result = await session.execute(
         select(Contract).where(Contract.contract_number == new_number)
     )
@@ -321,9 +331,11 @@ async def rename_contract(
     contract.contract_number = new_number
     await session.flush()
 
-    git_backend = request.app.state.git_backend
     try:
         count = git_backend.rename_contract(old_number, new_number)
+    except ManagedProjectMutationError as e:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         await session.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to re-point projects: {e}")
@@ -636,10 +648,19 @@ async def move_project(
 ):
     """Reassign a project to a different contract.
 
-    Only `spec.contractNumber` in the CR changes; the project keeps its name,
-    OpenStack identity, and workloads. Billing follows the new contract after
-    ArgoCD and the OpenStack operator have successfully reconciled the change.
+    Managed projects are read-only and cannot be moved through this endpoint.
+    For other projects, only `spec.contractNumber` in the CR changes; the
+    project keeps its name, OpenStack identity, and workloads. Billing follows
+    the new contract after ArgoCD and the OpenStack operator have successfully
+    reconciled the change.
     """
+    git_backend = request.app.state.git_backend
+    existing = git_backend.get_project(resource_name)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    _require_project_mutable(existing)
+
     result = await session.execute(
         select(Contract).where(Contract.contract_number == req.contract_number)
     )
@@ -647,16 +668,13 @@ async def move_project(
     if not target:
         raise HTTPException(status_code=404, detail="Target contract not found")
 
-    git_backend = request.app.state.git_backend
-    existing = git_backend.get_project(resource_name)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Project not found")
-
     if existing["contract_number"] == req.contract_number:
         raise HTTPException(status_code=409, detail="Project already belongs to this contract")
 
     try:
         updated = git_backend.move_project(resource_name, req.contract_number)
+    except ManagedProjectMutationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 

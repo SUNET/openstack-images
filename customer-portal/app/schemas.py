@@ -315,6 +315,7 @@ class ManualRunRequest(BaseModel):
 
 class RunOnceBaseRequest(BaseModel):
     """Shared scope and output settings for an ad-hoc billing run."""
+
     all_contracts: bool = False
     contract_ids: list[int] = Field(default_factory=list)
     filename_template: str = Field(default="billing-{year}-{month}.csv", max_length=255)
@@ -413,7 +414,7 @@ class CreateClusterRequest(BaseModel):
     openbao_role: str = Field(default="argocd-rbac-manager", max_length=255)
     argocd_role_name: str = Field(default="argocd-tenant", max_length=255)
     argocd_namespace: str = Field(default="argocd", max_length=63)
-    worker_groups: int = Field(default=1, ge=1)
+    worker_groups: int = Field(default=1, ge=1, le=80)
 
 
 class UpdateClusterRequest(BaseModel):
@@ -435,7 +436,7 @@ class ClusterResponse(BaseModel):
     worker_groups: int
     initial_worker_groups: int
     size_label: str
-    total_servers: int  # 3 + 3 × worker_groups
+    total_servers: int  # Kubernetes nodes; excludes one jump host.
     provisioned_at: datetime | None = None
     management_project_resource_name: str | None = None
     backup_project_resource_name: str | None = None
@@ -500,7 +501,7 @@ class AddonRequestPayload(BaseModel):
 
 
 class ResizeRequestPayload(BaseModel):
-    target_worker_groups: int = Field(ge=1)
+    target_worker_groups: int = Field(ge=1, le=80)
 
 
 class BackupRequestPayload(BaseModel):

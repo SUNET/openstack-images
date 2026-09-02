@@ -473,7 +473,7 @@ async function renderContractProjects(contractNumber) {
                         h("h3", {}, c.name),
                         c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
                     ),
-                    h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                    h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} Kubernetes nodes (3 controllers + ${3 * c.worker_groups} workers; jumphost excluded)`),
                     h("div", { className: "meta mono" },
                         `Your role: ${c.caller_role || "?"}` +
                         (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
@@ -499,7 +499,7 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
     try {
         const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
-        const canMutate = !p.managed || (currentUser && currentUser.is_admin);
+        const canMutate = !p.managed;
         const actions = [];
         if (canMutate) {
             actions.push(h("a", { className: "btn ghost sm", href: `#/contracts/${cn}/projects/edit/${rn}` }, "Edit"));
@@ -513,7 +513,7 @@ async function renderProjectDetail(contractNumber, resourceName) {
 
         if (p.managed && !canMutate) {
             const note = h("p", { className: "hint", style: "margin-bottom:16px" },
-                "This project is SUNET-managed and read-only. Use the cluster page to request changes.");
+                "This project is SUNET-managed and read-only. Use the cluster workflow for changes or coordinate decommissioning with SUNET.");
             app.appendChild(note);
         }
 
@@ -1611,10 +1611,12 @@ async function renderAdminContractDetail(contractId) {
             "Relocation and deletion. Moves re-point billing; renames re-point every project; deletion is permanent."));
 
         let customers = [], allContracts = [], projects = [];
+        let projectsLoaded = false;
         try { customers = await api("/api/admin/customers"); } catch {}
         try { allContracts = await api("/api/admin/contracts"); } catch {}
         try {
             projects = await api(`/api/contracts/${encodeURIComponent(contract.contract_number)}/projects`);
+            projectsLoaded = true;
         } catch {}
         const customersById = Object.fromEntries((customers || []).map(c => [c.id, c]));
 
@@ -1629,7 +1631,10 @@ async function renderAdminContractDetail(contractId) {
                 row.appendChild(h("a", { className: "dz-row-name link",
                     href: `#/contracts/${encodeURIComponent(contract.contract_number)}/projects/${encodeURIComponent(p.resource_name)}` },
                     p.name));
-                if (!otherContracts.length) {
+                if (p.managed) {
+                    row.appendChild(h("span", { className: "hint" },
+                        "SUNET-managed and read-only; moving requires coordinated decommissioning."));
+                } else if (!otherContracts.length) {
                     row.appendChild(h("span", { className: "hint" }, "No other contract to move to."));
                 } else {
                     const sel = h("select", {},
@@ -1659,8 +1664,13 @@ async function renderAdminContractDetail(contractId) {
 
         // Rename contract.
         dz.appendChild(h("div", { className: "slbl" }, "Rename contract"));
+        const hasManagedProjects = projectsLoaded && projects.some(p => p.managed);
         const renameForm = h("form", { className: "form", onsubmit: async (e) => {
             e.preventDefault();
+            if (hasManagedProjects) {
+                showAlert("This contract contains a SUNET-managed project and is read-only for renaming. Coordinate decommissioning with SUNET first.");
+                return;
+            }
             const v = renameForm.querySelector('[name="contract_number"]').value.trim();
             if (!v || v === contract.contract_number) return;
             if (!confirm(`Rename contract ${contract.contract_number} to ${v}? All ${projects.length} project(s) will be re-pointed to the new number.`)) return;
@@ -1671,15 +1681,17 @@ async function renderAdminContractDetail(contractId) {
                 renderAdminContractDetail(contractId);
             } catch (err) { showAlert(err.message); }
         }},
-            h("p", { className: "hint" }, "Changes the contract number and re-points all its projects. Names and OpenStack resources are unaffected; only the billing identifier changes."),
+            h("p", { className: "hint" }, hasManagedProjects
+                ? "This contract contains a SUNET-managed project and is read-only for renaming. Coordinate decommissioning with SUNET before changing its number."
+                : "Changes the contract number and re-points all its projects. Names and OpenStack resources are unaffected; only the billing identifier changes."),
             h("label", { htmlFor: "cn" }, "New contract number"),
             h("div", { className: "input-suffix" },
                 (() => {
-                    const i = h("input", { id: "cn", name: "contract_number", type: "text", required: true, pattern: "[A-Za-z0-9-]+" });
+                    const i = h("input", { id: "cn", name: "contract_number", type: "text", required: true, pattern: "[A-Za-z0-9-]+", disabled: hasManagedProjects || undefined });
                     i.value = contract.contract_number;
                     return i;
                 })(),
-                h("button", { type: "submit", className: "btn danger sm" }, "Rename"),
+                h("button", { type: "submit", className: "btn danger sm", disabled: hasManagedProjects || undefined }, "Rename"),
             ),
         );
         dz.appendChild(renameForm);
@@ -2049,9 +2061,9 @@ function formatRequestSummary(r) {
         const tgt = p.target_worker_groups;
         const before = p.before_worker_groups;
         if (before != null && tgt != null)
-            return `Resize from ${before} to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+            return `Resize from ${before} to ${tgt} worker groups (${3 + 3 * tgt} Kubernetes nodes; jumphost excluded)`;
         if (tgt != null)
-            return `Resize to ${tgt} worker groups (${3 + 3 * tgt} servers total)`;
+            return `Resize to ${tgt} worker groups (${3 + 3 * tgt} Kubernetes nodes; jumphost excluded)`;
         return "Resize";
     }
     if (r.request_type === "backup") {
@@ -2086,7 +2098,7 @@ async function renderClusters() {
                     h("h3", {}, c.name),
                     c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
                 ),
-                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers (3 controllers + ${3 * c.worker_groups} workers)`),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} Kubernetes nodes (3 controllers + ${3 * c.worker_groups} workers; jumphost excluded)`),
                 h("div", { className: "meta mono" }, `Contract: ${c.contract_number} · Role: ${c.caller_role || "?"}`
                     + (c.active_addons.length ? ` · Addons: ${c.active_addons.join(", ")}` : "")),
             ));
@@ -2119,7 +2131,7 @@ async function renderClusterDetail(slug) {
         app.appendChild(h("div", { className: "slbl first" }, "Overview"));
         const overviewRows = [
             kvRowMono("Slug", cluster.slug),
-            kvRow("Servers", `${cluster.total_servers} (3 controllers + ${3 * cluster.worker_groups} workers)`),
+            kvRow("Kubernetes nodes", `${cluster.total_servers} (3 controllers + ${3 * cluster.worker_groups} workers; jumphost excluded)`),
             kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, cluster.contract_number)),
             kvRow("Your role", cluster.caller_role || "—"),
         ];
@@ -2274,6 +2286,7 @@ function renderClusterRequestPanel(slug, cluster, requests) {
         h("input", {
             name: "resize_target", type: "number",
             min: cluster.worker_groups + 1,
+            max: 80,
             placeholder: `> ${cluster.worker_groups}`,
             disabled: resizePending || undefined,
             style: "width:120px;padding:8px;border:1px solid var(--line);border-radius:6px;font-family:inherit",
@@ -2283,10 +2296,10 @@ function renderClusterRequestPanel(slug, cluster, requests) {
             onclick: async () => {
                 const input = panel.querySelector('[name="resize_target"]');
                 const target = parseInt(input.value, 10);
-                if (!target || target <= cluster.worker_groups) {
-                    showAlert("Target must be greater than current."); return;
+                if (!target || target <= cluster.worker_groups || target > 80) {
+                    showAlert("Target must be greater than current and at most 80."); return;
                 }
-                if (!confirm(`Request resize to ${target} worker groups (${3 + 3 * target} servers total)?`)) return;
+                if (!confirm(`Request resize to ${target} worker groups (${3 + 3 * target} Kubernetes nodes; jumphost excluded)?`)) return;
                 try {
                     await api(`/api/clusters/${slug}/requests`, { method: "POST", body: JSON.stringify({
                         request_type: "resize",
@@ -2475,7 +2488,7 @@ async function renderAdminClusters() {
                     h("h3", {}, c.name),
                     c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
                 ),
-                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} servers · contract ${c.contract_number}`),
+                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} Kubernetes nodes (jumphost excluded) · contract ${c.contract_number}`),
                 h("div", { className: "meta mono" }, c.api_url),
             ));
         }
@@ -2511,10 +2524,7 @@ async function renderAdminCreateCluster() {
         return;
     }
 
-    const inputCss = "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)";
-    const labelCss = "display:block;margin-top:14px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px";
-
-    const form = h("form", { className: "card",
+    const form = h("form", { className: "form",
         onsubmit: async (e) => {
             e.preventDefault();
             const data = Object.fromEntries(new FormData(e.target).entries());
@@ -2526,8 +2536,8 @@ async function renderAdminCreateCluster() {
                 navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
             } catch (err) { showAlert(err.message); }
         }},
-        h("label", { style: labelCss }, "Contract"),
-        h("select", { name: "contract_number", required: true, style: inputCss },
+        h("label", {}, "Contract"),
+        h("select", { name: "contract_number", required: true },
             h("option", { value: "" }, "— select contract —"),
             ...contracts.map(c => {
                 const cust = customersById[c.customer_id];
@@ -2535,14 +2545,16 @@ async function renderAdminCreateCluster() {
                 return h("option", { value: c.contract_number }, lbl);
             }),
         ),
-        h("label", { style: labelCss }, "Display name"),
-        h("input", { name: "name", required: true, placeholder: "Acme cluster one", style: inputCss }),
-        h("label", { style: labelCss }, "Slug (used in OpenBao mount path & cert O)"),
-        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one", style: inputCss }),
+        h("label", {}, "Display name"),
+        h("input", { name: "name", required: true, placeholder: "Acme cluster one" }),
+        h("label", {}, "Slug (used in OpenBao mount path & cert O)"),
+        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one" }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Use the customer key and sequence, for example ", h("code", {}, "umu-one"), ". OpenBao and DNS names are derived automatically."),
-        h("label", { style: labelCss }, "Worker groups (3 workers per group)"),
-        h("input", { name: "worker_groups", type: "number", min: "1", value: "1", required: true, style: inputCss }),
+        h("label", {}, "Worker groups (3 workers per group)"),
+        h("input", { name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
+        h("div", { className: "meta", style: "margin-top:6px" },
+            "Maximum 80 worker groups for the standard-v1 /24 network."),
         h("div", { className: "btn-row" },
             h("a", { className: "btn ghost sm", href: "#/admin/clusters" }, "Cancel"),
             h("button", { type: "submit", className: "btn primary sm" }, "Create cluster"),
@@ -2574,21 +2586,15 @@ async function renderAdminClusterDetail(slug) {
                         } catch (err) { showAlert(err.message); }
                     }}, "Mark provisioned") : null,
                 h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
-                h("button", { className: "btn danger sm",
-                    onclick: async () => {
-                        if (!confirm(`Delete cluster ${c.name}? This deletes the management/backup OpenStack projects and revokes all credentials. Cannot be undone.`)) return;
-                        try {
-                            await api(`/api/admin/clusters/${slug}`, { method: "DELETE" });
-                            navigate("/admin/clusters");
-                        } catch (err) { showAlert(err.message); }
-                    }}, "Delete cluster"),
             ].filter(Boolean),
         }));
+        app.appendChild(h("div", { className: "alert error" },
+            "Portal deletion is disabled in phase one. Cluster, project, and credential cleanup requires coordinated manual decommissioning."));
 
         app.appendChild(h("div", { className: "slbl first" }, "Cluster"));
         app.appendChild(kv(
             kvRowMono("Slug", c.slug),
-            kvRow("Size", `${c.size_label} (${c.total_servers} servers)`),
+            kvRow("Size", `${c.size_label} (${c.total_servers} Kubernetes nodes; jumphost excluded)`),
             kvRowMono("API", c.api_url || "(not configured)"),
             kvRowMono("Planned API DNS", c.api_hostname),
             kvRowMono("Planned ArgoCD DNS", c.argocd_hostname),
@@ -2601,10 +2607,8 @@ async function renderAdminClusterDetail(slug) {
         ));
 
         if (!c.provisioned_at) {
-            const inputCss = "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)";
-            const labelCss = "display:block;margin-top:14px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px";
             app.appendChild(h("div", { className: "slbl" }, "Kubernetes connection"));
-            app.appendChild(h("form", { className: "card",
+            app.appendChild(h("form", { className: "form",
                 onsubmit: async (e) => {
                     e.preventDefault();
                     const data = Object.fromEntries(new FormData(e.target).entries());
@@ -2616,10 +2620,10 @@ async function renderAdminClusterDetail(slug) {
                     } catch (err) { showAlert(err.message); }
                 }},
                 h("p", { className: "hint" }, "Complete these values after Kubespray has created the cluster. Both are required before it can be marked provisioned."),
-                h("label", { style: labelCss }, "API URL"),
-                h("input", { name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443`, style: inputCss }),
-                h("label", { style: labelCss }, "CA bundle (PEM)"),
-                h("textarea", { name: "ca_bundle", required: true, placeholder: "-----BEGIN CERTIFICATE-----\n...", style: inputCss + ";min-height:130px;font-family:var(--mono);font-size:12px" }),
+                h("label", {}, "API URL"),
+                h("input", { name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443` }),
+                h("label", {}, "CA bundle (PEM)"),
+                h("textarea", { name: "ca_bundle", required: true, className: "cluster-ca-bundle", placeholder: "-----BEGIN CERTIFICATE-----\n..." }),
                 h("div", { className: "btn-row" },
                     h("button", { type: "submit", className: "btn primary sm" }, "Save connection details"),
                 ),
@@ -2765,7 +2769,8 @@ function renderClusterSetupHelp() {
     app.appendChild(h("p", {},
         "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
         ". This creates the managed OpenStack project and writes ",
-        h("code", {}, "clusters/<slug>/cluster.yaml"), " to the customer-clusters repository."));
+        h("code", {}, "clusters/<slug>/cluster.yaml"), " to the customer-clusters repository. ",
+        "Worker groups must be between 1 and 80 so the standard-v1 cluster fits safely in its /24 network."));
 
     app.appendChild(sub("2. Provision the cluster"));
     app.appendChild(h("p", {},

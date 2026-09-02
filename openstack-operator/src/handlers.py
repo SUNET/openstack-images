@@ -861,7 +861,12 @@ def reconcile_project(
             )
             if project_id and group_id:
                 apply_role_bindings(
-                    client, project_id, group_id, role_bindings, domain
+                    client,
+                    project_id,
+                    group_id,
+                    role_bindings,
+                    domain,
+                    managed=bool(spec.get("managed", False)),
                 )
 
         # Verify and repair federation resources if configured

@@ -56,6 +56,16 @@ def _cluster_dns_zone() -> str:
     return value
 
 
+def _cluster_profile_name() -> str:
+    value = os.environ.get("CLUSTER_PROFILE_NAME", "standard-v1").strip() or "standard-v1"
+    if value != "standard-v1":
+        raise RuntimeError(
+            "CLUSTER_PROFILE_NAME must be 'standard-v1'; managed project quotas "
+            "are currently specific to that profile"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     # OIDC
@@ -92,16 +102,12 @@ class Settings:
     project_git_username: str = field(
         default_factory=lambda: _required_env("PROJECT_GIT_USERNAME")
     )
-    project_git_token: str = field(
-        default_factory=lambda: _required_env("PROJECT_GIT_TOKEN")
-    )
+    project_git_token: str = field(default_factory=lambda: _required_env("PROJECT_GIT_TOKEN"))
     project_git_branch: str = field(
         default_factory=lambda: os.environ.get("PROJECT_GIT_BRANCH", "main")
     )
     project_git_work_dir: str = field(
-        default_factory=lambda: os.environ.get(
-            "PROJECT_GIT_WORK_DIR", "/tmp/customer-projects"
-        )
+        default_factory=lambda: os.environ.get("PROJECT_GIT_WORK_DIR", "/tmp/customer-projects")
     )
     git_author_name: str = field(
         default_factory=lambda: os.environ.get("GIT_AUTHOR_NAME", "Customer Portal")
@@ -129,6 +135,18 @@ class Settings:
         default_factory=lambda: os.environ.get("CLUSTER_GIT_WORK_DIR", "/tmp/customer-clusters")
     )
     cluster_dns_zone: str = field(default_factory=_cluster_dns_zone)
+    cluster_profile_name: str = field(default_factory=_cluster_profile_name)
+    cluster_provisioner_user: str = field(
+        default_factory=lambda: (
+            os.environ.get("CLUSTER_PROVISIONER_USER", "openstack-operator").strip()
+            or "openstack-operator"
+        )
+    )
+    cluster_provisioner_user_domain: str = field(
+        default_factory=lambda: (
+            os.environ.get("CLUSTER_PROVISIONER_USER_DOMAIN", "default").strip() or "default"
+        )
+    )
 
     # Portal
     admin_users: list[str] = field(default_factory=lambda: _split_csv("PORTAL_ADMIN_USERS"))

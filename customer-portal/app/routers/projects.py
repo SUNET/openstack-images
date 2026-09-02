@@ -12,7 +12,12 @@ from app.audit import audit_log
 from app.auth import get_current_user, is_sunet_admin
 from app.config import Settings, get_settings
 from app.db import get_session
-from app.git_backend import GitBackend
+from app.git_backend import (
+    GitBackend,
+    ManagedProjectMutationError,
+    require_contract_renamable,
+    require_project_mutable,
+)
 from app.k8s import find_project_cr_by_spec_name, get_project_status
 from app.models import Contract, ContractAccess
 from app.schemas import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
@@ -20,6 +25,22 @@ from app.schemas import CreateProjectRequest, ProjectResponse, UpdateProjectRequ
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/contracts", tags=["projects"])
+
+
+def _require_project_mutable(project: dict) -> None:
+    """Reject generic mutations of cluster-managed project state."""
+    try:
+        require_project_mutable(project)
+    except ManagedProjectMutationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
+
+def _require_contract_renamable(projects: list[dict]) -> None:
+    """Reject renaming a contract that contains managed project state."""
+    try:
+        require_contract_renamable(projects)
+    except ManagedProjectMutationError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 async def _require_contract_access(
@@ -30,9 +51,8 @@ async def _require_contract_access(
 ) -> Contract:
     """Verify user has access to the contract. Returns the contract with customer loaded.
 
-    SUNET admins bypass the ContractAccess check — they're the ultimate
-    fallback for any project (especially managed ones the customer can't
-    mutate themselves) and have no separate endpoint for project mutation.
+    SUNET admins bypass the ContractAccess check for support and visibility.
+    Managed-project mutation is rejected separately for every caller.
     """
     if settings is not None and is_sunet_admin(user_sub, settings):
         result = await session.execute(
@@ -149,8 +169,10 @@ async def create_project(
         raise HTTPException(status_code=409, detail=str(e))
 
     audit_log(
-        user["sub"], "project.create",
-        contract_number=contract_number, resource_name=resource_name,
+        user["sub"],
+        "project.create",
+        contract_number=contract_number,
+        resource_name=resource_name,
         users=len(users),
     )
     return ProjectResponse(
@@ -182,10 +204,7 @@ async def update_project(
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
-        raise HTTPException(
-            status_code=403, detail="This project is SUNET-managed and read-only"
-        )
+    _require_project_mutable(existing)
 
     try:
         updated = git_backend.update_project(
@@ -198,8 +217,10 @@ async def update_project(
         raise HTTPException(status_code=404, detail=str(e))
 
     audit_log(
-        user["sub"], "project.update",
-        contract_number=contract_number, resource_name=resource_name,
+        user["sub"],
+        "project.update",
+        contract_number=contract_number,
+        resource_name=resource_name,
         users=len(req.users) if req.users is not None else "unchanged",
         quotas="changed" if req.quotas is not None else "unchanged",
     )
@@ -223,10 +244,7 @@ async def delete_project(
     if not existing or existing["contract_number"] != contract_number:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if existing.get("managed") and not is_sunet_admin(user["sub"], settings):
-        raise HTTPException(
-            status_code=403, detail="This project is SUNET-managed and read-only"
-        )
+    _require_project_mutable(existing)
 
     try:
         git_backend.delete_project(resource_name)
@@ -234,6 +252,8 @@ async def delete_project(
         raise HTTPException(status_code=404, detail=str(e))
 
     audit_log(
-        user["sub"], "project.delete",
-        contract_number=contract_number, resource_name=resource_name,
+        user["sub"],
+        "project.delete",
+        contract_number=contract_number,
+        resource_name=resource_name,
     )

@@ -61,7 +61,7 @@ def sync_db_url(portal_db_url: str) -> str:
     return _sync_url(portal_db_url)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def _migrate(portal_db_url: str) -> None:
     """Run alembic upgrade head once per test session.
 
@@ -79,7 +79,7 @@ def _migrate(portal_db_url: str) -> None:
 
 
 @pytest.fixture
-async def engine(portal_db_url: str):
+async def engine(portal_db_url: str, _migrate):
     eng = create_async_engine(portal_db_url, pool_pre_ping=True)
     yield eng
     await eng.dispose()
@@ -105,7 +105,7 @@ async def session(engine) -> AsyncSession:
 
 
 @pytest.fixture
-def sync_session(sync_db_url: str):
+def sync_session(sync_db_url: str, _migrate):
     """A sync Session against the same DB. Used by billing-engine tests
     (the synthetic-usage emitter is sync because the surrounding billing
     pipeline already is). Truncates non-seed tables before yielding."""

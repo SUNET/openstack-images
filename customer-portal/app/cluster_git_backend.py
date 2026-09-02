@@ -9,8 +9,13 @@ import yaml
 
 from app.config import Settings
 from app.git_url import git_auth_environment
+from app.yaml_utils import dump_yaml
 
 logger = logging.getLogger(__name__)
+
+
+class ClusterDeletionBlocked(ValueError):
+    """Raised when a cluster requires manual decommissioning before deletion."""
 
 
 class ClusterGitBackend:
@@ -70,9 +75,7 @@ class ClusterGitBackend:
         for attempt in range(max_retries):
             try:
                 with self.repo.git.custom_environment(**self._auth_env):
-                    results = self.repo.remotes.origin.push(
-                        self.settings.cluster_git_branch
-                    )
+                    results = self.repo.remotes.origin.push(self.settings.cluster_git_branch)
                 failure_flags = (
                     git.remote.PushInfo.ERROR
                     | git.remote.PushInfo.REJECTED
@@ -115,6 +118,28 @@ class ClusterGitBackend:
     def _manifest_path(self, slug: str) -> Path:
         return self.clusters_dir / slug / "cluster.yaml"
 
+    def _update_kustomization(self) -> bool:
+        """Update the root Kustomization and return whether it changed."""
+        resources = sorted(
+            path.relative_to(self.work_dir).as_posix()
+            for path in self.clusters_dir.glob("*/cluster.yaml")
+        )
+        document = {
+            "apiVersion": "kustomize.config.k8s.io/v1beta1",
+            "kind": "Kustomization",
+            "resources": resources,
+        }
+        rendered = dump_yaml(document, sort_keys=False)
+        path = self.work_dir / "kustomization.yaml"
+        if path.exists():
+            try:
+                if yaml.safe_load(path.read_text()) == document:
+                    return False
+            except yaml.YAMLError:
+                pass
+        path.write_text(rendered)
+        return True
+
     def exists(self, slug: str) -> bool:
         """Return whether the cluster already has a manifest."""
         with self._lock:
@@ -142,6 +167,9 @@ class ClusterGitBackend:
                 "kind": "ManagedCluster",
                 "metadata": {"name": slug},
                 "spec": {
+                    "suspend": False,
+                    "deletionPolicy": "Retain",
+                    "profileRef": {"name": self.settings.cluster_profile_name},
                     "displayName": display_name,
                     "contractNumber": contract_number,
                     "customerDomain": customer_domain,
@@ -152,12 +180,8 @@ class ClusterGitBackend:
                     },
                     "dns": {
                         "zone": self.settings.cluster_dns_zone,
-                        "apiHostname": (
-                            f"api.{slug}.{self.settings.cluster_dns_zone}"
-                        ),
-                        "argocdHostname": (
-                            f"argocd.{slug}.{self.settings.cluster_dns_zone}"
-                        ),
+                        "apiHostname": (f"api.{slug}.{self.settings.cluster_dns_zone}"),
+                        "argocdHostname": (f"argocd.{slug}.{self.settings.cluster_dns_zone}"),
                     },
                     "openbao": {
                         "mount": f"kubernetes/{slug}",
@@ -168,20 +192,22 @@ class ClusterGitBackend:
             if path.exists():
                 existing = yaml.safe_load(path.read_text())
                 if existing == document:
+                    try:
+                        if self._update_kustomization():
+                            self._commit_and_push(f"Repair cluster kustomization for {slug}")
+                    except Exception:
+                        try:
+                            self._restore_origin()
+                        except Exception:
+                            logger.exception("Failed to restore cluster repository clone")
+                        raise
                     return relative_path
                 raise ValueError(f"Cluster manifest '{slug}' already exists")
 
             try:
                 path.parent.mkdir(parents=True)
-                path.write_text(
-                    "---\n"
-                    + yaml.dump(
-                        document,
-                        default_flow_style=False,
-                        allow_unicode=True,
-                        sort_keys=False,
-                    )
-                )
+                path.write_text("---\n" + dump_yaml(document, sort_keys=False))
+                self._update_kustomization()
                 self._commit_and_push(f"Add planned customer cluster {slug}")
             except Exception:
                 try:
@@ -192,19 +218,13 @@ class ClusterGitBackend:
             return relative_path
 
     def delete_cluster(self, slug: str) -> None:
-        """Delete and push one cluster manifest."""
+        """Refuse portal deletion of any published cluster manifest."""
         with self._lock:
             self._pull()
             path = self._manifest_path(slug)
             if not path.exists():
                 raise ValueError(f"Cluster manifest '{slug}' not found")
-            try:
-                path.unlink()
-                path.parent.rmdir()
-                self._commit_and_push(f"Remove customer cluster {slug}")
-            except Exception:
-                try:
-                    self._restore_origin()
-                except Exception:
-                    logger.exception("Failed to restore cluster repository clone")
-                raise
+            raise ClusterDeletionBlocked(
+                f"Cluster '{slug}' has a managed manifest; portal deletion is disabled "
+                "until coordinated manual decommissioning is available"
+            )

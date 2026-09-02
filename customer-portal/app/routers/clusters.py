@@ -21,9 +21,11 @@ from app.auth import (
     require_admin,
     require_cluster_access,
 )
+from app.cluster_git_backend import ClusterDeletionBlocked
+from app.cluster_quotas import managed_cluster_quotas
 from app.config import Settings, get_settings
 from app.db import get_session
-from app.git_backend import GitBackend, _sanitize_name
+from app.git_backend import GitBackend, _sanitize_name, managed_role_bindings
 from app.k8s import find_project_cr_by_spec_name
 from app.models import (
     ClusterAccess,
@@ -49,13 +51,17 @@ member_router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
 async def _active_addons(cluster_id: int, session: AsyncSession) -> list[str]:
     rows = (
-        await session.execute(
-            select(ClusterAddon.addon_type).where(
-                ClusterAddon.cluster_id == cluster_id,
-                ClusterAddon.disabled_at.is_(None),
+        (
+            await session.execute(
+                select(ClusterAddon.addon_type).where(
+                    ClusterAddon.cluster_id == cluster_id,
+                    ClusterAddon.disabled_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return list(rows)
 
 
@@ -75,19 +81,19 @@ async def _sync_managed_project_admins(
     if not cluster.management_project_resource_name:
         return
     rows = (
-        await session.execute(
-            select(ClusterAccess.user_sub).where(
-                ClusterAccess.cluster_id == cluster.id,
-                ClusterAccess.role == "customer_admin",
+        (
+            await session.execute(
+                select(ClusterAccess.user_sub).where(
+                    ClusterAccess.cluster_id == cluster.id,
+                    ClusterAccess.role == "customer_admin",
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     user_subs = sorted(rows)
-    role_bindings = [{
-        "role": "reader",
-        "users": user_subs,
-        "userDomain": settings.default_domain,
-    }]
+    role_bindings = managed_role_bindings(settings, user_subs)
     try:
         git_backend.update_project(
             resource_name=cluster.management_project_resource_name,
@@ -141,6 +147,7 @@ async def admin_create_cluster(
     req: CreateClusterRequest,
     request: Request,
     user: dict[str, Any] = Depends(require_admin),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
     contract = (
@@ -156,10 +163,7 @@ async def admin_create_cluster(
     # Serialize one slug across all portal replicas before checking the DB or
     # publishing either Git resource. The lock is held until commit/rollback.
     await session.execute(
-        text(
-            "SELECT pg_advisory_xact_lock("
-            "hashtext('tenant-cluster'), hashtext(:slug))"
-        ),
+        text("SELECT pg_advisory_xact_lock(hashtext('tenant-cluster'), hashtext(:slug))"),
         {"slug": req.slug},
     )
 
@@ -184,6 +188,7 @@ async def admin_create_cluster(
         )
 
     management_resource_name = _sanitize_name(project_name)
+    expected_quotas = managed_cluster_quotas(req.worker_groups)
 
     existing_project = await asyncio.to_thread(
         git_backend.get_project,
@@ -194,11 +199,16 @@ async def admin_create_cluster(
             "name": project_name,
             "contract_number": contract.contract_number,
             "managed": True,
+            "quotas": expected_quotas,
         }
-        if any(existing_project.get(key) != value for key, value in expected.items()):
+        mismatches = [key for key, value in expected.items() if existing_project.get(key) != value]
+        if mismatches:
             raise HTTPException(
                 status_code=409,
-                detail=f"Project '{management_resource_name}' already exists with other values",
+                detail=(
+                    f"Project '{management_resource_name}' already exists with "
+                    f"different values: {', '.join(mismatches)}"
+                ),
             )
     else:
         # Reject names already taken by a CR outside the portal's project repo.
@@ -217,9 +227,20 @@ async def admin_create_cluster(
                 description=f"SUNET-managed Kubernetes cluster {req.slug}",
                 users=[],
                 managed=True,
+                quotas=expected_quotas,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if existing_project:
+        # Adopt pre-contract managed projects and ensure the provisioning
+        # identity can obtain a token scoped to the tenant before publishing
+        # the cluster declaration.
+        await asyncio.to_thread(
+            git_backend.update_project,
+            resource_name=management_resource_name,
+            role_bindings=managed_role_bindings(settings, []),
+        )
 
     try:
         await asyncio.to_thread(
@@ -265,8 +286,10 @@ async def admin_create_cluster(
         raise
 
     audit_log(
-        user["sub"], "cluster.create",
-        cluster_id=cluster.id, slug=cluster.slug,
+        user["sub"],
+        "cluster.create",
+        cluster_id=cluster.id,
+        slug=cluster.slug,
     )
     return await _to_response(cluster, caller_role="sunet_admin", session=session)
 
@@ -277,10 +300,14 @@ async def admin_list_clusters(
     session: AsyncSession = Depends(get_session),
 ):
     rows = (
-        await session.execute(
-            select(TenantCluster).options(selectinload(TenantCluster.contract))
+        (
+            await session.execute(
+                select(TenantCluster).options(selectinload(TenantCluster.contract))
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [await _to_response(c, caller_role="sunet_admin", session=session) for c in rows]
 
 
@@ -373,14 +400,11 @@ async def admin_delete_cluster(
     session: AsyncSession = Depends(get_session),
 ):
     cluster = (
-        await session.execute(
-            select(TenantCluster).where(TenantCluster.slug == slug)
-        )
+        await session.execute(select(TenantCluster).where(TenantCluster.slug == slug))
     ).scalar_one_or_none()
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
 
-    git_backend: GitBackend = request.app.state.git_backend
     cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
     if cluster_git_backend is None:
         raise HTTPException(
@@ -389,19 +413,19 @@ async def admin_delete_cluster(
         )
     try:
         await asyncio.to_thread(cluster_git_backend.delete_cluster, cluster.slug)
+    except ClusterDeletionBlocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError:
-        # Clusters created before migration 011 have no desired-state manifest.
+        # A pre-publication legacy record may have no desired-state manifest.
         logger.warning("Cluster manifest %s not in git", cluster.slug)
-    for resource in (
-        cluster.management_project_resource_name,
-        cluster.backup_project_resource_name,
-    ):
-        if not resource:
-            continue
-        try:
-            await asyncio.to_thread(git_backend.delete_project, resource)
-        except ValueError:
-            logger.warning("Managed project %s not in git", resource)
+    if cluster.management_project_resource_name or cluster.backup_project_resource_name:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cluster has managed project state; portal deletion is disabled "
+                "until coordinated manual decommissioning is available"
+            ),
+        )
 
     await session.delete(cluster)
     await session.commit()
@@ -419,14 +443,15 @@ async def list_clusters(
 ):
     if is_sunet_admin(user["sub"], settings):
         rows = (
-            await session.execute(
-                select(TenantCluster).options(selectinload(TenantCluster.contract))
+            (
+                await session.execute(
+                    select(TenantCluster).options(selectinload(TenantCluster.contract))
+                )
             )
-        ).scalars().all()
-        return [
-            await _to_response(c, caller_role="sunet_admin", session=session)
-            for c in rows
-        ]
+            .scalars()
+            .all()
+        )
+        return [await _to_response(c, caller_role="sunet_admin", session=session) for c in rows]
 
     rows = (
         await session.execute(
@@ -436,10 +461,7 @@ async def list_clusters(
             .options(selectinload(TenantCluster.contract))
         )
     ).all()
-    return [
-        await _to_response(c, caller_role=role, session=session)
-        for c, role in rows
-    ]
+    return [await _to_response(c, caller_role=role, session=session) for c, role in rows]
 
 
 @member_router.get("/{slug}", response_model=ClusterResponse)
@@ -465,16 +487,18 @@ async def list_cluster_users(
         slug, user["sub"], session, settings, min_role="customer_admin"
     )
     rows = (
-        await session.execute(
-            select(ClusterAccess).where(ClusterAccess.cluster_id == cluster.id)
+        (
+            await session.execute(
+                select(ClusterAccess).where(ClusterAccess.cluster_id == cluster.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [ClusterAccessResponse.model_validate(r) for r in rows]
 
 
-@member_router.post(
-    "/{slug}/users", response_model=ClusterAccessResponse, status_code=201
-)
+@member_router.post("/{slug}/users", response_model=ClusterAccessResponse, status_code=201)
 async def grant_cluster_access(
     slug: str,
     req: ClusterAccessRequest,
@@ -521,8 +545,11 @@ async def grant_cluster_access(
 
     await session.commit()
     audit_log(
-        user["sub"], "cluster.access_grant",
-        slug=slug, target_sub=req.user_sub, role=req.role,
+        user["sub"],
+        "cluster.access_grant",
+        slug=slug,
+        target_sub=req.user_sub,
+        role=req.role,
     )
     return ClusterAccessResponse.model_validate(grant)
 
@@ -566,8 +593,7 @@ async def revoke_cluster_access(
         # so the user actually loses access; admin can manually clean up
         # orphan RoleBindings later.
         logger.exception(
-            "cascade_revoke_for_user failed for cluster %s user %s; "
-            "removing access grant anyway",
+            "cascade_revoke_for_user failed for cluster %s user %s; removing access grant anyway",
             slug,
             user_sub,
         )
@@ -583,8 +609,10 @@ async def revoke_cluster_access(
 
     await session.commit()
     audit_log(
-        user["sub"], "cluster.access_revoke",
-        slug=slug, target_sub=user_sub,
+        user["sub"],
+        "cluster.access_revoke",
+        slug=slug,
+        target_sub=user_sub,
     )
 
 
