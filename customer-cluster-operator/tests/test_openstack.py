@@ -273,7 +273,9 @@ def test_router_creation_sets_tags_before_interface(provisioning_input):
     assert (
         provisioner._router(SimpleNamespace(id="subnet"), SimpleNamespace(id="public")) is created
     )
-    assert "tags" not in network_api.create_router.call_args.kwargs
+    request = network_api.create_router.call_args.kwargs
+    assert request["external_gateway_info"] == {"network_id": "public"}
+    assert "tags" not in request
     network_api.set_tags.assert_called_once_with(created, provisioner.tags)
     network_api.add_interface_to_router.assert_called_once_with(created, subnet_id="subnet")
 

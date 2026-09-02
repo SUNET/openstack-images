@@ -188,7 +188,7 @@ class Provisioner:
         else:
             resource = self.conn.network.create_router(
                 name=name,
-                external_gateway_info={"network_id": external.id, "enable_snat": True},
+                external_gateway_info={"network_id": external.id},
             )
             resource = self._set_network_tags(resource)
             self.conn.network.add_interface_to_router(resource, subnet_id=subnet.id)
