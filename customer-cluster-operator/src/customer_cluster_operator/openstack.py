@@ -119,13 +119,18 @@ class Provisioner:
             "customer_cluster_slug": self.slug,
         }
 
+    def _set_network_tags(self, resource: Any) -> Any:
+        """Tag a newly created Neutron resource through the tags endpoint."""
+        return self.conn.network.set_tags(resource, self.tags)
+
     def _network(self) -> Any:
         name = stable_name(self.slug, "network")
         resource = _exact(self.conn.network.networks(name=name), name, "network")
         if resource:
             resource = _require_owned(resource, self.uid, "network")
         else:
-            resource = self.conn.network.create_network(name=name, tags=self.tags)
+            resource = self.conn.network.create_network(name=name)
+            resource = self._set_network_tags(resource)
         return resource
 
     def _subnet(self, network: Any) -> Any:
@@ -143,15 +148,15 @@ class Provisioner:
             ):
                 raise OwnershipError(f"owned subnet {name} has incompatible configuration")
             return resource
-        return self.conn.network.create_subnet(
+        resource = self.conn.network.create_subnet(
             name=name,
             network_id=network.id,
             cidr=self.data["network"]["cidr"],
             ip_version=4,
             enable_dhcp=True,
             dns_nameservers=self.data["network"]["dnsNameservers"],
-            tags=self.tags,
         )
+        return self._set_network_tags(resource)
 
     def _external_network(self) -> Any:
         name = self.data["openstack"]["externalNetwork"]
@@ -184,8 +189,8 @@ class Provisioner:
             resource = self.conn.network.create_router(
                 name=name,
                 external_gateway_info={"network_id": external.id, "enable_snat": True},
-                tags=self.tags,
             )
+            resource = self._set_network_tags(resource)
             self.conn.network.add_interface_to_router(resource, subnet_id=subnet.id)
         return resource
 
@@ -194,11 +199,11 @@ class Provisioner:
         resource = _exact(self.conn.network.security_groups(name=name), name, "security group")
         if resource:
             return _require_owned(resource, self.uid, "security group")
-        return self.conn.network.create_security_group(
+        resource = self.conn.network.create_security_group(
             name=name,
             description=f"ManagedCluster {self.slug} ({self.uid}) {suffix}",
-            tags=self.tags,
         )
+        return self._set_network_tags(resource)
 
     def _rule(self, security_group: Any, **desired: Any) -> None:
         keys = (
@@ -400,15 +405,15 @@ class Provisioner:
             ):
                 raise OwnershipError(f"owned node port {name} has incompatible topology")
             return port
-        return self.conn.network.create_port(
+        resource = self.conn.network.create_port(
             name=name,
             network_id=network.id,
             fixed_ips=[{"subnet_id": subnet.id}],
             security_group_ids=[security_group.id],
             port_security_enabled=True,
             allowed_address_pairs=[{"ip_address": vip}] if vip else [],
-            tags=self.tags,
         )
+        return self._set_network_tags(resource)
 
     def _verify_server(
         self,
@@ -527,11 +532,12 @@ class Provisioner:
         floating = (
             matches[0]
             if matches
-            else self.conn.network.create_ip(
-                floating_network_id=external.id,
-                port_id=port.id,
-                description=description,
-                tags=self.tags,
+            else self._set_network_tags(
+                self.conn.network.create_ip(
+                    floating_network_id=external.id,
+                    port_id=port.id,
+                    description=description,
+                )
             )
         )
         _require_owned(floating, self.uid, "floating IP")
@@ -560,13 +566,13 @@ class Provisioner:
             ):
                 raise OwnershipError(f"owned VIP port {name} has incompatible topology")
             return port
-        return self.conn.network.create_port(
+        resource = self.conn.network.create_port(
             name=name,
             network_id=network.id,
             fixed_ips=[{"subnet_id": subnet.id, "ip_address": address}],
             port_security_enabled=False,
-            tags=self.tags,
         )
+        return self._set_network_tags(resource)
 
     def _private_ip(self, server: Any, network: Any) -> str:
         port = self._server_port(server, network)

@@ -17,6 +17,11 @@ from customer_cluster_operator.openstack import (
 )
 
 
+def return_tagged(resource, tags):
+    resource.tags = tags
+    return resource
+
+
 def test_stable_name_is_bounded():
     assert len(stable_name("a" * 63, "controller-01")) <= 63
     assert stable_name("example", "network") == "cc-example-network"
@@ -59,6 +64,23 @@ def test_owned_network_is_reused(provisioning_input):
     provisioner = Provisioner(connection, provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
     assert provisioner._network() is existing
     network_api.create_network.assert_not_called()
+
+
+def test_network_creation_sets_tags_after_create(provisioning_input):
+    network_api = Mock()
+    network_api.networks.return_value = []
+    created = SimpleNamespace(id="network")
+    network_api.create_network.return_value = created
+    network_api.set_tags.side_effect = return_tagged
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+
+    assert provisioner._network() is created
+    network_api.create_network.assert_called_once_with(name="cc-example-network")
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
 
 
 def test_cloud_init_disables_passwords(provisioning_input):
@@ -173,6 +195,7 @@ def test_subnet_creation_uses_profile_network(provisioning_input):
     network_api.subnets.return_value = []
     created = SimpleNamespace(id="subnet")
     network_api.create_subnet.return_value = created
+    network_api.set_tags.side_effect = return_tagged
     provisioner = Provisioner(
         SimpleNamespace(network=network_api),
         provisioning_input.data,
@@ -182,6 +205,8 @@ def test_subnet_creation_uses_profile_network(provisioning_input):
     kwargs = network_api.create_subnet.call_args.kwargs
     assert kwargs["cidr"] == "10.44.0.0/24"
     assert kwargs["dns_nameservers"] == ["1.1.1.1", "9.9.9.9"]
+    assert "tags" not in kwargs
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
 
 
 def test_router_rejects_wrong_external_network(provisioning_input):
@@ -231,6 +256,26 @@ def test_router_rejects_additional_internal_interfaces(provisioning_input):
     )
     with pytest.raises(OwnershipError, match="unexpected internal"):
         provisioner._router(SimpleNamespace(id="subnet"), SimpleNamespace(id="public"))
+
+
+def test_router_creation_sets_tags_before_interface(provisioning_input):
+    network_api = Mock()
+    network_api.routers.return_value = []
+    created = SimpleNamespace(id="router")
+    network_api.create_router.return_value = created
+    network_api.set_tags.side_effect = return_tagged
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+
+    assert (
+        provisioner._router(SimpleNamespace(id="subnet"), SimpleNamespace(id="public")) is created
+    )
+    assert "tags" not in network_api.create_router.call_args.kwargs
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
+    network_api.add_interface_to_router.assert_called_once_with(created, subnet_id="subnet")
 
 
 @pytest.mark.parametrize("interfaces", [[], ["subnet"]])
@@ -356,6 +401,23 @@ def test_security_rule_is_idempotent(provisioning_input):
     network_api.create_security_group_rule.assert_not_called()
 
 
+def test_security_group_creation_sets_tags_after_create(provisioning_input):
+    network_api = Mock()
+    network_api.security_groups.return_value = []
+    created = SimpleNamespace(id="security-group")
+    network_api.create_security_group.return_value = created
+    network_api.set_tags.side_effect = return_tagged
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+
+    assert provisioner._security_group("cluster-sg") is created
+    assert "tags" not in network_api.create_security_group.call_args.kwargs
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
+
+
 def test_server_boots_from_owned_volume(provisioning_input, monkeypatch):
     compute = Mock()
     compute.servers.return_value = []
@@ -447,11 +509,42 @@ def test_floating_ip_validates_floating_network(provisioning_input, monkeypatch)
         )
 
 
+def test_floating_ip_creation_sets_tags_after_create(provisioning_input, monkeypatch):
+    network_api = Mock()
+    network_api.ips.return_value = []
+    created = SimpleNamespace(
+        id="floating-ip",
+        description=("ManagedCluster 12345678-1234-1234-1234-123456789abc jumphost"),
+        floating_network_id="public",
+        floating_ip_address="192.0.2.10",
+    )
+    network_api.create_ip.return_value = created
+    network_api.set_tags.side_effect = return_tagged
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    monkeypatch.setattr(provisioner, "_server_port", Mock(return_value=SimpleNamespace(id="port")))
+
+    assert (
+        provisioner._floating_ip(
+            SimpleNamespace(id="jump"),
+            SimpleNamespace(id="network"),
+            SimpleNamespace(id="public"),
+        )
+        == "192.0.2.10"
+    )
+    assert "tags" not in network_api.create_ip.call_args.kwargs
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
+
+
 def test_node_port_has_role_vip_and_is_idempotent(provisioning_input):
     network_api = Mock()
     created = SimpleNamespace(id="port")
     network_api.ports.return_value = []
     network_api.create_port.return_value = created
+    network_api.set_tags.side_effect = return_tagged
     provisioner = Provisioner(
         SimpleNamespace(network=network_api),
         provisioning_input.data,
@@ -469,6 +562,8 @@ def test_node_port_has_role_vip_and_is_idempotent(provisioning_input):
     assert kwargs["allowed_address_pairs"] == [{"ip_address": "10.44.0.10"}]
     assert kwargs["security_group_ids"] == ["cluster-sg"]
     assert kwargs["fixed_ips"] == [{"subnet_id": "subnet"}]
+    assert "tags" not in kwargs
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
 
 
 def test_adopted_node_port_topology_must_match(provisioning_input):
@@ -563,6 +658,33 @@ def test_vip_validates_network_subnet_and_port_security(provisioning_input):
             SimpleNamespace(id="network"),
             SimpleNamespace(id="subnet"),
         )
+
+
+def test_vip_creation_sets_tags_after_create(provisioning_input):
+    network_api = Mock()
+    network_api.ports.return_value = []
+    created = SimpleNamespace(id="vip-port")
+    network_api.create_port.return_value = created
+    network_api.set_tags.side_effect = return_tagged
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+
+    assert (
+        provisioner._vip(
+            "api",
+            "10.44.0.10",
+            SimpleNamespace(id="network"),
+            SimpleNamespace(id="subnet"),
+        )
+        is created
+    )
+    request = network_api.create_port.call_args.kwargs
+    assert request["fixed_ips"] == [{"subnet_id": "subnet", "ip_address": "10.44.0.10"}]
+    assert "tags" not in request
+    network_api.set_tags.assert_called_once_with(created, provisioner.tags)
 
 
 def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, monkeypatch):
