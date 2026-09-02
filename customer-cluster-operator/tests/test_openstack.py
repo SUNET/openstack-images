@@ -5,7 +5,9 @@ from unittest.mock import Mock
 import pytest
 from openstack.block_storage.v3.volume import Volume
 from openstack.compute.v2.server import Server
+from openstack.exceptions import ConflictException
 from openstack.network.v2.port import Port
+from openstack.network.v2.security_group_rule import SecurityGroupRule
 
 from customer_cluster_operator.errors import OwnershipError, ValidationError
 from customer_cluster_operator.openstack import (
@@ -375,9 +377,9 @@ def test_retained_conflict_explains_manual_recovery(provisioning_input):
 
 
 def test_security_rule_is_idempotent(provisioning_input):
-    rule = SimpleNamespace(
+    rule = SecurityGroupRule(
         direction="ingress",
-        ethertype="IPv4",
+        ether_type="IPv4",
         protocol="tcp",
         port_range_min=22,
         port_range_max=22,
@@ -394,13 +396,40 @@ def test_security_rule_is_idempotent(provisioning_input):
     provisioner._rule(
         SimpleNamespace(id="sg"),
         direction="ingress",
-        ethertype="IPv4",
+        ether_type="IPv4",
         protocol="tcp",
         port_range_min=22,
         port_range_max=22,
         remote_ip_prefix="192.0.2.1/32",
     )
     network_api.create_security_group_rule.assert_not_called()
+
+
+def test_security_rule_duplicate_conflict_is_idempotent(provisioning_input):
+    network_api = Mock()
+    network_api.security_group_rules.return_value = []
+    network_api.create_security_group_rule.side_effect = ConflictException(
+        "Security group rule already exists"
+    )
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+
+    provisioner._rule(
+        SimpleNamespace(id="sg"),
+        direction="ingress",
+        ether_type="IPv4",
+        remote_group_id="remote-sg",
+    )
+
+    network_api.create_security_group_rule.assert_called_once_with(
+        security_group_id="sg",
+        direction="ingress",
+        ether_type="IPv4",
+        remote_group_id="remote-sg",
+    )
 
 
 def test_security_group_creation_sets_tags_after_create(provisioning_input):

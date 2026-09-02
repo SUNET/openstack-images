@@ -11,6 +11,7 @@ from typing import Any
 import openstack
 import yaml
 from openstack.config import OpenStackConfig
+from openstack.exceptions import ConflictException
 
 from .errors import OwnershipError, ValidationError
 
@@ -208,7 +209,7 @@ class Provisioner:
     def _rule(self, security_group: Any, **desired: Any) -> None:
         keys = (
             "direction",
-            "ethertype",
+            "ether_type",
             "protocol",
             "port_range_min",
             "port_range_max",
@@ -219,7 +220,13 @@ class Provisioner:
         for rule in self.conn.network.security_group_rules(security_group_id=security_group.id):
             if all(getattr(rule, key, None) == value for key, value in normalized.items()):
                 return
-        self.conn.network.create_security_group_rule(security_group_id=security_group.id, **desired)
+        try:
+            self.conn.network.create_security_group_rule(
+                security_group_id=security_group.id, **desired
+            )
+        except ConflictException:
+            # Neutron guarantees this response means an equivalent rule exists.
+            return
 
     def _security_groups(self) -> tuple[Any, Any]:
         cluster = self._security_group("cluster-sg")
@@ -227,13 +234,13 @@ class Provisioner:
         self._rule(
             cluster,
             direction="ingress",
-            ethertype="IPv4",
+            ether_type="IPv4",
             remote_group_id=cluster.id,
         )
         self._rule(
             cluster,
             direction="ingress",
-            ethertype="IPv4",
+            ether_type="IPv4",
             protocol="tcp",
             port_range_min=22,
             port_range_max=22,
@@ -243,7 +250,7 @@ class Provisioner:
             self._rule(
                 jump,
                 direction="ingress",
-                ethertype="IPv4",
+                ether_type="IPv4",
                 protocol="tcp",
                 port_range_min=22,
                 port_range_max=22,
@@ -255,7 +262,7 @@ class Provisioner:
         }
         actual_cluster = {
             (
-                getattr(rule, "ethertype", None),
+                getattr(rule, "ether_type", None),
                 getattr(rule, "protocol", None),
                 getattr(rule, "port_range_min", None),
                 getattr(rule, "port_range_max", None),
@@ -269,7 +276,7 @@ class Provisioner:
         }
         actual_jump = {
             (
-                getattr(rule, "ethertype", None),
+                getattr(rule, "ether_type", None),
                 getattr(rule, "protocol", None),
                 getattr(rule, "port_range_min", None),
                 getattr(rule, "port_range_max", None),
