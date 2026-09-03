@@ -33,6 +33,7 @@ from app.schemas import (
     AddonRequestPayload,
     BackupRequestPayload,
     CreateClusterRequest,
+    ProjectResponse,
     ResizeRequestPayload,
     _size_label,
 )
@@ -243,6 +244,78 @@ def test_quota_values_capped_at_int32() -> None:
         StorageQuota(volumesGB=_QUOTA_MAX + 1)
     with pytest.raises(ValidationError):
         NetworkQuota(securityGroupRules=_QUOTA_MAX + 1)
+
+
+def test_project_response_accepts_managed_cluster_quotas() -> None:
+    quotas = managed_cluster_quotas(1)
+
+    project = ProjectResponse(
+        resource_name="acme-cluster",
+        name="cluster.acme.example",
+        description="Managed cluster project",
+        contract_number="CO-001",
+        users=["admin@acme.example"],
+        quotas=quotas,
+        managed=True,
+    )
+
+    assert project.model_dump()["quotas"] == quotas
+
+
+def test_project_response_accepts_complete_operator_quota_shape() -> None:
+    quotas = {
+        "compute": {
+            "instances": 10,
+            "cores": 20,
+            "ramMB": 40960,
+            "serverGroups": -1,
+            "serverGroupMembers": 10,
+        },
+        "storage": {
+            "volumes": 10,
+            "volumesGB": 500,
+            "snapshots": 10,
+            "backups": -1,
+            "backupsGB": 500,
+        },
+        "network": {
+            "floatingIps": 3,
+            "networks": 1,
+            "subnets": 1,
+            "routers": 1,
+            "ports": 14,
+            "securityGroups": 10,
+            "securityGroupRules": 100,
+        },
+    }
+
+    project = ProjectResponse(
+        resource_name="complete-quotas",
+        name="complete.example",
+        description="Complete quota contract",
+        contract_number="CO-001",
+        users=[],
+        quotas=quotas,
+    )
+
+    assert project.model_dump()["quotas"] == quotas
+
+
+def test_quota_response_rejects_unknown_fields_without_broadening_writes() -> None:
+    from app.schemas import NetworkQuota
+
+    with pytest.raises(ValidationError):
+        ProjectResponse(
+            resource_name="bad-quotas",
+            name="bad.example",
+            description="Unknown response quota",
+            contract_number="CO-001",
+            users=[],
+            quotas={"network": {"unknownQuota": 1}},
+        )
+
+    with pytest.raises(ValidationError):
+        NetworkQuota(floatingIps=3)
 
 
 def test_create_cluster_request_worker_groups_min() -> None:

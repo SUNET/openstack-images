@@ -6,7 +6,14 @@ from decimal import Decimal
 from ipaddress import ip_address
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 # --- Admin: Customers ---
 
@@ -193,6 +200,50 @@ class QuotaSpec(BaseModel):
     network: NetworkQuota = Field(default_factory=NetworkQuota)
 
 
+class ComputeQuotaResponse(BaseModel):
+    """Full compute quota shape accepted by the OpenstackProject CRD."""
+
+    model_config = ConfigDict(extra="forbid")
+    instances: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    cores: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    ramMB: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    serverGroups: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    serverGroupMembers: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+
+
+class StorageQuotaResponse(BaseModel):
+    """Full storage quota shape accepted by the OpenstackProject CRD."""
+
+    model_config = ConfigDict(extra="forbid")
+    volumes: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    volumesGB: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    snapshots: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    backups: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    backupsGB: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+
+
+class NetworkQuotaResponse(BaseModel):
+    """Full network quota shape accepted by the OpenstackProject CRD."""
+
+    model_config = ConfigDict(extra="forbid")
+    floatingIps: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    networks: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    subnets: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    routers: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    ports: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    securityGroups: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+    securityGroupRules: int | None = Field(default=None, ge=-1, le=_QUOTA_MAX)
+
+
+class QuotaResponseSpec(BaseModel):
+    """Strict response schema for any quota shape preserved by the CRD."""
+
+    model_config = ConfigDict(extra="forbid")
+    compute: ComputeQuotaResponse | None = None
+    storage: StorageQuotaResponse | None = None
+    network: NetworkQuotaResponse | None = None
+
+
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     description: str = Field(default="", max_length=_PROJECT_DESCRIPTION_MAX)
@@ -228,9 +279,13 @@ class ProjectResponse(BaseModel):
     description: str
     contract_number: str
     users: list[str]
-    quotas: QuotaSpec | None = None
+    quotas: QuotaResponseSpec | None = None
     phase: str | None = None
     managed: bool = False
+
+    @field_serializer("quotas")
+    def _serialize_quotas(self, value: QuotaResponseSpec | None) -> dict | None:
+        return value.model_dump(exclude_none=True) if value is not None else None
 
 
 # --- Billing Jobs ---

@@ -181,7 +181,7 @@ async def create_project(
         description=req.description,
         contract_number=contract_number,
         users=users,
-        quotas=req.quotas,
+        quotas=req.quotas.model_dump(),
         phase="Pending (waiting for ArgoCD sync)",
     )
 
