@@ -8,6 +8,25 @@ const userBlock = $("#user-block");
 const signoutLink = $("#signout-link");
 
 let currentUser = null;
+let routeAbortController = null;
+
+function beginRoute({ preserveDialogs = false } = {}) {
+    routeAbortController?.abort();
+    routeAbortController = new AbortController();
+    if (!preserveDialogs) {
+        for (const dialog of document.querySelectorAll("dialog.portal-dialog")) {
+            if (dialog.open) dialog.close();
+            else dialog.remove();
+        }
+    }
+}
+
+async function suspendAbortedRoute(error, signal) {
+    if (error?.name !== "AbortError" || !signal?.aborted) throw error;
+    // Keep an obsolete renderer suspended so its catch/fallback branches
+    // cannot append stale markup after a newer route has taken ownership.
+    await new Promise(() => {});
+}
 
 // ---------- DOM helpers ----------
 
@@ -69,7 +88,8 @@ function navigate(hash) {
 
 function currentRoute() { return location.hash.replace(/^#\/?/, ""); }
 
-async function route() {
+async function route(options = {}) {
+    beginRoute(options);
     if (!currentUser) {
         try {
             currentUser = await api("/api/me");
@@ -153,7 +173,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const toggle = document.getElementById("mobile-toggle");
     const topbar = document.getElementById("topbar");
     if (toggle && topbar) {
-        toggle.addEventListener("click", () => topbar.classList.toggle("open"));
+        toggle.addEventListener("click", () => {
+            const open = topbar.classList.toggle("open");
+            toggle.setAttribute("aria-expanded", String(open));
+        });
     }
 });
 
@@ -180,10 +203,17 @@ function formatApiError(detail) {
 }
 
 async function api(path, opts = {}) {
-    const resp = await fetch(path, {
-        headers: { "Content-Type": "application/json", ...opts.headers },
-        ...opts,
-    });
+    const signal = opts.signal || routeAbortController?.signal;
+    let resp;
+    try {
+        resp = await fetch(path, {
+            headers: { "Content-Type": "application/json", ...opts.headers },
+            ...opts,
+            signal,
+        });
+    } catch (error) {
+        await suspendAbortedRoute(error, signal);
+    }
     if (resp.status === 401) { currentUser = null; renderLogin(); return null; }
     if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
@@ -194,11 +224,18 @@ async function api(path, opts = {}) {
 }
 
 async function downloadApi(path, body) {
-    const resp = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-    });
+    const signal = routeAbortController?.signal;
+    let resp;
+    try {
+        resp = await fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal,
+        });
+    } catch (error) {
+        await suspendAbortedRoute(error, signal);
+    }
     if (resp.status === 401) {
         currentUser = null;
         renderLogin();
@@ -241,6 +278,8 @@ function renderShell() {
         return;
     }
     topbar.hidden = false;
+    topbar.classList.remove("open");
+    document.getElementById("mobile-toggle")?.setAttribute("aria-expanded", "false");
     const isAdmin = !!currentUser.is_admin;
     const active = navKeyFromHash();
 
@@ -255,6 +294,7 @@ function renderShell() {
             href: l.hash,
             className: l.key === active ? "on" : "",
             dataset: { key: l.key },
+            "aria-current": l.key === active ? "page" : null,
         }, l.label));
     }
 
@@ -302,7 +342,14 @@ function slbl(text, count, { help } = {}) {
     wrap.appendChild(document.createTextNode(text));
     if (count != null) wrap.appendChild(h("span", { className: "count" }, "· " + count));
     if (help) {
-        const a = h("a", { className: "help", onclick: (e) => { e.preventDefault(); help.onClick && help.onClick(); } }, help.label);
+        const attrs = { className: "help" };
+        if (help.onClick) {
+            attrs.onclick = (e) => {
+                e.preventDefault();
+                help.onClick();
+            };
+        }
+        const a = h("a", attrs, help.label);
         if (help.href) a.setAttribute("href", help.href);
         wrap.appendChild(a);
     }
@@ -338,10 +385,12 @@ function phaseBadge(phase) {
 }
 
 function showAlert(msg, type = "error") {
-    const existing = app.querySelector(".alert");
+    if (!msg) return;
+    const existing = app.querySelector(".flash-alert");
     if (existing) existing.remove();
-    app.prepend(h("div", { className: `alert ${type}` }, msg));
-    if (type === "success") setTimeout(() => app.querySelector(".alert.success")?.remove(), 4000);
+    const alert = h("div", { className: `alert ${type} flash-alert` }, msg);
+    app.prepend(alert);
+    if (type === "success") setTimeout(() => alert.remove(), 4000);
 }
 
 function emptyState(text) {
@@ -521,7 +570,7 @@ async function renderProjectDetail(contractNumber, resourceName) {
         app.appendChild(kv(
             kvRow("Phase", phaseBadge(p.phase)),
             kvRowMono("Resource name", p.resource_name),
-            kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, p.contract_number)),
+            kvRow("Contract", h("a", { className: "text-link", href: `#/contracts/${cn}/projects` }, p.contract_number)),
             p.managed ? kvRow("Ownership", badge("managed-by-sunet", "managed")) : null,
         ));
 
@@ -596,7 +645,7 @@ const _qstored = (quotas, gk, k) =>
 
 /** Build an editable quota form pre-filled from `values` (a quotas dict). */
 function quotaForm(values, { warnLowering = false } = {}) {
-    const form = h("form", { className: "form", style: "margin-top:14px", id: "quota-form" },
+    const form = h("section", { className: "form", style: "margin-top:14px", id: "quota-form" },
         h("h3", {}, "Quotas"),
         h("p", { className: "hint" }, "Resource limits for this project. You can change these anytime."),
         warnLowering ? h("p", { className: "hint" },
@@ -618,7 +667,7 @@ function quotaForm(values, { warnLowering = false } = {}) {
     return form;
 }
 
-/** Read a quotas dict back out of a form built by quotaForm() (display -> stored). */
+/** Read a quotas dict from a container built by quotaForm() (display -> stored). */
 function readQuotaForm(form) {
     const q = {};
     for (const g of QUOTA_GROUPS) {
@@ -665,7 +714,7 @@ function renderCreateProject(contractNumber) {
         lead: "Projects map to a Kubernetes namespace and a billing scope. Choose a name and grant initial members access.",
     }));
 
-    const identity = h("form", { className: "form", id: "identity-form" },
+    const identity = h("section", { className: "form", id: "identity-form" },
         h("h3", {}, "Identity"),
         h("label", { htmlFor: "name" }, "Project name"),
         h("input", { id: "name", name: "name", type: "text", required: true, maxlength: "64", pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", placeholder: "my-project", className: "mono" }),
@@ -681,7 +730,7 @@ function renderCreateProject(contractNumber) {
         h("p", { className: "hint" }, "Set from the contract you came from."),
     );
 
-    const access = h("form", { className: "form", style: "margin-top:14px", id: "access-form" },
+    const access = h("section", { className: "form", style: "margin-top:14px", id: "access-form" },
         h("h3", {}, "Access"),
         h("label", { htmlFor: "members" }, "Members (one per line)"),
         h("textarea", { id: "members", name: "users", style: "min-height:140px", placeholder: "user1@idp\nuser2@idp" }),
@@ -691,28 +740,25 @@ function renderCreateProject(contractNumber) {
     const quota = quotaForm(currentUser.quota_defaults);
 
     const actions = h("div", { className: "btn-row" },
-        h("button", { className: "btn primary", onclick: async (e) => {
-            e.preventDefault();
-            const name = identity.querySelector('[name="name"]').value.trim();
-            const description = identity.querySelector('[name="description"]').value.trim();
-            const usersRaw = access.querySelector('[name="users"]').value.trim();
-            const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
-            if (!quota.reportValidity()) return;
-            const quotas = readQuotaForm(quota);
-            try {
-                await api(`/api/contracts/${contractNumber}/projects`, {
-                    method: "POST", body: JSON.stringify({ name, description, users, quotas }),
-                });
-                navigate(`/contracts/${cn}/projects`);
-            } catch (err) { showAlert(err.message); }
-        }}, "Create project"),
+        h("button", { type: "submit", className: "btn primary" }, "Create project"),
         h("a", { className: "btn ghost", href: `#/contracts/${cn}/projects` }, "Cancel"),
     );
+    const workflow = h("form", { onsubmit: async (e) => {
+        e.preventDefault();
+        const name = identity.querySelector('[name="name"]').value.trim();
+        const description = identity.querySelector('[name="description"]').value.trim();
+        const usersRaw = access.querySelector('[name="users"]').value.trim();
+        const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+        const quotas = readQuotaForm(quota);
+        try {
+            await api(`/api/contracts/${contractNumber}/projects`, {
+                method: "POST", body: JSON.stringify({ name, description, users, quotas }),
+            });
+            navigate(`/contracts/${cn}/projects`);
+        } catch (err) { showAlert(err.message); }
+    }}, identity, access, quota, actions);
 
-    app.appendChild(identity);
-    app.appendChild(access);
-    app.appendChild(quota);
-    app.appendChild(actions);
+    app.appendChild(workflow);
 }
 
 // ---------- Customer: Edit project ----------
@@ -734,10 +780,10 @@ async function renderEditProject(contractNumber, resourceName) {
         const p = await api(`/api/contracts/${contractNumber}/projects/${resourceName}`);
         app.appendChild(phead({ eyebrow: "Edit project", title: p.name }));
 
-        const identity = h("form", { className: "form" },
+        const identity = h("section", { className: "form" },
             h("h3", {}, "Identity"),
-            h("label", {}, "Project name"),
-            h("input", { value: p.name, disabled: true, className: "mono" }),
+            h("label", { htmlFor: "edit-project-name" }, "Project name"),
+            h("input", { id: "edit-project-name", value: p.name, disabled: true, className: "mono" }),
             h("label", { htmlFor: "desc" }, "Description"),
             (() => {
                 const t = h("textarea", { id: "desc", name: "description", className: "sans" });
@@ -745,7 +791,7 @@ async function renderEditProject(contractNumber, resourceName) {
                 return t;
             })(),
         );
-        const access = h("form", { className: "form", style: "margin-top:14px" },
+        const access = h("section", { className: "form", style: "margin-top:14px" },
             h("h3", {}, "Access"),
             h("label", { htmlFor: "members" }, "Members (one per line)"),
             (() => {
@@ -756,27 +802,24 @@ async function renderEditProject(contractNumber, resourceName) {
         );
         const quota = quotaForm(p.quotas, { warnLowering: true });
         const actions = h("div", { className: "btn-row" },
-            h("button", { className: "btn primary", onclick: async (e) => {
-                e.preventDefault();
-                const description = identity.querySelector('[name="description"]').value.trim();
-                const usersRaw = access.querySelector('[name="users"]').value.trim();
-                const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
-                if (!quota.reportValidity()) return;
-                const quotas = readQuotaForm(quota);
-                try {
-                    await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
-                        method: "PATCH", body: JSON.stringify({ description, users, quotas }),
-                    });
-                    navigate(`/contracts/${cn}/projects/${rn}`);
-                } catch (err) { showAlert(err.message); }
-            }}, "Save changes"),
+            h("button", { type: "submit", className: "btn primary" }, "Save changes"),
             h("a", { className: "btn ghost", href: `#/contracts/${cn}/projects/${rn}` }, "Cancel"),
         );
+        const workflow = h("form", { onsubmit: async (e) => {
+            e.preventDefault();
+            const description = identity.querySelector('[name="description"]').value.trim();
+            const usersRaw = access.querySelector('[name="users"]').value.trim();
+            const users = usersRaw ? usersRaw.split("\n").map(u => u.trim()).filter(Boolean) : [];
+            const quotas = readQuotaForm(quota);
+            try {
+                await api(`/api/contracts/${contractNumber}/projects/${resourceName}`, {
+                    method: "PATCH", body: JSON.stringify({ description, users, quotas }),
+                });
+                navigate(`/contracts/${cn}/projects/${rn}`);
+            } catch (err) { showAlert(err.message); }
+        }}, identity, access, quota, actions);
 
-        app.appendChild(identity);
-        app.appendChild(access);
-        app.appendChild(quota);
-        app.appendChild(actions);
+        app.appendChild(workflow);
     } catch (e) { showAlert(e.message); }
 }
 
@@ -846,7 +889,7 @@ async function renderBillingJobDetail(jobId) {
                     try {
                         const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({}) });
                         showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
-                        renderBillingJobDetail(jobId);
+                        route();
                     } catch (err) { showAlert(err.message); }
                 }}, "Run now"),
                 h("a", { className: "btn ghost sm", href: `#/billing/${jobId}/edit` }, "Edit"),
@@ -898,7 +941,16 @@ async function renderBillingJobDetail(jobId) {
         // Manual run
         app.appendChild(h("div", { className: "slbl" }, "Manual run"));
         const now = new Date();
-        const manualForm = h("div", { className: "form" },
+        const manualForm = h("form", { className: "form", onsubmit: async (e) => {
+            e.preventDefault();
+            const y = parseInt(manualForm.querySelector('[name="year"]').value, 10);
+            const m = parseInt(manualForm.querySelector('[name="month"]').value, 10);
+            try {
+                const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({ year: y, month: m }) });
+                showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
+                route();
+            } catch (err) { showAlert(err.message); }
+        }},
             h("div", { className: "row-2" },
                 h("div", { className: "field" },
                     h("label", { htmlFor: "year" }, "Year"),
@@ -910,15 +962,7 @@ async function renderBillingJobDetail(jobId) {
                 ),
             ),
             h("div", { className: "btn-row" },
-                h("button", { className: "btn primary sm", onclick: async () => {
-                    const y = parseInt(manualForm.querySelector('[name="year"]').value, 10);
-                    const m = parseInt(manualForm.querySelector('[name="month"]').value, 10);
-                    try {
-                        const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({ year: y, month: m }) });
-                        showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
-                        renderBillingJobDetail(jobId);
-                    } catch (err) { showAlert(err.message); }
-                }}, "Run for this period"),
+                h("button", { type: "submit", className: "btn primary sm" }, "Run for this period"),
                 h("p", { className: "hint", style: "margin:0;align-self:center" }, "Re-runs are idempotent — same period overwrites the previous file."),
             ),
         );
@@ -932,7 +976,7 @@ function billingJobForm(job = null, onSubmit) {
     const contracts = currentUser.contracts || [];
     const isEdit = !!job;
 
-    const basics = h("form", { className: "form" },
+    const basics = h("section", { className: "form" },
         h("h3", {}, "Basics"),
         h("label", { htmlFor: "name" }, "Job name"),
         h("input", { id: "name", name: "name", type: "text", required: true, value: job?.name || "" }),
@@ -942,20 +986,20 @@ function billingJobForm(job = null, onSubmit) {
         ),
     );
 
-    const contractSelect = h("select", { name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
+    const contractSelect = h("select", { id: "billing-contracts", name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
         ...contracts.map(c => {
             const o = h("option", { value: String(c.id) }, `${c.contract_number} — ${c.customer.name}`);
             if (job && job.contract_ids?.includes(c.id)) o.setAttribute("selected", "");
             return o;
         }),
     );
-    const scope = h("form", { className: "form", style: "margin-top:14px" },
+    const scope = h("section", { className: "form", style: "margin-top:14px" },
         h("h3", {}, "Scope"),
         h("label", { className: "checkbox" },
             h("input", { type: "checkbox", name: "all_contracts", checked: job ? job.all_contracts : true }),
             "Include all contracts you have access to",
         ),
-        h("label", {}, "Or select specific contracts"),
+        h("label", { htmlFor: "billing-contracts" }, "Or select specific contracts"),
         contractSelect,
         h("label", { className: "checkbox", style: "margin-top:18px" },
             h("input", { type: "checkbox", name: "per_contract", checked: job ? job.per_contract : false }),
@@ -964,7 +1008,7 @@ function billingJobForm(job = null, onSubmit) {
         h("p", { className: "hint" }, "When unchecked, a single CSV containing all selected contracts is produced."),
     );
 
-    const schedule = h("form", { className: "form", style: "margin-top:14px" },
+    const schedule = h("section", { className: "form", style: "margin-top:14px" },
         h("h3", {}, "Schedule"),
         h("label", { htmlFor: "cron" }, "Cron expression"),
         h("input", { id: "cron", name: "schedule", type: "text", className: "mono", required: true, value: job?.schedule || "0 6 1 * *", placeholder: "0 6 1 * *" }),
@@ -1003,7 +1047,7 @@ function billingJobForm(job = null, onSubmit) {
     dmSelect.appendChild(oWeb);
     dmSelect.appendChild(oMail);
 
-    const delivery = h("form", { className: "form", style: "margin-top:14px" },
+    const delivery = h("section", { className: "form", style: "margin-top:14px" },
         h("h3", {}, "Delivery"),
         h("label", { htmlFor: "dm" }, "Method"),
         dmSelect,
@@ -1019,7 +1063,11 @@ function billingJobForm(job = null, onSubmit) {
             h("code", {}, "{date}")),
     );
 
-    const submitBtn = h("button", { className: "btn primary", onclick: async (e) => {
+    const submitBtn = h("button", { type: "submit", className: "btn primary" },
+        isEdit ? "Save changes" : "Create job");
+    const cancel = h("a", { className: "btn ghost", href: isEdit ? `#/billing/${job.id}` : "#/billing" }, "Cancel");
+
+    return h("form", { onsubmit: async (e) => {
         e.preventDefault();
         const name = basics.querySelector('[name="name"]').value.trim();
         const enabled = basics.querySelector('[name="enabled"]').checked;
@@ -1051,11 +1099,8 @@ function billingJobForm(job = null, onSubmit) {
                 per_contract: perContract,
             });
         } catch (err) { showAlert(err.message); }
-    }}, isEdit ? "Save changes" : "Create job");
-
-    const cancel = h("a", { className: "btn ghost", href: isEdit ? `#/billing/${job.id}` : "#/billing" }, "Cancel");
-
-    return [basics, scope, schedule, delivery, h("div", { className: "btn-row" }, submitBtn, cancel)];
+    }}, basics, scope, schedule, delivery,
+        h("div", { className: "btn-row" }, submitBtn, cancel));
 }
 
 function renderCreateBillingJob() {
@@ -1067,10 +1112,10 @@ function renderCreateBillingJob() {
         title: "Configure a new export",
         lead: "Choose the schedule, scope and delivery destination for this billing export.",
     }));
-    for (const node of billingJobForm(null, async (body) => {
+    app.appendChild(billingJobForm(null, async (body) => {
         await api("/api/billing/jobs", { method: "POST", body: JSON.stringify(body) });
         navigate("/billing");
-    })) app.appendChild(node);
+    }));
 }
 
 async function renderEditBillingJob(jobId) {
@@ -1088,10 +1133,10 @@ async function renderEditBillingJob(jobId) {
             title: job.name,
             lead: "Configure when this job runs, which contracts it covers, and where the CSV is delivered.",
         }));
-        for (const node of billingJobForm(job, async (body) => {
+        app.appendChild(billingJobForm(job, async (body) => {
             await api(`/api/billing/jobs/${jobId}`, { method: "PATCH", body: JSON.stringify(body) });
             navigate(`/billing/${jobId}`);
-        })) app.appendChild(node);
+        }));
     } catch (e) { showAlert(e.message); }
 }
 
@@ -1115,16 +1160,16 @@ function renderRunOnce() {
         1,
     ));
 
-    const contractSelect = h("select", { name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
+    const contractSelect = h("select", { id: "run-contracts", name: "contract_ids", multiple: true, size: String(Math.max(3, Math.min(8, contracts.length))) },
         ...contracts.map(c => h("option", { value: String(c.id) }, `${c.contract_number} — ${c.customer.name}`)),
     );
-    const scope = h("form", { className: "form" },
+    const scope = h("section", { className: "form" },
         h("h3", {}, "Scope"),
         h("label", { className: "checkbox" },
             h("input", { type: "checkbox", name: "all_contracts", checked: true }),
             "Include all contracts you have access to",
         ),
-        h("label", {}, "Or select specific contracts"),
+        h("label", { htmlFor: "run-contracts" }, "Or select specific contracts"),
         contractSelect,
         h("label", { className: "checkbox", style: "margin-top:18px" },
             h("input", { type: "checkbox", name: "per_contract" }),
@@ -1133,7 +1178,7 @@ function renderRunOnce() {
         h("p", { className: "hint" }, "When unchecked, a single CSV containing all selected contracts is produced."),
     );
 
-    const period = h("form", { className: "form", style: "margin-top:14px" },
+    const period = h("section", { className: "form", style: "margin-top:14px" },
         h("h3", {}, "Period"),
         h("div", { className: "row-2" },
             h("div", { className: "field" },
@@ -1182,7 +1227,7 @@ function renderRunOnce() {
         h("option", { value: "email" }, "Email"),
     );
 
-    const delivery = h("form", { className: "form", style: "margin-top:14px" },
+    const delivery = h("section", { className: "form", style: "margin-top:14px" },
         h("h3", {}, "Delivery"),
         h("label", { htmlFor: "dm" }, "Method"),
         dmSelect,
@@ -1201,7 +1246,11 @@ function renderRunOnce() {
 
     const result = h("div", {});
 
-    const submitBtn = h("button", { className: "btn primary", onclick: async (e) => {
+    const submitBtn = h("button", { type: "submit", className: "btn primary" },
+        "Generate & download now");
+    const cancel = h("a", { className: "btn ghost", href: "#/billing" }, "Cancel");
+
+    const workflow = h("form", { onsubmit: async (e) => {
         e.preventDefault();
         const allContracts = scope.querySelector('[name="all_contracts"]').checked;
         const perContract = scope.querySelector('[name="per_contract"]').checked;
@@ -1250,14 +1299,10 @@ function renderRunOnce() {
             }
         } catch (err) { showAlert(err.message); }
         finally { submitBtn.disabled = false; }
-    }}, "Generate & download now");
+    }}, scope, period, delivery,
+        h("div", { className: "btn-row" }, submitBtn, cancel));
 
-    const cancel = h("a", { className: "btn ghost", href: "#/billing" }, "Cancel");
-
-    app.appendChild(scope);
-    app.appendChild(period);
-    app.appendChild(delivery);
-    app.appendChild(h("div", { className: "btn-row" }, submitBtn, cancel));
+    app.appendChild(workflow);
     app.appendChild(result);
 }
 
@@ -1333,7 +1378,7 @@ async function renderAdminCustomerDetail(customerId) {
             const desc = addForm.querySelector('[name="description"]').value.trim();
             try {
                 await api("/api/admin/contracts", { method: "POST", body: JSON.stringify({ customer_id: parseInt(customerId, 10), contract_number: cn, description: desc }) });
-                renderAdminCustomerDetail(customerId);
+                route();
             } catch (err) { showAlert(err.message); }
         }},
             h("div", { className: "row-2" },
@@ -1468,7 +1513,7 @@ async function renderAdminContractDetail(contractId) {
             const v = rebateForm.querySelector('[name="rebate"]').value.trim();
             try {
                 await api(`/api/admin/contracts/${contractId}/rebate`, { method: "PUT", body: JSON.stringify({ rebate_percent: parseFloat(v) }) });
-                renderAdminContractDetail(contractId);
+                route();
             } catch (err) { showAlert(err.message); }
         }},
             h("label", { htmlFor: "r" }, "Rebate percent"),
@@ -1483,7 +1528,7 @@ async function renderAdminContractDetail(contractId) {
                     ? h("button", { type: "button", className: "btn ghost sm", onclick: async () => {
                         try {
                             await api(`/api/admin/contracts/${contractId}/rebate`, { method: "DELETE" });
-                            renderAdminContractDetail(contractId);
+                            route();
                         } catch (err) { showAlert(err.message); }
                     }}, "Remove rebate")
                     : null,
@@ -1520,7 +1565,7 @@ async function renderAdminContractDetail(contractId) {
                         if (!confirm(`Remove override for ${o.resource_type}?`)) return;
                         try {
                             await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(o.resource_type)}`, { method: "DELETE" });
-                            renderAdminContractDetail(contractId);
+                            route();
                         } catch (err) { showAlert(err.message); }
                     }}, "Remove"),
                 ));
@@ -1542,7 +1587,7 @@ async function renderAdminContractDetail(contractId) {
                     await api(`/api/admin/contracts/${contractId}/pricing/${encodeURIComponent(rt)}`, {
                         method: "PUT", body: JSON.stringify({ resource_type: rt, unit_price: parseFloat(price) }),
                     });
-                    renderAdminContractDetail(contractId);
+                    route();
                 } catch (err) { showAlert(err.message); }
             }},
                 h("h3", {}, "Add override"),
@@ -1578,7 +1623,7 @@ async function renderAdminContractDetail(contractId) {
                         if (!confirm(`Revoke access for ${sub}?`)) return;
                         try {
                             await api(`/api/admin/contracts/${contractId}/users/${encodeURIComponent(sub)}`, { method: "DELETE" });
-                            renderAdminContractDetail(contractId);
+                            route();
                         } catch (err) { showAlert(err.message); }
                     }}, "Revoke"),
                 ));
@@ -1592,7 +1637,7 @@ async function renderAdminContractDetail(contractId) {
             if (!v) return;
             try {
                 await api(`/api/admin/contracts/${contractId}/users`, { method: "POST", body: JSON.stringify({ user_sub: v }) });
-                renderAdminContractDetail(contractId);
+                route();
             } catch (err) { showAlert(err.message); }
         }},
             h("label", { htmlFor: "u" }, "Grant access to user"),
@@ -1628,7 +1673,7 @@ async function renderAdminContractDetail(contractId) {
             const otherContracts = (allContracts || []).filter(c => c.contract_number !== contract.contract_number);
             for (const p of projects) {
                 const row = h("div", { className: "dz-row" });
-                row.appendChild(h("a", { className: "dz-row-name link",
+                row.appendChild(h("a", { className: "dz-row-name text-link",
                     href: `#/contracts/${encodeURIComponent(contract.contract_number)}/projects/${encodeURIComponent(p.resource_name)}` },
                     p.name));
                 if (p.managed) {
@@ -1652,7 +1697,7 @@ async function renderAdminContractDetail(contractId) {
                             await api(`/api/admin/projects/${encodeURIComponent(p.resource_name)}/move`, {
                                 method: "POST", body: JSON.stringify({ contract_number: target }),
                             });
-                            renderAdminContractDetail(contractId);
+                            route();
                         } catch (err) { showAlert(err.message); }
                     }}, "Move");
                     row.appendChild(sel);
@@ -1678,7 +1723,7 @@ async function renderAdminContractDetail(contractId) {
                 await api(`/api/admin/contracts/${contractId}/rename`, {
                     method: "POST", body: JSON.stringify({ contract_number: v }),
                 });
-                renderAdminContractDetail(contractId);
+                route();
             } catch (err) { showAlert(err.message); }
         }},
             h("p", { className: "hint" }, hasManagedProjects
@@ -1724,7 +1769,7 @@ async function renderAdminContractDetail(contractId) {
                     await api(`/api/admin/contracts/${contractId}/move`, {
                         method: "POST", body: JSON.stringify({ customer_id: customerId }),
                     });
-                    renderAdminContractDetail(contractId);
+                    route();
                 } catch (err) { showAlert(err.message); }
             }},
                 h("label", { htmlFor: "move-customer" }, "Target customer"),
@@ -1776,8 +1821,8 @@ async function renderAdminEditContract(contractId) {
                 navigate(`/admin/contracts/${contractId}`);
             } catch (err) { showAlert(err.message); }
         }},
-            h("label", {}, "Contract number"),
-            h("input", { value: contract.contract_number, disabled: true, className: "mono" }),
+            h("label", { htmlFor: "edit-contract-number" }, "Contract number"),
+            h("input", { id: "edit-contract-number", value: contract.contract_number, disabled: true, className: "mono" }),
             h("label", { htmlFor: "d" }, "Description"),
             h("input", { id: "d", name: "description", type: "text", value: contract.description || "" }),
         );
@@ -1817,7 +1862,7 @@ async function renderAdminPricing() {
                 h("div", { className: "price" }, `${Number(p.unit_price).toFixed(6)} SEK `, h("span", { className: "unit" }, "/ " + p.unit)),
                 h("button", { className: "btn ghost tiny", onclick: async () => {
                     if (!confirm(`Remove price for ${p.resource_type}?`)) return;
-                    try { await api(`/api/admin/pricing/${p.id}`, { method: "DELETE" }); renderAdminPricing(); }
+                    try { await api(`/api/admin/pricing/${p.id}`, { method: "DELETE" }); route(); }
                     catch (err) { showAlert(err.message); }
                 }}, "Remove"),
             ));
@@ -1845,8 +1890,8 @@ async function renderAdminPricing() {
                 const field = fields[0];
                 metaContainer.style.display = "block";
                 metaContainer.appendChild(h("input", { type: "hidden", name: "metadata_field", value: field.field }));
-                metaContainer.appendChild(h("label", {}, `${field.field} (optional — leave blank for base price)`));
-                metaContainer.appendChild(h("select", { name: "metadata_value" },
+                metaContainer.appendChild(h("label", { htmlFor: "metadata-value" }, `${field.field} (optional — leave blank for base price)`));
+                metaContainer.appendChild(h("select", { id: "metadata-value", name: "metadata_value" },
                     h("option", { value: "" }, "— All (base price) —"),
                     ...field.values.map(v => h("option", { value: v }, v)),
                 ));
@@ -1874,7 +1919,7 @@ async function renderAdminPricing() {
         }
         try {
             await api("/api/admin/pricing", { method: "POST", body: JSON.stringify(body) });
-            renderAdminPricing();
+            route();
         } catch (err) { showAlert(err.message); }
     }},
         h("h3", {}, "Add resource price"),
@@ -2132,17 +2177,17 @@ async function renderClusterDetail(slug) {
         const overviewRows = [
             kvRowMono("Slug", cluster.slug),
             kvRow("Kubernetes nodes", `${cluster.total_servers} (3 controllers + ${3 * cluster.worker_groups} workers; jumphost excluded)`),
-            kvRow("Contract", h("a", { className: "link", href: `#/contracts/${cn}/projects` }, cluster.contract_number)),
+            kvRow("Contract", h("a", { className: "text-link", href: `#/contracts/${cn}/projects` }, cluster.contract_number)),
             kvRow("Your role", cluster.caller_role || "—"),
         ];
         if (cluster.management_project_resource_name) {
             overviewRows.push(kvRow("Management project",
-                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
+                h("a", { className: "text-link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.management_project_resource_name)}` },
                     cluster.management_project_resource_name)));
         }
         if (cluster.backup_project_resource_name) {
             overviewRows.push(kvRow("Backup project",
-                h("a", { className: "link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
+                h("a", { className: "text-link", href: `#/contracts/${cn}/projects/${encodeURIComponent(cluster.backup_project_resource_name)}` },
                     cluster.backup_project_resource_name)));
         }
         if (cluster.active_addons.length) {
@@ -2165,11 +2210,11 @@ async function renderClusterDetail(slug) {
                             method: "PATCH",
                             body: JSON.stringify({ argocd_alias: value || null }),
                         });
-                        renderClusterDetail(slug);
+                        route();
                     } catch (err) { showAlert(err.message); }
                 }},
-                h("label", {}, "Argo CD DNS alias"),
-                h("input", { name: "argocd_alias", maxlength: "253", value: cluster.argocd_alias || "", placeholder: "argocd.example.org" }),
+                h("label", { htmlFor: "cluster-argocd-alias" }, "Argo CD DNS alias"),
+                h("input", { id: "cluster-argocd-alias", name: "argocd_alias", maxlength: "253", value: cluster.argocd_alias || "", placeholder: "argocd.example.org" }),
                 h("p", { className: "hint" },
                     "Metadata/requested alias only. Saving or clearing it does not activate DNS, routing, or TLS. If activated separately, configure it as a CNAME to the required canonical target ",
                     h("code", {}, cluster.argocd_hostname), "."),
@@ -2201,15 +2246,15 @@ async function renderClusterDetail(slug) {
                             method: "POST", body: JSON.stringify(body),
                         });
                         showIssuedKubeconfig(issued);
-                        renderClusterDetail(slug);
+                        route({ preserveDialogs: true });
                     } catch (err) { showAlert(err.message); }
                 }},
                 h("div", { className: "card-head" }, h("h3", {}, "Issue new kubeconfig")),
                 h("div", { className: "meta", style: "margin-top:8px" },
-                    h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Label"),
-                    h("input", { name: "label", required: true, maxlength: "128", placeholder: "laptop", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
-                    h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "TTL in days (optional, default 365)"),
-                    h("input", { name: "ttl_days", type: "number", min: "1", max: "3650", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("label", { htmlFor: "credential-label", style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Label"),
+                    h("input", { id: "credential-label", name: "label", required: true, maxlength: "128", placeholder: "laptop", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
+                    h("label", { htmlFor: "credential-ttl", style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "TTL in days (optional, default 365)"),
+                    h("input", { id: "credential-ttl", name: "ttl_days", type: "number", min: "1", max: "3650", style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
                     h("div", { className: "btn-row" },
                         h("button", { type: "submit", className: "btn primary sm" }, "Issue kubeconfig"),
                     ),
@@ -2240,7 +2285,7 @@ async function renderClusterDetail(slug) {
                                     try {
                                         const issued = await api(`/api/clusters/${slug}/credentials/${c.id}/rotate`, { method: "POST" });
                                         showIssuedKubeconfig(issued);
-                                        renderClusterDetail(slug);
+                                        route({ preserveDialogs: true });
                                     } catch (err) { showAlert(err.message); }
                                 }}, "Rotate"),
                             h("button", { className: "btn danger tiny",
@@ -2248,7 +2293,7 @@ async function renderClusterDetail(slug) {
                                     if (!confirm(`Revoke credential "${c.label}"? Immediate, can't be undone.`)) return;
                                     try {
                                         await api(`/api/clusters/${slug}/credentials/${c.id}`, { method: "DELETE" });
-                                        renderClusterDetail(slug);
+                                        route();
                                     } catch (err) { showAlert(err.message); }
                                 }}, "Revoke"),
                         );
@@ -2304,7 +2349,7 @@ function renderClusterRequestPanel(slug, cluster, requests) {
                     request_type: "addon",
                     payload: { action: "enable", addon_type: "jupyterhub" },
                 })});
-                renderClusterDetail(slug);
+                route();
             } catch (err) { showAlert(err.message); }
         },
     }, jhActive ? "JupyterHub already enabled" : (jhPending ? "JupyterHub request pending" : "Request JupyterHub addon"));
@@ -2337,7 +2382,7 @@ function renderClusterRequestPanel(slug, cluster, requests) {
                         request_type: "resize",
                         payload: { target_worker_groups: target },
                     })});
-                    renderClusterDetail(slug);
+                    route();
                 } catch (err) { showAlert(err.message); }
             },
         }, resizePending ? "Resize request pending" : "Request resize"),
@@ -2357,7 +2402,7 @@ function renderClusterRequestPanel(slug, cluster, requests) {
                     request_type: "backup",
                     payload: { action },
                 })});
-                renderClusterDetail(slug);
+                route();
             } catch (err) { showAlert(err.message); }
         },
     }, backupPending ? "Backup request pending" : (backupEnabled ? "Request to disable backup" : "Request to enable backup"));
@@ -2367,30 +2412,34 @@ function renderClusterRequestPanel(slug, cluster, requests) {
 }
 
 function showIssuedKubeconfig(issued) {
-    const overlay = h("div", {
-        style: "position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:100",
-    });
-    const close = () => overlay.remove();
     const blob = new Blob([issued.kubeconfig], { type: "text/yaml" });
     const url = URL.createObjectURL(blob);
-    const dialog = h("div", { className: "card", style: "max-width:640px;width:92%;max-height:90vh;overflow:auto" },
-        h("div", { className: "card-head" }, h("h3", {}, "Kubeconfig issued")),
+    const dialog = h("dialog", {
+        className: "portal-dialog",
+        "aria-labelledby": "issued-kubeconfig-title",
+    },
+        h("div", { className: "card-head" },
+            h("h3", { id: "issued-kubeconfig-title" }, "Kubeconfig issued")),
         h("div", { className: "meta" }, `Label: ${issued.label} · Expires: ${fmtDay(issued.expires_at)}`),
         h("div", { className: "meta", style: "margin-top:8px" },
             "Save the file below — it is shown only once and not retrievable later."),
         h("textarea", {
-            readonly: true, value: issued.kubeconfig,
-            style: "width:100%;height:200px;font-family:var(--mono);font-size:12px;margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:6px",
-        }),
+            readonly: true,
+            "aria-label": "Issued kubeconfig",
+        }, issued.kubeconfig),
         h("div", { className: "btn-row" },
             h("a", { className: "btn primary sm",
                 href: url, download: `kubeconfig-${issued.cluster_slug}-${issued.label}.yaml` }, "Download"),
-            h("button", { className: "btn ghost sm", onclick: close }, "Close"),
+            h("button", { className: "btn ghost sm", autofocus: true,
+                onclick: () => dialog.close() }, "Close"),
         ),
     );
-    overlay.appendChild(dialog);
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-    document.body.appendChild(overlay);
+    dialog.addEventListener("close", () => {
+        URL.revokeObjectURL(url);
+        dialog.remove();
+    }, { once: true });
+    document.body.appendChild(dialog);
+    dialog.showModal();
 }
 
 async function renderClusterUsers(slug) {
@@ -2429,7 +2478,7 @@ async function renderClusterUsers(slug) {
                             if (!confirm(`Remove ${u.user_sub}? All their kubeconfigs on this cluster will also be revoked.`)) return;
                             try {
                                 await api(`/api/clusters/${slug}/users/${encodeURIComponent(u.user_sub)}`, { method: "DELETE" });
-                                renderClusterUsers(slug);
+                                route();
                             } catch (err) { showAlert(err.message); }
                         }}, "Remove"),
                 ));
@@ -2445,15 +2494,15 @@ async function renderClusterUsers(slug) {
                 const role = e.target.querySelector('[name="role"]').value;
                 try {
                     await api(`/api/clusters/${slug}/users`, { method: "POST", body: JSON.stringify({ user_sub, role }) });
-                    renderClusterUsers(slug);
+                    route();
                 } catch (err) { showAlert(err.message); }
             }},
             h("div", { className: "meta" },
-                h("label", { style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "OIDC subject"),
-                h("input", { name: "user_sub", required: true, placeholder: "user@idp",
+                h("label", { htmlFor: "cluster-user-sub", style: "display:block;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "OIDC subject"),
+                h("input", { id: "cluster-user-sub", name: "user_sub", required: true, placeholder: "user@idp",
                     style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit" }),
-                h("label", { style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Role"),
-                h("select", { name: "role",
+                h("label", { htmlFor: "cluster-user-role", style: "display:block;margin-top:10px;margin-bottom:6px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "Role"),
+                h("select", { id: "cluster-user-role", name: "role",
                     style: "width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-family:inherit;background:var(--surface)" },
                     h("option", { value: "user" }, "user"),
                     isSunetAdmin ? h("option", { value: "customer_admin" }, "customer_admin (SUNET admin only)") : null,
@@ -2569,8 +2618,8 @@ async function renderAdminCreateCluster() {
                 navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
             } catch (err) { showAlert(err.message); }
         }},
-        h("label", {}, "Contract"),
-        h("select", { name: "contract_number", required: true },
+        h("label", { htmlFor: "new-cluster-contract" }, "Contract"),
+        h("select", { id: "new-cluster-contract", name: "contract_number", required: true },
             h("option", { value: "" }, "— select contract —"),
             ...contracts.map(c => {
                 const cust = customersById[c.customer_id];
@@ -2578,18 +2627,18 @@ async function renderAdminCreateCluster() {
                 return h("option", { value: c.contract_number }, lbl);
             }),
         ),
-        h("label", {}, "Display name"),
-        h("input", { name: "name", required: true, placeholder: "Acme cluster one" }),
-        h("label", {}, "Slug (used in OpenBao mount path & cert O)"),
-        h("input", { name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one" }),
+        h("label", { htmlFor: "new-cluster-name" }, "Display name"),
+        h("input", { id: "new-cluster-name", name: "name", required: true, placeholder: "Acme cluster one" }),
+        h("label", { htmlFor: "new-cluster-slug" }, "Slug (used in OpenBao mount path & cert O)"),
+        h("input", { id: "new-cluster-slug", name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one" }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Use the customer key and sequence, for example ", h("code", {}, "umu-one"), ". OpenBao and DNS names are derived automatically."),
-        h("label", {}, "Worker groups (3 workers per group)"),
-        h("input", { name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
+        h("label", { htmlFor: "new-cluster-workers" }, "Worker groups (3 workers per group)"),
+        h("input", { id: "new-cluster-workers", name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Maximum 80 worker groups for the standard-v1 /24 network."),
-        h("label", {}, "Argo CD DNS alias"),
-        h("input", { name: "argocd_alias", maxlength: "253", placeholder: "argocd.example.org" }),
+        h("label", { htmlFor: "new-cluster-argocd-alias" }, "Argo CD DNS alias"),
+        h("input", { id: "new-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", placeholder: "argocd.example.org" }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Optional metadata/requested alias only. Saving it does not activate DNS, routing, or TLS. The required canonical CNAME target is shown after creation."),
         h("div", { className: "btn-row" },
@@ -2619,7 +2668,7 @@ async function renderAdminClusterDetail(slug) {
                         if (!confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) return;
                         try {
                             await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
-                            renderAdminClusterDetail(slug);
+                            route();
                         } catch (err) { showAlert(err.message); }
                     }}, "Mark provisioned") : null,
                 h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
@@ -2654,11 +2703,11 @@ async function renderAdminClusterDetail(slug) {
                         method: "PATCH",
                         body: JSON.stringify({ argocd_alias: value || null }),
                     });
-                    renderAdminClusterDetail(slug);
+                    route();
                 } catch (err) { showAlert(err.message); }
             }},
-            h("label", {}, "Argo CD DNS alias"),
-            h("input", { name: "argocd_alias", maxlength: "253", value: c.argocd_alias || "", placeholder: "argocd.example.org" }),
+            h("label", { htmlFor: "admin-cluster-argocd-alias" }, "Argo CD DNS alias"),
+            h("input", { id: "admin-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", value: c.argocd_alias || "", placeholder: "argocd.example.org" }),
             h("p", { className: "hint" },
                 "Metadata/requested alias only. Saving or clearing it does not activate DNS, routing, or TLS. If activated separately, configure the alias as a CNAME to the required canonical target ",
                 h("code", {}, c.argocd_hostname), "."),
@@ -2677,14 +2726,14 @@ async function renderAdminClusterDetail(slug) {
                         await api(`/api/admin/clusters/${slug}`, {
                             method: "PATCH", body: JSON.stringify(data),
                         });
-                        renderAdminClusterDetail(slug);
+                        route();
                     } catch (err) { showAlert(err.message); }
                 }},
                 h("p", { className: "hint" }, "Complete these values after Kubespray has created the cluster. Both are required before it can be marked provisioned."),
-                h("label", {}, "API URL"),
-                h("input", { name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443` }),
-                h("label", {}, "CA bundle (PEM)"),
-                h("textarea", { name: "ca_bundle", required: true, className: "cluster-ca-bundle", placeholder: "-----BEGIN CERTIFICATE-----\n..." }),
+                h("label", { htmlFor: "cluster-api-url" }, "API URL"),
+                h("input", { id: "cluster-api-url", name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443` }),
+                h("label", { htmlFor: "cluster-ca-bundle" }, "CA bundle (PEM)"),
+                h("textarea", { id: "cluster-ca-bundle", name: "ca_bundle", required: true, className: "cluster-ca-bundle", placeholder: "-----BEGIN CERTIFICATE-----\n..." }),
                 h("div", { className: "btn-row" },
                     h("button", { type: "submit", className: "btn primary sm" }, "Save connection details"),
                 ),
@@ -2727,7 +2776,7 @@ async function renderAdminClusterRequests() {
                                 await api(`/api/admin/cluster-requests/${r.id}/apply`, {
                                     method: "POST", body: JSON.stringify({ note: note || null }),
                                 });
-                                renderAdminClusterRequests();
+                                route();
                             } catch (err) { showAlert(err.message); }
                         }}, "Apply"),
                     h("button", { className: "btn danger sm",
@@ -2737,7 +2786,7 @@ async function renderAdminClusterRequests() {
                                 await api(`/api/admin/cluster-requests/${r.id}/deny`, {
                                     method: "POST", body: JSON.stringify({ note: note || null }),
                                 });
-                                renderAdminClusterRequests();
+                                route();
                             } catch (err) { showAlert(err.message); }
                         }}, "Deny"),
                 ),
@@ -2818,7 +2867,7 @@ function renderClusterSetupHelp() {
     app.appendChild(sub("3. Portal records"));
     app.appendChild(h("p", {},
         "The cluster will be tied to a contract under a customer. Create both first under ",
-        h("a", { className: "link", href: "#/admin/customers" }, "Admin → Customers"),
+        h("a", { className: "text-link", href: "#/admin/customers" }, "Admin → Customers"),
         " if they don't exist yet."));
 
     app.appendChild(sect("Per-cluster bootstrap"));
@@ -2828,7 +2877,7 @@ function renderClusterSetupHelp() {
 
     app.appendChild(sub("1. Plan the cluster in the portal"));
     app.appendChild(h("p", {},
-        "Open ", h("a", { className: "link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
+        "Open ", h("a", { className: "text-link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
         ". This creates the managed OpenStack project and writes ",
         h("code", {}, "clusters/<slug>/cluster.yaml"), " to the customer-clusters repository. ",
         "Worker groups must be between 1 and 80 so the standard-v1 cluster fits safely in its /24 network."));

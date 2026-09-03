@@ -2,6 +2,7 @@
 
 :root {
   --orange: #ff4500;
+  --orange-rgb: 255, 69, 0;
   --orange-btn: #db3a00;
   --orange-soft: #ffe7dd;
   --ink: #161616;
@@ -24,6 +25,7 @@
    you are not in prod. Gated server-side via PORTAL_IS_IN_TEST. */
 body.test-env {
   --orange: #5b4bdb;
+  --orange-rgb: 91, 75, 219;
   --orange-btn: #4a3bc4;
   --orange-soft: #e8e5fb;
 }
@@ -47,7 +49,20 @@ body {
 }
 
 a { color: inherit; text-decoration: none; }
+a.text-link {
+  color: var(--orange);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+a.text-link:hover { text-decoration-thickness: 2px; }
+.mono { font-family: var(--mono); }
+.meta { font-size: 14px; color: var(--ink-2); }
 button { font-family: inherit; }
+input:disabled, select:disabled, textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
 
 /* Top bar */
 .topbar {
@@ -139,6 +154,7 @@ button { font-family: inherit; }
 .page.narrow-form { max-width: 680px; }
 @media (max-width: 620px) {
   .page { padding: 20px 18px 60px; }
+  .topbar .user { display: none; }
 }
 
 /* Breadcrumbs */
@@ -206,14 +222,15 @@ button { font-family: inherit; }
   transition: all 0.12s;
   text-decoration: none;
 }
-.btn:active { transform: scale(0.97); }
+.btn:active:not(:disabled) { transform: scale(0.97); }
+.btn:disabled { cursor: not-allowed; opacity: 0.55; }
 .btn.primary { background: var(--orange-btn); color: #fff; }
-.btn.primary:hover { background: var(--orange); }
+.btn.primary:not(:disabled):hover { background: var(--orange); }
 .btn.primary:disabled { background: var(--line); color: var(--ink-3); cursor: not-allowed; }
 .btn.ghost { background: var(--surface); color: var(--ink); border-color: var(--line); }
-.btn.ghost:hover { border-color: var(--ink); }
+.btn.ghost:not(:disabled):hover { border-color: var(--ink); }
 .btn.danger { background: var(--surface); color: var(--err); border-color: var(--err); }
-.btn.danger:hover { background: var(--err-soft); }
+.btn.danger:not(:disabled):hover { background: var(--err-soft); }
 .btn.sm { padding: 9px 14px; font-size: 11px; }
 .btn.tiny { padding: 6px 10px; font-size: 10px; letter-spacing: 0.8px; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
@@ -236,7 +253,7 @@ button { font-family: inherit; }
   display: flex; align-items: center; gap: 10px;
   padding: 8px 0; border-top: 1px solid var(--err);
 }
-.danger-zone .dz-row:first-of-type { border-top: none; }
+.danger-zone .slbl + .dz-row { border-top: none; }
 .danger-zone .dz-row-name { flex: 1; font-weight: 600; }
 .danger-zone select { flex: 0 1 auto; }
 
@@ -277,7 +294,7 @@ button { font-family: inherit; }
 .grid {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
 }
 
 /* Badges */
@@ -337,9 +354,6 @@ button { font-family: inherit; }
 }
 .kv .v.mono {
   font-family: var(--mono); font-size: 13px;
-}
-.kv .v a.link {
-  color: var(--orange); border-bottom: 1px solid var(--orange);
 }
 @media (max-width: 620px) {
   .kv .row { grid-template-columns: 1fr; gap: 4px; padding: 12px 16px; }
@@ -490,8 +504,8 @@ button { font-family: inherit; }
   display: flex; align-items: center; justify-content: center;
   padding: 40px 20px;
   background-image:
-    radial-gradient(circle at 15% 20%, rgba(255,69,0,0.08) 0%, transparent 40%),
-    radial-gradient(circle at 85% 80%, rgba(255,69,0,0.06) 0%, transparent 45%);
+    radial-gradient(circle at 15% 20%, rgba(var(--orange-rgb),0.08) 0%, transparent 40%),
+    radial-gradient(circle at 85% 80%, rgba(var(--orange-rgb),0.06) 0%, transparent 45%);
 }
 .login-card {
   width: 100%; max-width: 440px;
@@ -559,7 +573,7 @@ button { font-family: inherit; }
   color: var(--ink-2);
   background: var(--paper);
 }
-.doc tr:last-child th, .doc tr:last-child td { border-bottom: none; }
+.doc tbody tr:last-child td { border-bottom: none; }
 .doc .example {
   background: var(--orange-soft);
   border-left: 4px solid var(--orange);
@@ -620,3 +634,42 @@ button { font-family: inherit; }
 }
 p.ok { color: var(--ok); font-weight: 600; }
 p.err { color: var(--err); font-weight: 600; }
+
+/* Modal dialog */
+.portal-dialog {
+  width: min(640px, 92vw);
+  max-height: 90vh;
+  margin: auto;
+  padding: 20px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.portal-dialog::backdrop { background: rgba(0,0,0,0.55); }
+.portal-dialog textarea {
+  width: 100%;
+  height: 200px;
+  margin: 10px 0;
+  padding: 10px;
+  resize: vertical;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+@media (max-width: 620px) {
+  .danger-zone .dz-row { align-items: stretch; flex-wrap: wrap; }
+  .danger-zone .dz-row-name { flex-basis: 100%; }
+  .danger-zone select { max-width: 100%; }
+  .doc table { display: block; overflow-x: auto; white-space: nowrap; }
+  .form .input-suffix { align-items: stretch; flex-direction: column; }
+  .pt-row { grid-template-columns: 1fr auto; }
+  .pt-row > .btn { grid-column: 1 / -1; justify-self: start; }
+  .run-row { grid-template-columns: 1fr auto; }
+  .run-row .det { grid-column: 1 / -1; }
+}

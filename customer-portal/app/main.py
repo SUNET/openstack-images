@@ -346,6 +346,7 @@ def _render_index(static_dir: Path) -> str:
 if _static_dir.is_dir():
     _index_html = _render_index(_static_dir)
 
+    @app.get("/index.html", response_class=HTMLResponse)
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         return _index_html
