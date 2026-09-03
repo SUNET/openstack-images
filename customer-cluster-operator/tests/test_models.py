@@ -58,11 +58,15 @@ def test_profile_maximum_must_fit_network_with_required_spares(spec, profile):
 def test_hash_is_deterministic_and_ignores_irrelevant_fields(spec, profile):
     first = make_input(deepcopy(spec), deepcopy(profile))
     spec["displayName"] = "Renamed"
-    spec["dns"] = {"zone": "changed.example"}
+    spec["dns"] = {
+        "zone": "changed.example",
+        "argocdAlias": "argocd.example.org",
+    }
     spec["openbao"] = {"mount": "changed"}
     second = make_input(spec, profile)
     assert first.input_hash == second.input_hash
     assert first.canonical_json == second.canonical_json
+    assert "dns" not in second.data
 
 
 def test_hash_changes_for_infrastructure(spec, profile):

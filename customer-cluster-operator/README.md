@@ -58,6 +58,10 @@ infrastructure inputs or profile data are marked `Failed` with
 the infrastructure hash. Their generation changes launch an idempotent worker
 Job that verifies and reconciles retained resources before Ready is reported.
 
+`spec.dns.argocdAlias` is optional metadata containing a lowercase ASCII FQDN.
+It does not affect provisioning, generated inventory, the input hash,
+infrastructure drift, Gateway resources, DNS records, or certificates.
+
 Per cluster, history cleanup retains at most two completed verification Jobs,
 plus the active/current Job and the Job holding the current status result.
 Deleting an old Job uses background propagation so Kubernetes garbage-collects

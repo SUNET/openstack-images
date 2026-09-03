@@ -218,6 +218,7 @@ def test_write_cluster_renders_environment_specific_manifest(
         worker_groups=2,
         project_name="umu-one.umu.se",
         project_resource_name="umu-one-umu-se",
+        argocd_alias="argocd.umu.example.org",
     )
 
     assert path == "clusters/umu-one/cluster.yaml"
@@ -235,6 +236,7 @@ def test_write_cluster_renders_environment_specific_manifest(
         "zone": "k8s-test.sunetvdc.se",
         "apiHostname": "api.umu-one.k8s-test.sunetvdc.se",
         "argocdHostname": "argocd.umu-one.k8s-test.sunetvdc.se",
+        "argocdAlias": "argocd.umu.example.org",
     }
     assert document["spec"]["openbao"] == {
         "mount": "kubernetes/umu-one",
@@ -247,6 +249,53 @@ def test_unsupported_profile_name_is_rejected(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="must be 'standard-v1'"):
         Settings(project_git_repo_url="/unused")
+
+
+def test_update_argocd_alias_preserves_manifest_and_is_idempotent(
+    backend: ClusterGitBackend,
+    monkeypatch,
+) -> None:
+    path = backend.write_cluster(
+        slug="umu-one",
+        display_name="UMU cluster one",
+        contract_number="CO-001",
+        customer_domain="umu.se",
+        worker_groups=1,
+        project_name="umu-one.umu.se",
+        project_resource_name="umu-one-umu-se",
+    )
+    manifest_path = backend.work_dir / path
+    document = yaml.safe_load(manifest_path.read_text())
+    document["spec"]["operatorOwned"] = {"preserve": True}
+    document["spec"]["dns"]["futureField"] = "preserved"
+    manifest_path.write_text(yaml.dump(document, sort_keys=False))
+    commits = []
+    monkeypatch.setattr(backend, "_commit_and_push", commits.append)
+
+    backend.update_argocd_alias("umu-one", "argocd.umu.example.org")
+
+    updated = yaml.safe_load(manifest_path.read_text())
+    assert updated["spec"]["dns"]["argocdAlias"] == "argocd.umu.example.org"
+    assert updated["spec"]["dns"]["argocdHostname"] == ("argocd.umu-one.k8s-test.sunetvdc.se")
+    assert updated["spec"]["dns"]["futureField"] == "preserved"
+    assert updated["spec"]["operatorOwned"] == {"preserve": True}
+    assert commits == ["Update Argo CD DNS alias for umu-one"]
+
+    backend.update_argocd_alias("umu-one", "argocd.umu.example.org")
+    assert commits == ["Update Argo CD DNS alias for umu-one"]
+
+    backend.update_argocd_alias("umu-one", None)
+    cleared = yaml.safe_load(manifest_path.read_text())
+    assert "argocdAlias" not in cleared["spec"]["dns"]
+    assert cleared["spec"]["dns"]["futureField"] == "preserved"
+    assert cleared["spec"]["operatorOwned"] == {"preserve": True}
+    assert commits == [
+        "Update Argo CD DNS alias for umu-one",
+        "Update Argo CD DNS alias for umu-one",
+    ]
+
+    backend.update_argocd_alias("umu-one", None)
+    assert len(commits) == 2
 
 
 def test_write_cluster_updates_root_kustomization_deterministically(
@@ -293,6 +342,7 @@ def test_write_cluster_rejects_existing_manifest(
         "worker_groups": 1,
         "project_name": "umu-one.umu.se",
         "project_resource_name": "umu-one-umu-se",
+        "argocd_alias": "argocd.umu.example.org",
     }
     backend.write_cluster(**values)
 

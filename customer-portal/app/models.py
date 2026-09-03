@@ -208,6 +208,7 @@ class TenantCluster(Base):
     argocd_namespace: Mapped[str] = mapped_column(
         String(63), nullable=False, default="argocd"
     )
+    argocd_alias: Mapped[str | None] = mapped_column(String(253))
 
     worker_groups: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     initial_worker_groups: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

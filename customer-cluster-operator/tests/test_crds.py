@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -43,3 +44,39 @@ def test_endpoint_fields_are_required_and_exposed_in_status():
     ]
     assert status["apiFloatingIp"]["format"] == "ipv4"
     assert status["ingressFloatingIp"]["format"] == "ipv4"
+
+
+def test_argocd_alias_is_an_optional_lowercase_fqdn():
+    managed = yaml.safe_load((CRD_ROOT / "managedcluster_crd.yaml").read_text())
+    spec = managed["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+    dns = spec["properties"]["dns"]
+    alias = dns["properties"]["argocdAlias"]
+
+    assert "argocdAlias" not in dns.get("required", [])
+    assert alias["type"] == "string"
+    assert alias["maxLength"] == 253
+
+    validation = alias["x-kubernetes-validations"][0]
+    ip_literal_pattern = r"^[0-9]+([.][0-9]+){3}$"
+    assert validation["rule"] == f"!self.matches('{ip_literal_pattern}')"
+
+    def schema_accepts(value):
+        return bool(re.fullmatch(alias["pattern"], value)) and not bool(
+            re.fullmatch(ip_literal_pattern, value)
+        )
+
+    assert schema_accepts("argocd.example.org")
+
+    invalid_aliases = [
+        "Argocd.example.org",
+        "argocd.example.org.",
+        "https://argocd.example.org",
+        "argocd.example.org:443",
+        "argocd.example.org/path",
+        "*.example.org",
+        "argocd_alias.example.org",
+        "192.0.2.1",
+        "2001:db8::1",
+    ]
+    for value in invalid_aliases:
+        assert not schema_accepts(value)

@@ -156,6 +156,7 @@ class ClusterGitBackend:
         worker_groups: int,
         project_name: str,
         project_resource_name: str,
+        argocd_alias: str | None = None,
     ) -> str:
         """Write and push the desired-state manifest, returning its path."""
         with self._lock:
@@ -189,6 +190,8 @@ class ClusterGitBackend:
                     },
                 },
             }
+            if argocd_alias is not None:
+                document["spec"]["dns"]["argocdAlias"] = argocd_alias
             if path.exists():
                 existing = yaml.safe_load(path.read_text())
                 if existing == document:
@@ -216,6 +219,47 @@ class ClusterGitBackend:
                     logger.exception("Failed to restore cluster repository clone")
                 raise
             return relative_path
+
+    def update_argocd_alias(self, slug: str, argocd_alias: str | None) -> None:
+        """Set or clear alias metadata without replacing other desired state."""
+        with self._lock:
+            self._pull()
+            path = self._manifest_path(slug)
+            if not path.exists():
+                raise ValueError(f"Cluster manifest '{slug}' not found")
+
+            document = yaml.safe_load(path.read_text())
+            metadata = document.get("metadata") if isinstance(document, dict) else None
+            spec = document.get("spec") if isinstance(document, dict) else None
+            if (
+                not isinstance(document, dict)
+                or document.get("kind") != "ManagedCluster"
+                or not isinstance(metadata, dict)
+                or metadata.get("name") != slug
+                or not isinstance(spec, dict)
+                or not isinstance(spec.get("dns"), dict)
+            ):
+                raise ValueError(f"Cluster manifest '{slug}' has an unexpected structure")
+
+            dns = spec["dns"]
+            if argocd_alias is None:
+                if "argocdAlias" not in dns:
+                    return
+                del dns["argocdAlias"]
+            else:
+                if dns.get("argocdAlias") == argocd_alias:
+                    return
+                dns["argocdAlias"] = argocd_alias
+
+            try:
+                path.write_text("---\n" + dump_yaml(document, sort_keys=False))
+                self._commit_and_push(f"Update Argo CD DNS alias for {slug}")
+            except Exception:
+                try:
+                    self._restore_origin()
+                except Exception:
+                    logger.exception("Failed to restore cluster repository clone")
+                raise
 
     def delete_cluster(self, slug: str) -> None:
         """Refuse portal deletion of any published cluster manifest."""

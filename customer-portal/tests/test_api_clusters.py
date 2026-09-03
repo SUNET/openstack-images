@@ -126,6 +126,8 @@ class StubClusterGitBackend:
         return slug in self.clusters
 
     def write_cluster(self, **values):
+        if values.get("argocd_alias") is None:
+            values.pop("argocd_alias", None)
         slug = values["slug"]
         if self.exists(slug):
             if self.clusters[slug] == values:
@@ -134,6 +136,14 @@ class StubClusterGitBackend:
         self.clusters[slug] = values
         self.publication_order.append("cluster")
         return f"clusters/{slug}/cluster.yaml"
+
+    def update_argocd_alias(self, slug, argocd_alias):
+        if slug not in self.clusters:
+            raise ValueError(f"Cluster manifest '{slug}' not found")
+        if argocd_alias is None:
+            self.clusters[slug].pop("argocd_alias", None)
+        else:
+            self.clusters[slug]["argocd_alias"] = argocd_alias
 
     def delete_cluster(self, slug):
         if slug not in self.clusters:
@@ -413,6 +423,97 @@ async def test_admin_plans_completes_and_provisions_cluster(
     assert r.json()["provisioned_at"] is not None
 
 
+async def test_admin_creates_updates_and_clears_argocd_alias(
+    client,
+    session,
+    cluster_git_backend,
+):
+    await seed_customer_contract(session)
+    await session.commit()
+    _login_as("admin@test")
+    _require_admin_for({"admin@test"})
+    _is_sunet_admin_for({"admin@test"})
+
+    response = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "Acme prod",
+            "slug": "acme-prod",
+            "argocd_alias": "argocd.example.org",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["argocd_alias"] == "argocd.example.org"
+    assert response.json()["argocd_hostname"] == ("argocd.acme-prod.k8s-test.sunetvdc.se")
+    assert cluster_git_backend.clusters["acme-prod"]["argocd_alias"] == ("argocd.example.org")
+
+    _login_as("other@test")
+    response = await client.patch(
+        "/api/admin/clusters/acme-prod",
+        json={"argocd_alias": "other.example.org"},
+    )
+    assert response.status_code == 403
+
+    _login_as("admin@test")
+    response = await client.patch(
+        "/api/admin/clusters/acme-prod",
+        json={"argocd_alias": "new.example.org"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["argocd_alias"] == "new.example.org"
+    assert cluster_git_backend.clusters["acme-prod"]["argocd_alias"] == ("new.example.org")
+
+    response = await client.patch("/api/admin/clusters/acme-prod", json={})
+    assert response.status_code == 200, response.text
+    assert response.json()["argocd_alias"] == "new.example.org"
+
+    response = await client.patch(
+        "/api/admin/clusters/acme-prod",
+        json={"argocd_alias": None},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["argocd_alias"] is None
+    assert "argocd_alias" not in cluster_git_backend.clusters["acme-prod"]
+
+
+async def test_api_rejects_invalid_argocd_alias(client, session):
+    await seed_customer_contract(session)
+    await session.commit()
+    _login_as("admin@test")
+    _require_admin_for({"admin@test"})
+    _is_sunet_admin_for({"admin@test"})
+
+    response = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "Acme prod",
+            "slug": "acme-prod",
+            "argocd_alias": "https://argocd.example.org",
+        },
+    )
+    assert response.status_code == 422
+
+    response = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "Acme prod",
+            "slug": "acme-prod",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    response = await client.patch(
+        "/api/admin/clusters/acme-prod",
+        json={"argocd_alias": "ArgoCD.example.org"},
+    )
+    assert response.status_code == 422
+    assert (await client.get("/api/admin/clusters/acme-prod")).json()["argocd_alias"] is None
+
+
 async def test_admin_cluster_retry_rejects_then_adopts_matching_project(
     client,
     session,
@@ -589,6 +690,90 @@ async def test_customer_admin_grants_user_access(client, session):
         "/api/clusters/c1/users", json={"user_sub": "eve@org", "role": "customer_admin"}
     )
     assert r.status_code == 403
+
+
+async def test_customer_admin_updates_only_own_cluster_argocd_alias(
+    client,
+    session,
+    cluster_git_backend,
+):
+    await seed_customer_contract(session, name="A", domain="a-org", contract_number="CO-A")
+    await seed_customer_contract(session, name="B", domain="b-org", contract_number="CO-B")
+    _login_as("admin@test")
+    _require_admin_for({"admin@test"})
+    _is_sunet_admin_for({"admin@test"})
+    await session.commit()
+
+    for slug, contract_number in (("ca", "CO-A"), ("cb", "CO-B")):
+        response = await client.post(
+            "/api/admin/clusters",
+            json={
+                "contract_number": contract_number,
+                "name": slug,
+                "slug": slug,
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    response = await client.post(
+        "/api/clusters/ca/users",
+        json={"user_sub": "alice@org", "role": "customer_admin"},
+    )
+    assert response.status_code == 201, response.text
+    response = await client.post(
+        "/api/clusters/ca/users",
+        json={"user_sub": "bob@org", "role": "user"},
+    )
+    assert response.status_code == 201, response.text
+
+    _login_as("alice@org")
+    _is_sunet_admin_for(set())
+    response = await client.patch(
+        "/api/clusters/ca/argocd-alias",
+        json={"argocd_alias": "argocd.customer.example.org"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["caller_role"] == "customer_admin"
+    assert response.json()["argocd_alias"] == "argocd.customer.example.org"
+    assert response.json()["argocd_hostname"] == "argocd.ca.k8s-test.sunetvdc.se"
+    assert cluster_git_backend.clusters["ca"]["argocd_alias"] == ("argocd.customer.example.org")
+
+    _login_as("bob@org")
+    response = await client.get("/api/clusters/ca")
+    assert response.status_code == 200, response.text
+    assert response.json()["argocd_alias"] == "argocd.customer.example.org"
+    response = await client.patch(
+        "/api/clusters/ca/argocd-alias",
+        json={"argocd_alias": "argocd.member.example.org"},
+    )
+    assert response.status_code == 403
+    assert cluster_git_backend.clusters["ca"]["argocd_alias"] == ("argocd.customer.example.org")
+
+    _login_as("alice@org")
+    response = await client.patch(
+        "/api/clusters/cb/argocd-alias",
+        json={"argocd_alias": "argocd.other.example.org"},
+    )
+    assert response.status_code == 403
+    assert "argocd_alias" not in cluster_git_backend.clusters["cb"]
+
+    response = await client.patch(
+        "/api/clusters/ca/argocd-alias",
+        json={"argocd_alias": None},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["argocd_alias"] is None
+    assert "argocd_alias" not in cluster_git_backend.clusters["ca"]
+
+    _login_as("admin@test")
+    _is_sunet_admin_for({"admin@test"})
+    response = await client.patch(
+        "/api/clusters/cb/argocd-alias",
+        json={"argocd_alias": "argocd.sunet.example.org"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["caller_role"] == "sunet_admin"
+    assert cluster_git_backend.clusters["cb"]["argocd_alias"] == ("argocd.sunet.example.org")
 
 
 async def test_cross_cluster_isolation(client, session):

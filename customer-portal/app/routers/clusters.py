@@ -38,6 +38,7 @@ from app.schemas import (
     ClusterAccessResponse,
     ClusterResponse,
     CreateClusterRequest,
+    UpdateArgocdAliasRequest,
     UpdateClusterRequest,
     _size_label,
 )
@@ -106,6 +107,29 @@ async def _sync_managed_project_admins(
         )
 
 
+async def _set_argocd_alias(
+    cluster: TenantCluster,
+    argocd_alias: str | None,
+    request: Request,
+) -> None:
+    """Publish alias metadata before updating the corresponding DB row."""
+    cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
+    if cluster_git_backend is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Cluster manifest repository is not configured",
+        )
+    try:
+        await asyncio.to_thread(
+            cluster_git_backend.update_argocd_alias,
+            cluster.slug,
+            argocd_alias,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    cluster.argocd_alias = argocd_alias
+
+
 async def _to_response(
     cluster: TenantCluster,
     *,
@@ -134,6 +158,7 @@ async def _to_response(
         manifest_path=f"clusters/{cluster.slug}/cluster.yaml",
         api_hostname=f"api.{cluster.slug}.{settings.cluster_dns_zone}",
         argocd_hostname=f"argocd.{cluster.slug}.{settings.cluster_dns_zone}",
+        argocd_alias=cluster.argocd_alias,
         openbao_secret_root=f"kv/customer-clusters/{cluster.slug}",
         connection_configured=bool(cluster.api_url and cluster.ca_bundle),
     )
@@ -252,6 +277,7 @@ async def admin_create_cluster(
             worker_groups=req.worker_groups,
             project_name=project_name,
             project_resource_name=management_resource_name,
+            argocd_alias=req.argocd_alias,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -266,6 +292,7 @@ async def admin_create_cluster(
         openbao_role=req.openbao_role,
         argocd_role_name=req.argocd_role_name,
         argocd_namespace=req.argocd_namespace,
+        argocd_alias=req.argocd_alias,
         worker_groups=req.worker_groups,
         initial_worker_groups=req.worker_groups,
         management_project_resource_name=management_resource_name,
@@ -333,6 +360,7 @@ async def admin_get_cluster(
 async def admin_update_cluster(
     slug: str,
     req: UpdateClusterRequest,
+    request: Request,
     user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
@@ -345,6 +373,9 @@ async def admin_update_cluster(
     ).scalar_one_or_none()
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
+
+    if "argocd_alias" in req.model_fields_set:
+        await _set_argocd_alias(cluster, req.argocd_alias, request)
 
     for field in (
         "name",
@@ -472,6 +503,35 @@ async def get_cluster(
     session: AsyncSession = Depends(get_session),
 ):
     cluster, access = await require_cluster_access(slug, user["sub"], session, settings)
+    role = "sunet_admin" if access is None else access.role
+    return await _to_response(cluster, caller_role=role, session=session)
+
+
+@member_router.patch("/{slug}/argocd-alias", response_model=ClusterResponse)
+async def update_argocd_alias(
+    slug: str,
+    req: UpdateArgocdAliasRequest,
+    request: Request,
+    user: dict[str, Any] = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_session),
+):
+    cluster, access = await require_cluster_access(
+        slug,
+        user["sub"],
+        session,
+        settings,
+        min_role="customer_admin",
+    )
+    await _set_argocd_alias(cluster, req.argocd_alias, request)
+    await session.commit()
+    audit_log(
+        user["sub"],
+        "cluster.update",
+        cluster_id=cluster.id,
+        slug=cluster.slug,
+        field="argocd_alias",
+    )
     role = "sunet_admin" if access is None else access.role
     return await _to_response(cluster, caller_role=role, session=session)
 

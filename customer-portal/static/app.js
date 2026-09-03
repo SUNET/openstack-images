@@ -2150,6 +2150,38 @@ async function renderClusterDetail(slug) {
         }
         app.appendChild(kv(...overviewRows));
 
+        app.appendChild(slbl("Argo CD DNS alias"));
+        app.appendChild(kv(
+            kvRowMono("Canonical Argo CD hostname / required CNAME target", cluster.argocd_hostname),
+            kvRowMono("Requested alias (metadata only)", cluster.argocd_alias || "—"),
+        ));
+        if (isCustomerAdmin) {
+            app.appendChild(h("form", { className: "form",
+                onsubmit: async (e) => {
+                    e.preventDefault();
+                    const value = new FormData(e.target).get("argocd_alias").trim();
+                    try {
+                        await api(`/api/clusters/${slug}/argocd-alias`, {
+                            method: "PATCH",
+                            body: JSON.stringify({ argocd_alias: value || null }),
+                        });
+                        renderClusterDetail(slug);
+                    } catch (err) { showAlert(err.message); }
+                }},
+                h("label", {}, "Argo CD DNS alias"),
+                h("input", { name: "argocd_alias", maxlength: "253", value: cluster.argocd_alias || "", placeholder: "argocd.example.org" }),
+                h("p", { className: "hint" },
+                    "Metadata/requested alias only. Saving or clearing it does not activate DNS, routing, or TLS. If activated separately, configure it as a CNAME to the required canonical target ",
+                    h("code", {}, cluster.argocd_hostname), "."),
+                h("div", { className: "btn-row" },
+                    h("button", { type: "submit", className: "btn primary sm" }, "Save alias"),
+                ),
+            ));
+        } else {
+            app.appendChild(h("p", { className: "hint" },
+                "This is metadata only and does not activate DNS, routing, or TLS."));
+        }
+
         const requests = await api(`/api/clusters/${slug}/requests`);
 
         // Credentials
@@ -2529,6 +2561,7 @@ async function renderAdminCreateCluster() {
             e.preventDefault();
             const data = Object.fromEntries(new FormData(e.target).entries());
             data.worker_groups = parseInt(data.worker_groups, 10) || 1;
+            data.argocd_alias = data.argocd_alias.trim() || null;
             try {
                 const created = await api("/api/admin/clusters", {
                     method: "POST", body: JSON.stringify(data),
@@ -2555,6 +2588,10 @@ async function renderAdminCreateCluster() {
         h("input", { name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Maximum 80 worker groups for the standard-v1 /24 network."),
+        h("label", {}, "Argo CD DNS alias"),
+        h("input", { name: "argocd_alias", maxlength: "253", placeholder: "argocd.example.org" }),
+        h("div", { className: "meta", style: "margin-top:6px" },
+            "Optional metadata/requested alias only. Saving it does not activate DNS, routing, or TLS. The required canonical CNAME target is shown after creation."),
         h("div", { className: "btn-row" },
             h("a", { className: "btn ghost sm", href: "#/admin/clusters" }, "Cancel"),
             h("button", { type: "submit", className: "btn primary sm" }, "Create cluster"),
@@ -2597,13 +2634,37 @@ async function renderAdminClusterDetail(slug) {
             kvRow("Size", `${c.size_label} (${c.total_servers} Kubernetes nodes; jumphost excluded)`),
             kvRowMono("API", c.api_url || "(not configured)"),
             kvRowMono("Planned API DNS", c.api_hostname),
-            kvRowMono("Planned ArgoCD DNS", c.argocd_hostname),
+            kvRowMono("Canonical Argo CD DNS / required CNAME target", c.argocd_hostname),
+            kvRowMono("Requested Argo CD DNS alias (metadata only)", c.argocd_alias || "—"),
             kvRowMono("OpenBao secrets", c.openbao_secret_root),
             kvRowMono("Cluster manifest", c.manifest_path),
             kvRow("Contract", c.contract_number),
             kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
             kvRow("Management project", c.management_project_resource_name || "—"),
             kvRow("Backup project", c.backup_project_resource_name || "—"),
+        ));
+
+        app.appendChild(h("div", { className: "slbl" }, "Argo CD DNS alias"));
+        app.appendChild(h("form", { className: "form",
+            onsubmit: async (e) => {
+                e.preventDefault();
+                const value = new FormData(e.target).get("argocd_alias").trim();
+                try {
+                    await api(`/api/admin/clusters/${slug}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ argocd_alias: value || null }),
+                    });
+                    renderAdminClusterDetail(slug);
+                } catch (err) { showAlert(err.message); }
+            }},
+            h("label", {}, "Argo CD DNS alias"),
+            h("input", { name: "argocd_alias", maxlength: "253", value: c.argocd_alias || "", placeholder: "argocd.example.org" }),
+            h("p", { className: "hint" },
+                "Metadata/requested alias only. Saving or clearing it does not activate DNS, routing, or TLS. If activated separately, configure the alias as a CNAME to the required canonical target ",
+                h("code", {}, c.argocd_hostname), "."),
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn primary sm" }, "Save alias"),
+            ),
         ));
 
         if (!c.provisioned_at) {

@@ -3,6 +3,7 @@
 import re
 from datetime import datetime
 from decimal import Decimal
+from ipaddress import ip_address
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -394,6 +395,22 @@ class UserInfo(BaseModel):
 # --- Tenant Clusters ---
 
 
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _validate_argocd_alias(value: str) -> str:
+    labels = value.split(".")
+    if len(labels) < 2 or any(not _DNS_LABEL.fullmatch(label) for label in labels):
+        raise ValueError("must be a lowercase ASCII FQDN with at least two valid labels")
+    if len(labels) == 4 and all(label.isdigit() and int(label) <= 255 for label in labels):
+        raise ValueError("must be a DNS hostname, not an IP address")
+    try:
+        ip_address(value)
+    except ValueError:
+        return value
+    raise ValueError("must be a DNS hostname, not an IP address")
+
+
 def _size_label(worker_groups: int) -> str:
     """1=Liten, 2=Mellan, 3=Stor, 4=XL, N>=4 ⇒ (N−3)*'X' + 'L'."""
     table = {1: "Liten", 2: "Mellan", 3: "Stor"}
@@ -414,7 +431,13 @@ class CreateClusterRequest(BaseModel):
     openbao_role: str = Field(default="argocd-rbac-manager", max_length=255)
     argocd_role_name: str = Field(default="argocd-tenant", max_length=255)
     argocd_namespace: str = Field(default="argocd", max_length=63)
+    argocd_alias: str | None = Field(default=None, max_length=253)
     worker_groups: int = Field(default=1, ge=1, le=80)
+
+    @field_validator("argocd_alias")
+    @classmethod
+    def validate_argocd_alias(cls, value: str | None) -> str | None:
+        return _validate_argocd_alias(value) if value is not None else None
 
 
 class UpdateClusterRequest(BaseModel):
@@ -425,6 +448,23 @@ class UpdateClusterRequest(BaseModel):
     openbao_role: str | None = Field(default=None, max_length=255)
     argocd_role_name: str | None = Field(default=None, max_length=255)
     argocd_namespace: str | None = Field(default=None, max_length=63)
+    argocd_alias: str | None = Field(default=None, max_length=253)
+
+    @field_validator("argocd_alias")
+    @classmethod
+    def validate_argocd_alias(cls, value: str | None) -> str | None:
+        return _validate_argocd_alias(value) if value is not None else None
+
+
+class UpdateArgocdAliasRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    argocd_alias: str | None = Field(max_length=253)
+
+    @field_validator("argocd_alias")
+    @classmethod
+    def validate_argocd_alias(cls, value: str | None) -> str | None:
+        return _validate_argocd_alias(value) if value is not None else None
 
 
 class ClusterResponse(BaseModel):
@@ -447,6 +487,7 @@ class ClusterResponse(BaseModel):
     manifest_path: str
     api_hostname: str
     argocd_hostname: str
+    argocd_alias: str | None = None
     openbao_secret_root: str
     connection_configured: bool
 

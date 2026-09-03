@@ -100,6 +100,17 @@ spec:
                       type: string
                     argocdHostname:
                       type: string
+                    argocdAlias:
+                      type: string
+                      maxLength: 253
+                      # yamllint disable rule:line-length
+                      pattern: ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$
+                      # yamllint enable rule:line-length
+                      x-kubernetes-validations:
+                        - rule: >-
+                            !self.matches('^[0-9]+([.][0-9]+){3}$')
+                          message: >-
+                            must be a lowercase ASCII FQDN, not an IP literal
                 openbao:
                   type: object
                   properties:
