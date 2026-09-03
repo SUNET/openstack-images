@@ -136,6 +136,12 @@ spec:
                 inventoryCommit:
                   type: string
                   pattern: ^([0-9a-f]{40}|[0-9a-f]{64})$
+                apiFloatingIp:
+                  type: string
+                  format: ipv4
+                ingressFloatingIp:
+                  type: string
+                  format: ipv4
                 lastVerifiedAt:
                   type: string
                   format: date-time

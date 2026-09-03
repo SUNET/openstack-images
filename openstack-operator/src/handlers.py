@@ -871,7 +871,19 @@ def reconcile_project(
 
         # Verify and repair federation resources if configured
         federation_ref = spec.get("federationRef")
-        if federation_ref and role_bindings:
+        is_managed = bool(spec.get("managed", False))
+        if federation_ref and role_bindings and is_managed:
+            fed_config = get_federation_config(namespace, federation_ref)
+            if fed_config and fed_config["idp_name"]:
+                manager = FederationManager(
+                    client,
+                    fed_config["idp_name"],
+                    fed_config["idp_remote_id"],
+                    fed_config["sso_domain"],
+                )
+                manager.remove_project_mapping(project_name)
+                get_registry().unregister("federation_mappings", project_name)
+        elif federation_ref and role_bindings:
             fed_config = get_federation_config(namespace, federation_ref)
             if fed_config and fed_config["idp_name"]:
                 users = get_users_from_role_bindings(role_bindings)

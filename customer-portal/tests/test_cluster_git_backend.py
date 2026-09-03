@@ -38,6 +38,7 @@ def project_backend(tmp_path: Path, monkeypatch) -> GitBackend:
         project_git_repo_url="/unused",
         project_git_work_dir=str(tmp_path),
         default_domain="customer-sso",
+        admin_users=["portal-admin@test"],
         cluster_provisioner_user="provisioner",
         cluster_provisioner_user_domain="service-users",
     )
@@ -70,6 +71,11 @@ def test_managed_project_keeps_customer_and_provisioner_bindings(
         },
         {
             "role": "member",
+            "users": ["portal-admin@test"],
+            "userDomain": "customer-sso",
+        },
+        {
+            "role": "member",
             "users": ["provisioner"],
             "userDomain": "service-users",
         },
@@ -83,6 +89,11 @@ def test_managed_project_keeps_customer_and_provisioner_bindings(
         {
             "role": "reader",
             "users": ["new-admin@umu.se"],
+            "userDomain": "customer-sso",
+        },
+        {
+            "role": "member",
+            "users": ["portal-admin@test"],
             "userDomain": "customer-sso",
         },
         {
@@ -158,6 +169,7 @@ async def test_customer_admin_sync_preserves_provisioner_binding() -> None:
     settings = Settings(
         project_git_repo_url="/unused",
         default_domain="customer-sso",
+        admin_users=["portal-admin@test"],
         cluster_provisioner_user="provisioner",
         cluster_provisioner_user_domain="service-users",
     )
@@ -179,6 +191,11 @@ async def test_customer_admin_sync_preserves_provisioner_binding() -> None:
             {
                 "role": "reader",
                 "users": ["a-admin@umu.se", "z-admin@umu.se"],
+                "userDomain": "customer-sso",
+            },
+            {
+                "role": "member",
+                "users": ["portal-admin@test"],
                 "userDomain": "customer-sso",
             },
             {

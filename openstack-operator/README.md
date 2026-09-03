@@ -205,6 +205,15 @@ spec:
     configMapName: federation-config
 ```
 
+For `managed: true` projects, user role bindings are direct Keystone
+assignments and federation mappings are not created. Direct assignments are
+reconciled add-only because Keystone does not record whether the operator or an
+administrator created an assignment. This preserves assignments from multiple
+bindings and protects unrelated manual access, but removing a user from a
+managed-project manifest does not revoke existing Keystone access. Revocation
+must be performed manually until assignment ownership is represented by the
+deferred identity model.
+
 **Status:**
 ```yaml
 status:

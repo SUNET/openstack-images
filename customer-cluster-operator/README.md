@@ -1,5 +1,7 @@
 # Customer Cluster Operator
 
+Current package and image release: `0.1.5`.
+
 This directory contains the first infrastructure slice of the
 `ManagedCluster` operator. A Kopf controller validates each desired cluster and
 runs an idempotent worker Job. The worker provisions OpenStack infrastructure
@@ -75,8 +77,9 @@ owner-referenced Job and input ConfigMap when the `ManagedCluster` is deleted.
 Status phases are `Suspended`, `PendingProject`, `PendingPrerequisites`,
 `ProvisioningInfrastructure`, `VirtualMachinesReady`, and `Failed`. Ready status
 is derived from an owned
-Job Pod's structured termination result and records `inventoryPath` and
-`inventoryCommit`. Successful checks also update `lastVerifiedAt`. It means
+Job Pod's structured termination result and records `inventoryPath`,
+`inventoryCommit`, `apiFloatingIp`, and `ingressFloatingIp`. Successful checks
+also update `lastVerifiedAt`. It means
 OpenStack resources exist and inventory was pushed, not that Kubernetes was
 installed.
 
@@ -85,9 +88,9 @@ installed.
 The worker scopes the selected `clouds.yaml` cloud to the exact project ID and
 name, verifies the resulting scope, and then creates deterministic resources:
 
-- private network, subnet, SNAT router, and optional reserved VIP ports;
-- separate cluster and jumphost security groups;
-- one jumphost with a floating IP;
+- private network, subnet, SNAT router, and required reserved API and ingress VIP ports;
+- shared cluster, jumphost, API endpoint, and ingress endpoint security groups;
+- stable floating IPs attached directly to the jumphost and both VIP ports;
 - three controllers and `3 * workerGroups` workers; and
 - boot-from-volume Debian Trixie instances with password SSH disabled.
 
@@ -97,7 +100,11 @@ the jumphost, two VIPs, router, DHCP, and at least four spare addresses.
 
 Only configured CIDRs may reach jumphost TCP/22. Cluster-node ingress permits
 internal cluster-security-group traffic and TCP/22 from the jumphost security
-group. Node SSH is not exposed publicly. Existing same-name resources not
+group. Controllers additionally receive an API group allowing public TCP/6443;
+workers receive an ingress group allowing public TCP/80 and TCP/443. Existing
+owned node ports are reconciled from the former shared or `sunet-two` group set
+to these exact role-specific sets without replacing ports or servers. Node SSH
+is not exposed publicly. Existing same-name resources not
 marked with this cluster UID cause a fail-closed ownership error.
 Retained same-name resources are never adopted across cluster UIDs. Recovery
 requires restoring the original ManagedCluster UID, selecting a different
@@ -113,6 +120,10 @@ Push races retry from fresh clones. Inventory is written to:
 ```text
 clusters/<slug>/generated/ansible/hosts.yml
 ```
+
+Inventory `all.vars` publishes the private API and ingress VIPs and both public
+endpoint floating IPs. `kube_node` contains workers only; `k8s_cluster` includes
+both `kube_control_plane` and `kube_node` through child groups.
 
 ## Development
 
@@ -131,7 +142,8 @@ Deployment, service account, and RBAC manifests remain deployment-owned.
 Deployment manifests need one optional environment variable when exposing the
 new setting: `VERIFICATION_INTERVAL_SECONDS` (default `900`, minimum `60`). A
 structural status schema must permit `status.lastVerifiedAt` as a date-time
-string. Controller RBAC must grant `get`, `list`, `create`, and `delete` on
+string and both endpoint floating-IP fields as IPv4 strings. Controller RBAC
+must grant `get`, `list`, `create`, and `delete` on
 `batch/jobs`; `get`, `list`, `create`, and `delete` on core `configmaps`; `get`
 on core `secrets`; `list` on core `pods`; and cluster-scoped `get`, `list`, and
 `watch` on core `namespaces` for Kopf discovery. Pod deletion is not required

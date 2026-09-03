@@ -52,11 +52,16 @@ def _sanitize_name(name: str) -> str:
 
 
 def managed_role_bindings(settings: Settings, users: list[str]) -> list[dict]:
-    """Build the customer-reader and cluster-provisioner binding contract."""
+    """Build customer, portal-admin, and provisioner managed bindings."""
     return [
         {
             "role": "reader",
             "users": users,
+            "userDomain": settings.default_domain,
+        },
+        {
+            "role": "member",
+            "users": sorted(set(settings.admin_users)),
             "userDomain": settings.default_domain,
         },
         {

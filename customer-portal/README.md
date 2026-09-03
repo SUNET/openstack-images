@@ -32,6 +32,10 @@ worker-group count.
 managed OpenStack projects and defaults to `openstack-operator`.
 `CLUSTER_PROVISIONER_USER_DOMAIN` names that user's Keystone domain and
 defaults to `default`. Every managed project keeps this identity in a `member`
-role binding. Customer admins are maintained separately as `reader` users in
-the portal's default user domain. Self-service projects retain their existing
-single customer `member` binding.
+role binding. All `PORTAL_ADMIN_USERS` are also maintained as `member` users in
+the portal's default user domain, while per-cluster customer admins are
+maintained separately as `reader` users there. Managed direct assignments are
+currently add-only in the OpenStack operator to avoid revoking manual or
+cross-domain assignments, so removing either kind of admin from portal state
+requires a manual Keystone revocation. Self-service projects retain their
+existing single customer `member` binding.

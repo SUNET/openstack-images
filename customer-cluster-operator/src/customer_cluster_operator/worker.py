@@ -37,6 +37,8 @@ def run(data: dict[str, Any], *, token: str, clouds_file: str = CLOUDS_MOUNT) ->
         "controllers": len(resources["controllers"]),
         "workers": len(resources["workers"]),
         "jumphostFloatingIp": resources["jumphost"]["floating_ip"],
+        "apiFloatingIp": resources["api_floating_ip"],
+        "ingressFloatingIp": resources["ingress_floating_ip"],
         "inventoryPath": path,
         "inventoryCommit": commit,
     }

@@ -123,32 +123,23 @@ def _sync_user_role_assignments(
     user_domain: str,
     project_id: str,
 ) -> None:
-    """Idempotently sync direct user-role assignments on a project.
+    """Idempotently ensure direct user-role assignments on a project.
 
-    Adds assignments for desired users that don't already have it, removes
-    assignments for users no longer in the desired list. Users that don't
-    yet exist in Keystone (e.g. federated users who haven't logged in) are
-    skipped — they'll be picked up on the next reconcile.
+    Direct Keystone assignments have no ownership metadata, so removing an
+    assignment absent from one binding could revoke another binding or a
+    manual assignment. Managed-project reconciliation is therefore
+    deliberately add-only. Users that don't yet exist in Keystone (e.g.
+    federated users who haven't logged in) are retried on the next reconcile.
     """
-    desired_user_ids: set[str] = set()
     for username in desired_users:
         user = client.get_user(username, user_domain)
         if user:
-            desired_user_ids.add(user.id)
+            client.assign_role_to_user(role_id, user.id, project_id)
         else:
             logger.debug(
                 f"User {username} not found in domain {user_domain}, "
                 "will be assigned after first SSO login"
             )
-
-    current_user_ids = set(
-        client.list_user_role_assignments_on_project(project_id, role_id)
-    )
-
-    for uid in desired_user_ids - current_user_ids:
-        client.assign_role_to_user(role_id, uid, project_id)
-    for uid in current_user_ids - desired_user_ids:
-        client.revoke_role_from_user(role_id, uid, project_id)
 
 
 def _sync_users_to_group(

@@ -486,7 +486,7 @@ def test_server_boots_from_owned_volume(provisioning_input, monkeypatch):
         machine={"flavor": "b2.c4r8", "rootVolumeGB": 80},
         network=SimpleNamespace(id="network"),
         subnet=SimpleNamespace(id="subnet"),
-        security_group=SimpleNamespace(name="cluster-sg"),
+        security_groups=[SimpleNamespace(name="cluster-sg")],
         image=SimpleNamespace(id="image"),
         keypair=SimpleNamespace(name="key"),
     )
@@ -521,11 +521,12 @@ def test_floating_ip_rejects_unowned_address(provisioning_input, monkeypatch):
         provisioning_input.data,
         ["ssh-ed25519 QUFBQQ=="],
     )
-    monkeypatch.setattr(provisioner, "_server_port", Mock(return_value=SimpleNamespace(id="port")))
     with pytest.raises(OwnershipError, match="belongs to another cluster UID"):
         provisioner._floating_ip(
-            SimpleNamespace(id="jump"),
-            SimpleNamespace(id="network"),
+            "jumphost",
+            SimpleNamespace(
+                id="port", fixed_ips=[{"subnet_id": "subnet", "ip_address": "10.44.0.20"}]
+            ),
             SimpleNamespace(id="public"),
         )
 
@@ -539,6 +540,8 @@ def test_floating_ip_validates_floating_network(provisioning_input, monkeypatch)
         description=f"ManagedCluster {uid} jumphost",
         floating_network_id="other-public",
         floating_ip_address="192.0.2.10",
+        port_id="port",
+        fixed_ip_address="10.44.0.20",
     )
     network_api = Mock()
     network_api.ips.return_value = [floating]
@@ -547,11 +550,12 @@ def test_floating_ip_validates_floating_network(provisioning_input, monkeypatch)
         provisioning_input.data,
         ["ssh-ed25519 QUFBQQ=="],
     )
-    monkeypatch.setattr(provisioner, "_server_port", Mock(return_value=SimpleNamespace(id="port")))
     with pytest.raises(OwnershipError, match="different floating network"):
         provisioner._floating_ip(
-            SimpleNamespace(id="jump"),
-            SimpleNamespace(id="network"),
+            "jumphost",
+            SimpleNamespace(
+                id="port", fixed_ips=[{"subnet_id": "subnet", "ip_address": "10.44.0.20"}]
+            ),
             SimpleNamespace(id="public"),
         )
 
@@ -564,6 +568,8 @@ def test_floating_ip_creation_sets_tags_after_create(provisioning_input, monkeyp
         description=("ManagedCluster 12345678-1234-1234-1234-123456789abc jumphost"),
         floating_network_id="public",
         floating_ip_address="192.0.2.10",
+        port_id="port",
+        fixed_ip_address="10.44.0.20",
     )
     network_api.create_ip.return_value = created
     network_api.set_tags.side_effect = return_tagged
@@ -572,17 +578,19 @@ def test_floating_ip_creation_sets_tags_after_create(provisioning_input, monkeyp
         provisioning_input.data,
         ["ssh-ed25519 QUFBQQ=="],
     )
-    monkeypatch.setattr(provisioner, "_server_port", Mock(return_value=SimpleNamespace(id="port")))
-
     assert (
         provisioner._floating_ip(
-            SimpleNamespace(id="jump"),
-            SimpleNamespace(id="network"),
+            "jumphost",
+            SimpleNamespace(
+                id="port", fixed_ips=[{"subnet_id": "subnet", "ip_address": "10.44.0.20"}]
+            ),
             SimpleNamespace(id="public"),
         )
         == "192.0.2.10"
     )
     assert "tags" not in network_api.create_ip.call_args.kwargs
+    assert network_api.create_ip.call_args.kwargs["port_id"] == "port"
+    assert network_api.create_ip.call_args.kwargs["fixed_ip_address"] == "10.44.0.20"
     network_api.set_tags.assert_called_once_with(created, provisioner.tags)
 
 
@@ -601,13 +609,16 @@ def test_node_port_has_role_vip_and_is_idempotent(provisioning_input):
         server_name="cc-example-controller-01",
         network=SimpleNamespace(id="network"),
         subnet=SimpleNamespace(id="subnet"),
-        security_group=SimpleNamespace(id="cluster-sg"),
+        security_groups=[
+            SimpleNamespace(id="cluster-sg"),
+            SimpleNamespace(id="api-sg"),
+        ],
         vip="10.44.0.10",
     )
     assert result is created
     kwargs = network_api.create_port.call_args.kwargs
     assert kwargs["allowed_address_pairs"] == [{"ip_address": "10.44.0.10"}]
-    assert kwargs["security_group_ids"] == ["cluster-sg"]
+    assert kwargs["security_group_ids"] == ["api-sg", "cluster-sg"]
     assert kwargs["fixed_ips"] == [{"subnet_id": "subnet"}]
     assert "tags" not in kwargs
     network_api.set_tags.assert_called_once_with(created, provisioner.tags)
@@ -636,7 +647,7 @@ def test_adopted_node_port_topology_must_match(provisioning_input):
             server_name="cc-example-worker-01",
             network=SimpleNamespace(id="network"),
             subnet=SimpleNamespace(id="subnet"),
-            security_group=SimpleNamespace(id="cluster-sg"),
+            security_groups=[SimpleNamespace(id="cluster-sg")],
             vip="10.44.0.11",
         )
 
@@ -678,7 +689,7 @@ def test_adopted_server_role_and_attachments_are_verified(provisioning_input):
             keypair=SimpleNamespace(name="key"),
             volume=SimpleNamespace(id="volume"),
             port=port,
-            security_group=SimpleNamespace(id="sg", name="cluster-sg"),
+            security_groups=[SimpleNamespace(id="sg", name="cluster-sg")],
         )
 
 
@@ -741,16 +752,28 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
     external = SimpleNamespace(id="public")
     cluster_sg = SimpleNamespace(id="cluster-sg", name="cluster-sg")
     jump_sg = SimpleNamespace(id="jump-sg", name="jump-sg")
+    api_sg = SimpleNamespace(id="api-sg", name="api-sg")
+    ingress_sg = SimpleNamespace(id="ingress-sg", name="ingress-sg")
     keypair = SimpleNamespace(name="key")
     image = SimpleNamespace(id="image")
     monkeypatch.setattr(provisioner, "_network", lambda: network)
     monkeypatch.setattr(provisioner, "_subnet", lambda value: subnet)
     monkeypatch.setattr(provisioner, "_external_network", lambda: external)
     monkeypatch.setattr(provisioner, "_router", Mock())
-    monkeypatch.setattr(provisioner, "_security_groups", lambda: (cluster_sg, jump_sg))
+    monkeypatch.setattr(
+        provisioner,
+        "_security_groups",
+        lambda: (cluster_sg, jump_sg, api_sg, ingress_sg),
+    )
     monkeypatch.setattr(provisioner, "_keypair", lambda: keypair)
     monkeypatch.setattr(provisioner, "_image", lambda: image)
-    monkeypatch.setattr(provisioner, "_vip", Mock())
+    monkeypatch.setattr(
+        provisioner,
+        "_vip",
+        lambda kind, address, network, subnet: SimpleNamespace(
+            id=f"{kind}-vip", fixed_ips=[{"ip_address": address}]
+        ),
+    )
     calls = []
 
     def server(**kwargs):
@@ -759,6 +782,13 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
 
     monkeypatch.setattr(provisioner, "_server", server)
     monkeypatch.setattr(provisioner, "_floating_ip", lambda *args: "192.0.2.10")
+    monkeypatch.setattr(
+        provisioner,
+        "_server_port",
+        lambda server, network: SimpleNamespace(
+            id=f"{server.id}-port", fixed_ips=[{"ip_address": "10.44.0.20"}]
+        ),
+    )
     monkeypatch.setattr(provisioner, "_private_ip", lambda server, value: "10.44.0.20")
     provisioner.provision()
     controllers = [item for item in calls if item["role"] == "controller"]
@@ -768,4 +798,178 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
     assert len(workers) == 6
     assert all(item["vip"] == "10.44.0.10" for item in controllers)
     assert all(item["vip"] == "10.44.0.11" for item in workers)
+    assert all(
+        {group.id for group in item["security_groups"]} == {"cluster-sg", "api-sg"}
+        for item in controllers
+    )
+    assert all(
+        {group.id for group in item["security_groups"]} == {"cluster-sg", "ingress-sg"}
+        for item in workers
+    )
     assert "vip" not in jump[0]
+
+
+def test_owned_node_port_migrates_sunet_two_to_exact_role_groups(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    port = Port(
+        id="port",
+        name="cc-example-controller-01-port",
+        tags=[f"customer-cluster-uid={uid}"],
+        network_id="network",
+        fixed_ips=[{"subnet_id": "subnet", "ip_address": "10.44.0.20"}],
+        security_group_ids=["cluster-sg", "sunet-two"],
+        is_port_security_enabled=True,
+        allowed_address_pairs=[{"ip_address": "10.44.0.10"}],
+    )
+    updated = Port(**port.to_dict())
+    updated.security_group_ids = ["api-sg", "cluster-sg"]
+    network_api = Mock()
+    network_api.ports.return_value = [port]
+    network_api.update_port.return_value = updated
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    result = provisioner._node_port(
+        server_name=port.name.removesuffix("-port"),
+        network=SimpleNamespace(id="network"),
+        subnet=SimpleNamespace(id="subnet"),
+        security_groups=[SimpleNamespace(id="cluster-sg"), SimpleNamespace(id="api-sg")],
+        vip="10.44.0.10",
+    )
+    assert result.security_group_ids == ["api-sg", "cluster-sg"]
+    network_api.update_port.assert_called_once_with(
+        port, security_group_ids=["api-sg", "cluster-sg"]
+    )
+
+
+def test_endpoint_floating_ip_rejects_duplicate_associations(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    description = f"ManagedCluster {uid} api"
+    floating_ips = [SimpleNamespace(id=value, description=description) for value in ("one", "two")]
+    network_api = Mock()
+    network_api.ips.return_value = floating_ips
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with pytest.raises(OwnershipError, match="multiple api"):
+        provisioner._floating_ip(
+            "api",
+            SimpleNamespace(id="port", fixed_ips=[{"ip_address": "10.44.0.10"}]),
+            SimpleNamespace(id="public"),
+        )
+
+
+def test_endpoint_floating_ip_reuses_detached_owned_address(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    network_api = Mock()
+    floating = SimpleNamespace(
+        id="fip",
+        tags=[],
+        description=f"ManagedCluster {uid} api",
+        floating_network_id="public",
+        floating_ip_address="192.0.2.11",
+        port_id=None,
+        fixed_ip_address=None,
+    )
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    floating.tags = provisioner.tags
+    network_api.ips.side_effect = [[], [floating]]
+    attached = SimpleNamespace(**vars(floating))
+    attached.port_id = "api-port"
+    attached.fixed_ip_address = "10.44.0.10"
+    network_api.update_ip.return_value = attached
+    assert (
+        provisioner._floating_ip(
+            "api",
+            SimpleNamespace(id="api-port", fixed_ips=[{"ip_address": "10.44.0.10"}]),
+            SimpleNamespace(id="public"),
+        )
+        == "192.0.2.11"
+    )
+    network_api.update_ip.assert_called_once_with(
+        floating, port_id="api-port", fixed_ip_address="10.44.0.10"
+    )
+
+
+def test_endpoint_security_groups_have_only_exact_public_rules(provisioning_input):
+    rules = {}
+    network_api = Mock()
+    uid = provisioning_input.data["cluster"]["uid"]
+
+    def security_groups(name):
+        return [SimpleNamespace(id=name, name=name, tags=[f"customer-cluster-uid={uid}"])]
+
+    def security_group_rules(*, security_group_id):
+        return rules.setdefault(security_group_id, [])
+
+    def create_security_group_rule(*, security_group_id, **values):
+        rule = SecurityGroupRule(**values)
+        rules.setdefault(security_group_id, []).append(rule)
+        return rule
+
+    network_api.security_groups.side_effect = security_groups
+    network_api.security_group_rules.side_effect = security_group_rules
+    network_api.create_security_group_rule.side_effect = create_security_group_rule
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    cluster, jump, api, ingress = provisioner._security_groups()
+    assert {rule.port_range_min for rule in rules[api.id]} == {6443}
+    assert {rule.remote_ip_prefix for rule in rules[api.id]} == {"0.0.0.0/0"}
+    assert {rule.port_range_min for rule in rules[ingress.id]} == {80, 443}
+    assert {rule.remote_ip_prefix for rule in rules[ingress.id]} == {"0.0.0.0/0"}
+    assert cluster.id.endswith("cluster-sg")
+    assert jump.id.endswith("jumphost-sg")
+
+
+def test_endpoint_security_group_rejects_nonpublic_source(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    groups = {
+        suffix: SimpleNamespace(
+            id=f"cc-example-{suffix}",
+            name=f"cc-example-{suffix}",
+            tags=[f"customer-cluster-uid={uid}"],
+        )
+        for suffix in ("cluster-sg", "jumphost-sg", "api-sg", "ingress-sg")
+    }
+    rules = {
+        groups["api-sg"].id: [
+            SecurityGroupRule(
+                direction="ingress",
+                ether_type="IPv4",
+                protocol="tcp",
+                port_range_min=6443,
+                port_range_max=6443,
+                remote_ip_prefix="10.0.0.0/8",
+            )
+        ]
+    }
+    network_api = Mock()
+    network_api.security_groups.side_effect = lambda name: [
+        next(group for group in groups.values() if group.name == name)
+    ]
+    network_api.security_group_rules.side_effect = lambda *, security_group_id: rules.setdefault(
+        security_group_id, []
+    )
+
+    def create_rule(*, security_group_id, **values):
+        rules.setdefault(security_group_id, []).append(SecurityGroupRule(**values))
+
+    network_api.create_security_group_rule.side_effect = create_rule
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with pytest.raises(OwnershipError, match="unexpected IPv4 ingress"):
+        provisioner._security_groups()

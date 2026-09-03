@@ -29,4 +29,4 @@ images:
   # the package version in pyproject.toml; override per-overlay if rolling
   # forward independently.
   - name: docker.sunet.se/platform/openstack-operator
-    newTag: 0.1.5
+    newTag: 0.1.6

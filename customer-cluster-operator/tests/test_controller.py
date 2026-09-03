@@ -200,7 +200,9 @@ def test_ready_status_is_verified_from_owned_job_result(
     )
     result = (
         '{"inventoryPath":"clusters/example/generated/ansible/hosts.yml",'
-        '"inventoryCommit":"' + "a" * 40 + '"}'
+        '"inventoryCommit":"'
+        + "a" * 40
+        + '","apiFloatingIp":"192.0.2.11","ingressFloatingIp":"192.0.2.12"}'
     )
     pod = SimpleNamespace(
         metadata=SimpleNamespace(owner_references=[SimpleNamespace(uid=job_uid)]),
@@ -224,6 +226,8 @@ def test_ready_status_is_verified_from_owned_job_result(
     )
     assert patch.status["phase"] == "VirtualMachinesReady"
     assert patch.status["inventoryCommit"] == "a" * 40
+    assert patch.status["apiFloatingIp"] == "192.0.2.11"
+    assert patch.status["ingressFloatingIp"] == "192.0.2.12"
     assert patch.status["lastVerifiedAt"].endswith("Z")
     apis[1].list_namespaced_pod.assert_called_once()
     apis[2].create_namespaced_job.assert_not_called()

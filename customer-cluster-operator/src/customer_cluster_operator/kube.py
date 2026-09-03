@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from datetime import UTC, datetime
@@ -296,11 +297,26 @@ def job_result(core_api: client.CoreV1Api, namespace: str, job: client.V1Job) ->
             raise ValidationError("worker termination result has an invalid inventoryPath")
         if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
             raise ValidationError("worker termination result has an invalid inventoryCommit")
-        results.append((path, commit))
+        endpoint_ips = []
+        for key in ("apiFloatingIp", "ingressFloatingIp"):
+            value = result.get(key) if isinstance(result, dict) else None
+            try:
+                address = ipaddress.ip_address(value)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(f"worker termination result has an invalid {key}") from exc
+            if address.version != 4:
+                raise ValidationError(f"worker termination result has an invalid {key}")
+            endpoint_ips.append(str(address))
+        results.append((path, commit, *endpoint_ips))
     if len(set(results)) != 1:
         raise ValidationError("provisioning Job Pods have conflicting successful results")
-    path, commit = results[0]
-    return {"inventoryPath": path, "inventoryCommit": commit}
+    path, commit, api_fip, ingress_fip = results[0]
+    return {
+        "inventoryPath": path,
+        "inventoryCommit": commit,
+        "apiFloatingIp": api_fip,
+        "ingressFloatingIp": ingress_fip,
+    }
 
 
 def serialized(obj: object) -> str:

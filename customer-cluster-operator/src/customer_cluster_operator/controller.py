@@ -61,6 +61,8 @@ def _set_status(
     inventory_path: str | None = None,
     inventory_commit: str | None = None,
     last_verified_at: str | None = None,
+    api_floating_ip: str | None = None,
+    ingress_floating_ip: str | None = None,
     existing_status: dict[str, Any] | None = None,
 ) -> None:
     patch.status["phase"] = phase
@@ -84,6 +86,10 @@ def _set_status(
         patch.status["inventoryCommit"] = inventory_commit
     if last_verified_at is not None:
         patch.status["lastVerifiedAt"] = last_verified_at
+    if api_floating_ip is not None:
+        patch.status["apiFloatingIp"] = api_floating_ip
+    if ingress_floating_ip is not None:
+        patch.status["ingressFloatingIp"] = ingress_floating_ip
 
 
 def _read_profile(api: client.CustomObjectsApi, name: str) -> dict[str, Any]:
@@ -321,6 +327,8 @@ def reconcile(
                     inventory_path=result["inventoryPath"],
                     inventory_commit=result["inventoryCommit"],
                     last_verified_at=_utcnow().isoformat().replace("+00:00", "Z"),
+                    api_floating_ip=result["apiFloatingIp"],
+                    ingress_floating_ip=result["ingressFloatingIp"],
                     existing_status=status,
                 )
             elif existing_job.status.failed and not existing_job.status.active:

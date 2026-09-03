@@ -88,6 +88,15 @@ def test_hash_changes_for_infrastructure(spec, profile):
             lambda s, p: p["network"].update(apiVipAddress="10.45.0.10"),
             "outside",
         ),
+        (lambda s, p: p["network"].pop("apiVipAddress"), "apiVipAddress"),
+        (
+            lambda s, p: p["network"].update(apiVipAddress="10.44.0.0"),
+            "network or broadcast address",
+        ),
+        (
+            lambda s, p: p["network"].update(ingressVipAddress="10.44.0.255"),
+            "network or broadcast address",
+        ),
         (
             lambda s, p: p["network"].update(sshAllowedCIDRs=[]),
             "sshAllowedCIDRs",

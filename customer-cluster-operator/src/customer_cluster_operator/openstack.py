@@ -247,9 +247,11 @@ class Provisioner:
             # Neutron guarantees this response means an equivalent rule exists.
             return
 
-    def _security_groups(self) -> tuple[Any, Any]:
+    def _security_groups(self) -> tuple[Any, Any, Any, Any]:
         cluster = self._security_group("cluster-sg")
         jump = self._security_group("jumphost-sg")
+        api = self._security_group("api-sg")
+        ingress = self._security_group("ingress-sg")
         self._rule(
             cluster,
             direction="ingress",
@@ -275,9 +277,28 @@ class Provisioner:
                 port_range_max=22,
                 remote_ip_prefix=cidr,
             )
+        self._rule(
+            api,
+            direction="ingress",
+            ether_type="IPv4",
+            protocol="tcp",
+            port_range_min=6443,
+            port_range_max=6443,
+            remote_ip_prefix="0.0.0.0/0",
+        )
+        for port in (80, 443):
+            self._rule(
+                ingress,
+                direction="ingress",
+                ether_type="IPv4",
+                protocol="tcp",
+                port_range_min=port,
+                port_range_max=port,
+                remote_ip_prefix="0.0.0.0/0",
+            )
         allowed_cluster = {
-            ("IPv4", None, None, None, cluster.id),
-            ("IPv4", "tcp", 22, 22, jump.id),
+            ("IPv4", None, None, None, None, cluster.id),
+            ("IPv4", "tcp", 22, 22, None, jump.id),
         }
         actual_cluster = {
             (
@@ -285,13 +306,14 @@ class Provisioner:
                 getattr(rule, "protocol", None),
                 getattr(rule, "port_range_min", None),
                 getattr(rule, "port_range_max", None),
+                getattr(rule, "remote_ip_prefix", None),
                 getattr(rule, "remote_group_id", None),
             )
             for rule in self.conn.network.security_group_rules(security_group_id=cluster.id)
             if rule.direction == "ingress"
         }
         allowed_jump = {
-            ("IPv4", "tcp", 22, 22, cidr) for cidr in self.data["network"]["sshAllowedCIDRs"]
+            ("IPv4", "tcp", 22, 22, cidr, None) for cidr in self.data["network"]["sshAllowedCIDRs"]
         }
         actual_jump = {
             (
@@ -300,13 +322,38 @@ class Provisioner:
                 getattr(rule, "port_range_min", None),
                 getattr(rule, "port_range_max", None),
                 getattr(rule, "remote_ip_prefix", None),
+                getattr(rule, "remote_group_id", None),
             )
             for rule in self.conn.network.security_group_rules(security_group_id=jump.id)
             if rule.direction == "ingress"
         }
-        if actual_cluster - allowed_cluster or actual_jump - allowed_jump:
+        allowed_api = {("IPv4", "tcp", 6443, 6443, "0.0.0.0/0", None)}
+        allowed_ingress = {("IPv4", "tcp", port, port, "0.0.0.0/0", None) for port in (80, 443)}
+
+        def ip_rules(security_group: Any) -> set[tuple[Any, ...]]:
+            return {
+                (
+                    getattr(rule, "ether_type", None),
+                    getattr(rule, "protocol", None),
+                    getattr(rule, "port_range_min", None),
+                    getattr(rule, "port_range_max", None),
+                    getattr(rule, "remote_ip_prefix", None),
+                    getattr(rule, "remote_group_id", None),
+                )
+                for rule in self.conn.network.security_group_rules(
+                    security_group_id=security_group.id
+                )
+                if rule.direction == "ingress"
+            }
+
+        if (
+            actual_cluster - allowed_cluster
+            or actual_jump - allowed_jump
+            or ip_rules(api) - allowed_api
+            or ip_rules(ingress) - allowed_ingress
+        ):
             raise OwnershipError("managed security group contains unexpected IPv4 ingress rules")
-        return cluster, jump
+        return cluster, jump, api, ingress
 
     def _keypair(self) -> Any:
         name = stable_name(self.slug, f"bootstrap-{self.uid.replace('-', '')[:8]}")
@@ -408,11 +455,12 @@ class Provisioner:
         server_name: str,
         network: Any,
         subnet: Any,
-        security_group: Any,
+        security_groups: list[Any],
         vip: str | None,
     ) -> Any:
         name = f"{server_name}-port"
         desired_pairs = {vip} if vip else set()
+        desired_security_groups = {group.id for group in security_groups}
         port = _exact(self.conn.network.ports(name=name), name, "node port")
         if port:
             port = _require_owned(port, self.uid, "node port")
@@ -425,17 +473,20 @@ class Provisioner:
                 port.network_id != network.id
                 or len(port.fixed_ips) != 1
                 or subnets != {subnet.id}
-                or set(port.security_group_ids or []) != {security_group.id}
                 or port.is_port_security_enabled is not True
                 or pairs != desired_pairs
             ):
                 raise OwnershipError(f"owned node port {name} has incompatible topology")
+            if set(port.security_group_ids or []) != desired_security_groups:
+                port = self.conn.network.update_port(
+                    port, security_group_ids=sorted(desired_security_groups)
+                )
             return port
         resource = self.conn.network.create_port(
             name=name,
             network_id=network.id,
             fixed_ips=[{"subnet_id": subnet.id}],
-            security_group_ids=[security_group.id],
+            security_group_ids=sorted(desired_security_groups),
             port_security_enabled=True,
             allowed_address_pairs=[{"ip_address": vip}] if vip else [],
         )
@@ -450,7 +501,7 @@ class Provisioner:
         keypair: Any,
         volume: Any,
         port: Any,
-        security_group: Any,
+        security_groups: list[Any],
     ) -> Any:
         server = self.conn.compute.get_server(server.id)
         _require_owned(server, self.uid, "server")
@@ -475,9 +526,11 @@ class Provisioner:
             raise OwnershipError(f"owned server {server.name} has unexpected volume attachments")
         if current_port.device_id != server.id:
             raise OwnershipError(f"owned server {server.name} is not attached to its owned port")
-        if set(current_port.security_group_ids or []) != {security_group.id}:
+        expected_group_ids = {group.id for group in security_groups}
+        expected_group_names = {group.name for group in security_groups}
+        if set(current_port.security_group_ids or []) != expected_group_ids:
             raise OwnershipError(f"owned server {server.name} has a different security group")
-        if groups and groups != {security_group.name}:
+        if groups and groups != expected_group_names:
             raise OwnershipError(f"owned server {server.name} reports a different security group")
         return server
 
@@ -489,7 +542,7 @@ class Provisioner:
         machine: dict[str, Any],
         network: Any,
         subnet: Any,
-        security_group: Any,
+        security_groups: list[Any],
         image: Any,
         keypair: Any,
         vip: str | None = None,
@@ -508,7 +561,7 @@ class Provisioner:
             server_name=name,
             network=network,
             subnet=subnet,
-            security_group=security_group,
+            security_groups=security_groups,
             vip=vip,
         )
         if not existing:
@@ -538,7 +591,7 @@ class Provisioner:
             keypair=keypair,
             volume=volume,
             port=port,
-            security_group=security_group,
+            security_groups=security_groups,
         )
 
     def _server_port(self, server: Any, network: Any) -> Any:
@@ -547,33 +600,55 @@ class Provisioner:
             raise RuntimeError(f"server {server.name} does not have exactly one cluster port")
         return ports[0]
 
-    def _floating_ip(self, jump: Any, network: Any, external: Any) -> str:
-        port = self._server_port(jump, network)
-        description = f"ManagedCluster {self.uid} jumphost"
-        matches = list(self.conn.network.ips(port_id=port.id))
-        if len(matches) > 1:
-            raise OwnershipError("multiple jumphost floating IPs exist")
-        floating = (
-            matches[0]
-            if matches
-            else self._set_network_tags(
+    def _floating_ip(self, kind: str, port: Any, external: Any) -> str:
+        description = f"ManagedCluster {self.uid} {kind}"
+        attached = list(self.conn.network.ips(port_id=port.id))
+        described = [
+            item
+            for item in self.conn.network.ips(description=description)
+            if getattr(item, "description", None) == description
+        ]
+        matches = {item.id: item for item in [*attached, *described]}
+        if len(attached) > 1 or len(matches) > 1:
+            raise OwnershipError(f"multiple {kind} floating IPs exist")
+        fixed_ips = [
+            item["ip_address"]
+            for item in port.fixed_ips
+            if ipaddress.ip_address(item["ip_address"]).version == 4
+        ]
+        if len(fixed_ips) != 1:
+            raise OwnershipError(f"{kind} port does not have exactly one fixed IPv4 address")
+        fixed_ip = fixed_ips[0]
+        floating = next(iter(matches.values()), None)
+        if floating is None:
+            floating = self._set_network_tags(
                 self.conn.network.create_ip(
                     floating_network_id=external.id,
                     port_id=port.id,
+                    fixed_ip_address=fixed_ip,
                     description=description,
                 )
             )
-        )
         _require_owned(floating, self.uid, "floating IP")
         if floating.description != description:
-            raise OwnershipError("owned jumphost floating IP has an unexpected description")
+            raise OwnershipError(f"owned {kind} floating IP has an unexpected description")
         if floating.floating_network_id != external.id:
-            raise OwnershipError("owned jumphost floating IP uses a different floating network")
+            raise OwnershipError(f"owned {kind} floating IP uses a different floating network")
+        if set(getattr(floating, "tags", None) or []) != set(self.tags):
+            raise OwnershipError(f"owned {kind} floating IP has unexpected tags")
+        associated_port = getattr(floating, "port_id", None)
+        associated_ip = getattr(floating, "fixed_ip_address", None)
+        if associated_port is None and associated_ip is None:
+            floating = self.conn.network.update_ip(
+                floating, port_id=port.id, fixed_ip_address=fixed_ip
+            )
+            associated_port = getattr(floating, "port_id", None)
+            associated_ip = getattr(floating, "fixed_ip_address", None)
+        if associated_port != port.id or associated_ip != fixed_ip:
+            raise OwnershipError(f"owned {kind} floating IP has an incompatible association")
         return floating.floating_ip_address
 
-    def _vip(self, kind: str, address: str | None, network: Any, subnet: Any) -> Any | None:
-        if not address:
-            return None
+    def _vip(self, kind: str, address: str, network: Any, subnet: Any) -> Any:
         name = stable_name(self.slug, f"{kind}-vip")
         port = _exact(self.conn.network.ports(name=name), name, "VIP port")
         if port:
@@ -614,11 +689,15 @@ class Provisioner:
         subnet = self._subnet(network)
         external = self._external_network()
         self._router(subnet, external)
-        cluster_sg, jump_sg = self._security_groups()
+        cluster_sg, jump_sg, api_sg, ingress_sg = self._security_groups()
         keypair = self._keypair()
         image = self._image()
-        self._vip("api", self.data["network"]["apiVipAddress"], network, subnet)
-        self._vip("ingress", self.data["network"]["ingressVipAddress"], network, subnet)
+        api_vip = self._vip("api", self.data["network"]["apiVipAddress"], network, subnet)
+        ingress_vip = self._vip(
+            "ingress", self.data["network"]["ingressVipAddress"], network, subnet
+        )
+        api_fip = self._floating_ip("api", api_vip, external)
+        ingress_fip = self._floating_ip("ingress", ingress_vip, external)
 
         jump = self._server(
             name=stable_name(self.slug, "jumphost"),
@@ -626,11 +705,12 @@ class Provisioner:
             machine=self.data["openstack"]["jumphost"],
             network=network,
             subnet=subnet,
-            security_group=jump_sg,
+            security_groups=[jump_sg],
             image=image,
             keypair=keypair,
         )
-        jump_fip = self._floating_ip(jump, network, external)
+        jump_port = self._server_port(jump, network)
+        jump_fip = self._floating_ip("jumphost", jump_port, external)
         controllers = []
         workers = []
         for index in range(1, self.data["nodes"]["controllers"] + 1):
@@ -640,7 +720,7 @@ class Provisioner:
                 machine=self.data["openstack"]["controller"],
                 network=network,
                 subnet=subnet,
-                security_group=cluster_sg,
+                security_groups=[cluster_sg, api_sg],
                 image=image,
                 keypair=keypair,
                 vip=self.data["network"]["apiVipAddress"],
@@ -653,7 +733,7 @@ class Provisioner:
                 machine=self.data["openstack"]["worker"],
                 network=network,
                 subnet=subnet,
-                security_group=cluster_sg,
+                security_groups=[cluster_sg, ingress_sg],
                 image=image,
                 keypair=keypair,
                 vip=self.data["network"]["ingressVipAddress"],
@@ -665,4 +745,6 @@ class Provisioner:
             "workers": workers,
             "api_vip": self.data["network"]["apiVipAddress"],
             "ingress_vip": self.data["network"]["ingressVipAddress"],
+            "api_floating_ip": api_fip,
+            "ingress_floating_ip": ingress_fip,
         }

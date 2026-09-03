@@ -79,7 +79,9 @@ def test_job_result_reads_owned_pod():
     job = SimpleNamespace(metadata=SimpleNamespace(name="job", uid="job-uid"))
     message = (
         '{"inventoryPath":"clusters/example/generated/ansible/hosts.yml",'
-        '"inventoryCommit":"' + "a" * 40 + '"}'
+        '"inventoryCommit":"'
+        + "a" * 40
+        + '","apiFloatingIp":"192.0.2.11","ingressFloatingIp":"192.0.2.12"}'
     )
     pod = SimpleNamespace(
         metadata=SimpleNamespace(owner_references=[SimpleNamespace(uid="job-uid")]),
@@ -95,6 +97,7 @@ def test_job_result_reads_owned_pod():
     api.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
     result = job_result(api, "openstack-operator", job)
     assert result["inventoryCommit"] == "a" * 40
+    assert result["apiFloatingIp"] == "192.0.2.11"
 
 
 def test_job_result_rejects_unowned_pod():
@@ -116,12 +119,15 @@ def test_job_result_accepts_identical_retry_results():
     job = SimpleNamespace(metadata=SimpleNamespace(name="job", uid="job-uid"))
     message = (
         '{"inventoryPath":"clusters/example/generated/ansible/hosts.yml",'
-        '"inventoryCommit":"' + "a" * 40 + '"}'
+        '"inventoryCommit":"'
+        + "a" * 40
+        + '","apiFloatingIp":"192.0.2.11","ingressFloatingIp":"192.0.2.12"}'
     )
     equivalent = (
         '{"inventoryCommit":"'
         + "a" * 40
-        + '","inventoryPath":"clusters/example/generated/ansible/hosts.yml"}'
+        + '","inventoryPath":"clusters/example/generated/ansible/hosts.yml",'
+        '"ingressFloatingIp":"192.0.2.12","apiFloatingIp":"192.0.2.11"}'
     )
 
     def pod(value):
@@ -145,6 +151,37 @@ def test_job_result_accepts_identical_retry_results():
         items=[pod(message), pod(message.replace("a" * 40, "b" * 40))]
     )
     with pytest.raises(ValidationError, match="conflicting"):
+        job_result(api, "openstack-operator", job)
+
+
+@pytest.mark.parametrize("key", ["apiFloatingIp", "ingressFloatingIp"])
+def test_job_result_requires_ipv4_endpoint_addresses(key):
+    api = Mock()
+    job = SimpleNamespace(metadata=SimpleNamespace(name="job", uid="job-uid"))
+    result = {
+        "inventoryPath": "clusters/example/generated/ansible/hosts.yml",
+        "inventoryCommit": "a" * 40,
+        "apiFloatingIp": "192.0.2.11",
+        "ingressFloatingIp": "192.0.2.12",
+    }
+    result[key] = "2001:db8::1"
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(owner_references=[SimpleNamespace(uid="job-uid")]),
+        status=SimpleNamespace(
+            container_statuses=[
+                SimpleNamespace(
+                    name="provision",
+                    state=SimpleNamespace(
+                        terminated=SimpleNamespace(
+                            exit_code=0, message=__import__("json").dumps(result)
+                        )
+                    ),
+                )
+            ]
+        ),
+    )
+    api.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+    with pytest.raises(ValidationError, match=key):
         job_result(api, "openstack-operator", job)
 
 

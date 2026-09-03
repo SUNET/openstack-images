@@ -18,6 +18,10 @@ def test_worker_provisions_and_only_publishes_inventory(monkeypatch, provisionin
         "jumphost": {"name": "jump", "floating_ip": "192.0.2.10"},
         "controllers": [{"name": "controller", "ip": "10.0.0.10"}] * 3,
         "workers": [{"name": "worker", "ip": "10.0.0.20"}] * 6,
+        "api_vip": "10.44.0.10",
+        "ingress_vip": "10.44.0.11",
+        "api_floating_ip": "192.0.2.11",
+        "ingress_floating_ip": "192.0.2.12",
     }
     monkeypatch.setattr(worker, "read_public_keys", lambda path: ["ssh-ed25519 QUFBQQ=="])
     monkeypatch.setattr(worker, "scoped_connection", lambda data, path: "connection")
@@ -35,6 +39,8 @@ def test_worker_provisions_and_only_publishes_inventory(monkeypatch, provisionin
     assert result["workers"] == 6
     assert result["inventoryPath"].endswith("hosts.yml")
     assert result["inventoryCommit"] == "a" * 40
+    assert result["apiFloatingIp"] == "192.0.2.11"
+    assert result["ingressFloatingIp"] == "192.0.2.12"
     assert published["token"] == "secret"
     assert "ProxyJump" in published["inventory"]
 

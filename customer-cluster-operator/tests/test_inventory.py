@@ -24,6 +24,10 @@ def resources():
             {"name": "controller-03", "ip": "10.0.0.12"},
         ],
         "workers": [{"name": "worker-01", "ip": "10.0.0.20"}],
+        "api_vip": "10.0.0.5",
+        "ingress_vip": "10.0.0.6",
+        "api_floating_ip": "192.0.2.11",
+        "ingress_floating_ip": "192.0.2.12",
     }
 
 
@@ -41,6 +45,17 @@ def test_inventory_has_standard_groups_and_proxyjump(resources):
     assert host["ansible_user"] == "root"
     assert host["ansible_host"] == host["access_ip"] == "10.0.0.10"
     assert "ProxyJump=root@192.0.2.10" in host["ansible_ssh_common_args"]
+    assert set(all_group["children"]["kube_node"]["hosts"]) == {"worker-01"}
+    assert set(all_group["children"]["k8s_cluster"]["children"]) == {
+        "kube_control_plane",
+        "kube_node",
+    }
+    assert all_group["vars"] == {
+        "customer_cluster_api_vip": "10.0.0.5",
+        "customer_cluster_ingress_vip": "10.0.0.6",
+        "customer_cluster_api_floating_ip": "192.0.2.11",
+        "customer_cluster_ingress_floating_ip": "192.0.2.12",
+    }
 
 
 def test_rendered_inventory_has_warning_and_no_credentials(resources):

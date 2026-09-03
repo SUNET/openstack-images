@@ -29,3 +29,17 @@ def test_canonical_crds_are_structural():
         assert document["kind"] == "CustomResourceDefinition"
         assert document["metadata"]["name"] == name
         list(_walk_schema(document["spec"]["versions"]))
+
+
+def test_endpoint_fields_are_required_and_exposed_in_status():
+    profile = yaml.safe_load((CRD_ROOT / "clusterprofile_crd.yaml").read_text())
+    profile_spec = profile["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+    network = profile_spec["properties"]["network"]
+    assert {"apiVipAddress", "ingressVipAddress"} <= set(network["required"])
+
+    managed = yaml.safe_load((CRD_ROOT / "managedcluster_crd.yaml").read_text())
+    status = managed["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"][
+        "properties"
+    ]
+    assert status["apiFloatingIp"]["format"] == "ipv4"
+    assert status["ingressFloatingIp"]["format"] == "ipv4"

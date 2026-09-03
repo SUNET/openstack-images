@@ -388,6 +388,7 @@ async def test_admin_plans_completes_and_provisions_cluster(
     assert git_backend.projects["acme-prod-acme"]["managed"] is True
     assert git_backend.projects["acme-prod-acme"]["role_bindings"] == [
         {"role": "reader", "users": [], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],
@@ -465,6 +466,7 @@ async def test_admin_cluster_retry_rejects_then_adopts_matching_project(
     assert publication_order == []
     assert git_backend.projects[resource_name]["role_bindings"] == [
         {"role": "reader", "users": [], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],
@@ -905,6 +907,7 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org"], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],
@@ -918,6 +921,7 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],
@@ -932,6 +936,7 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     )
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["alice@org", "bob@org"], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],
@@ -944,6 +949,7 @@ async def test_customer_admin_grant_syncs_managed_project_readers(client, sessio
     assert r.status_code == 204
     assert git_backend.projects[rn]["role_bindings"] == [
         {"role": "reader", "users": ["bob@org"], "userDomain": "sso-users"},
+        {"role": "member", "users": ["admin@test"], "userDomain": "sso-users"},
         {
             "role": "member",
             "users": ["openstack-operator"],

@@ -20,6 +20,15 @@ _spec.loader.exec_module(handlers)
 def reconcile_env(monkeypatch):
     client = MagicMock()
     apply_roles = MagicMock()
+    get_federation_config = MagicMock(
+        return_value={
+            "idp_name": "idp",
+            "idp_remote_id": "remote-id",
+            "sso_domain": "sso-users",
+        }
+    )
+    federation_manager = MagicMock()
+    registry = MagicMock()
     monkeypatch.setattr(handlers, "get_openstack_client", lambda: client)
     monkeypatch.setattr(
         handlers,
@@ -29,7 +38,10 @@ def reconcile_env(monkeypatch):
     monkeypatch.setattr(handlers, "ensure_transit_key", lambda *_: True)
     monkeypatch.setattr(handlers, "_resolve_group_id", lambda *_: "gid-456")
     monkeypatch.setattr(handlers, "apply_role_bindings", apply_roles)
-    return client, apply_roles
+    monkeypatch.setattr(handlers, "get_federation_config", get_federation_config)
+    monkeypatch.setattr(handlers, "FederationManager", federation_manager)
+    monkeypatch.setattr(handlers, "get_registry", lambda: registry)
+    return client, apply_roles, get_federation_config, federation_manager, registry
 
 
 def _reconcile(spec):
@@ -45,7 +57,7 @@ def _reconcile(spec):
 
 
 def test_periodic_reconcile_uses_direct_user_roles_for_managed_project(reconcile_env):
-    client, apply_roles = reconcile_env
+    client, apply_roles, get_federation_config, federation_manager, registry = reconcile_env
     role_bindings = [{"role": "reader", "users": ["admin@example.org"]}]
 
     _reconcile(
@@ -53,6 +65,10 @@ def test_periodic_reconcile_uses_direct_user_roles_for_managed_project(reconcile
             "name": "example",
             "domain": "sso-users",
             "managed": True,
+            "federationRef": {
+                "configMapName": "federation-config",
+                "configMapNamespace": "openstack-operator",
+            },
             "roleBindings": role_bindings,
         }
     )
@@ -65,10 +81,13 @@ def test_periodic_reconcile_uses_direct_user_roles_for_managed_project(reconcile
         "sso-users",
         managed=True,
     )
+    get_federation_config.assert_called_once()
+    federation_manager.return_value.remove_project_mapping.assert_called_once_with("example")
+    registry.unregister.assert_called_once_with("federation_mappings", "example")
 
 
 def test_periodic_reconcile_uses_group_roles_for_unmanaged_project(reconcile_env):
-    client, apply_roles = reconcile_env
+    client, apply_roles, _, _, _ = reconcile_env
     role_bindings = [{"role": "member", "users": ["member@example.org"]}]
 
     _reconcile(

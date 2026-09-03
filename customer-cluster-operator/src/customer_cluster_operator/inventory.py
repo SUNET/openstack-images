@@ -29,9 +29,15 @@ def inventory_document(resources: dict[str, Any]) -> dict[str, Any]:
         for node in resources["controllers"] + resources["workers"]
     }
     controllers = {node["name"]: {} for node in resources["controllers"]}
-    nodes = {node["name"]: {} for node in resources["controllers"] + resources["workers"]}
+    nodes = {node["name"]: {} for node in resources["workers"]}
     return {
         "all": {
+            "vars": {
+                "customer_cluster_api_vip": resources["api_vip"],
+                "customer_cluster_ingress_vip": resources["ingress_vip"],
+                "customer_cluster_api_floating_ip": resources["api_floating_ip"],
+                "customer_cluster_ingress_floating_ip": resources["ingress_floating_ip"],
+            },
             "hosts": hosts,
             "children": {
                 "kube_control_plane": {"hosts": controllers},

@@ -156,21 +156,20 @@ def build_input(
         except ValueError as exc:
             raise ValidationError(f"invalid DNS nameserver {value!r}") from exc
 
-    vip_values: dict[str, str | None] = {}
+    vip_values: dict[str, str] = {}
     for key in ("apiVipAddress", "ingressVipAddress"):
-        value = network.get(key)
-        if value is not None:
-            try:
-                address = ipaddress.ip_address(value)
-            except ValueError as exc:
-                raise ValidationError(f"profile.spec.network.{key} is invalid") from exc
-            if address not in cidr:
-                raise ValidationError(f"profile.spec.network.{key} is outside the CIDR")
-            value = str(address)
-        vip_values[key] = value
+        value = _required_string(network, key, "profile.spec.network")
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError as exc:
+            raise ValidationError(f"profile.spec.network.{key} is invalid") from exc
+        if address.version != 4 or address not in cidr:
+            raise ValidationError(f"profile.spec.network.{key} is outside the CIDR")
+        if address in {cidr.network_address, cidr.broadcast_address}:
+            raise ValidationError(f"profile.spec.network.{key} is the network or broadcast address")
+        vip_values[key] = str(address)
     if vip_values["apiVipAddress"] == vip_values["ingressVipAddress"]:
-        if vip_values["apiVipAddress"] is not None:
-            raise ValidationError("API and ingress VIP addresses must differ")
+        raise ValidationError("API and ingress VIP addresses must differ")
 
     allowed = network.get("sshAllowedCIDRs")
     if not isinstance(allowed, list) or not allowed:
