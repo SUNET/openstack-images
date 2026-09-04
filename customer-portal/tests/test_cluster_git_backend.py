@@ -491,7 +491,7 @@ def test_git_auth_environment_uses_independent_credentials() -> None:
 def test_git_auth_environment_rejects_embedded_credentials() -> None:
     with pytest.raises(RuntimeError, match="must not contain credentials"):
         git_auth_environment(
-            "https://old-token@platform.sunet.se/SUNET/customer-projects.git",
+            "https://old-token@platform.sunet.se/VDC/customer-projects.git",
             "project-bot",
             "project-token",
         )
