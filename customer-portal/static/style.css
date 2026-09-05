@@ -1,9 +1,9 @@
 /* SUNET Cloud Portal — eduID design system */
 
 :root {
-  --orange: #ff4500;
-  --orange-rgb: 255, 69, 0;
-  --orange-btn: #db3a00;
+  --orange: #ca402b;
+  --orange-rgb: 202, 64, 43;
+  --orange-btn: #ca402b;
   --orange-soft: #ffe7dd;
   --ink: #161616;
   --ink-2: #595959;
@@ -79,8 +79,8 @@ input:disabled, select:disabled, textarea:disabled {
   border-bottom: 8px solid var(--orange);
 }
 .topbar .brand {
-  font-family: var(--mono); font-weight: 700;
-  font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px;
+  font-family: var(--sans); font-weight: 750;
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em;
   display: flex; align-items: center; gap: 10px;
 }
 .topbar .brand img {
@@ -154,6 +154,9 @@ input:disabled, select:disabled, textarea:disabled {
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --orange: #e85a44;
+    --orange-rgb: 232, 90, 68;
+    --orange-btn: #e85a44;
     --header: #0d0d0d;
     --header-ink: #f4f4f4;
     --header-muted: rgba(255, 255, 255, 0.65);

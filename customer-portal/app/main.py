@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title="Customer Portal API", version="0.1.18", lifespan=lifespan)
+app = FastAPI(title="Customer Portal API", version="0.1.19", lifespan=lifespan)
 
 _settings = get_settings()
 _BASE_ORIGIN = (
@@ -339,8 +339,8 @@ def _render_index(static_dir: Path) -> str:
             )
             .replace("<body>", '<body class="test-env">')
             .replace(
-                "<span>SUNET&nbsp;Customer&nbsp;Portal</span>",
-                '<span>SUNET&nbsp;Customer&nbsp;Portal</span>'
+                "<span>SUNET Customer Portal</span>",
+                '<span>SUNET Customer Portal</span>'
                 '<span class="env-badge">TEST</span>',
             )
         )
