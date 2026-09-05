@@ -9,9 +9,6 @@ Validates the request-shape contract against OpenBao/Vault's API:
 
 from __future__ import annotations
 
-import os
-from unittest.mock import patch
-
 import pytest
 import respx
 from httpx import Response
@@ -74,7 +71,7 @@ async def test_get_k8s_creds_uses_post(settings: Settings):
                 return_value=Response(200, json={
                     "data": {
                         "service_account_token": "eyJfake",
-                        "service_account_name": "openbao-rbac-manager",
+                        "service_account_name": "portal-rbac-manager",
                         "service_account_namespace": "kube-system",
                     },
                 })

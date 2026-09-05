@@ -95,39 +95,20 @@ What's **real**:
 
 ## Live end-to-end walkthrough
 
-For a fresh tenant cluster, follow the validated recipe in the in-portal
-**Setup guide** (Admin → Clusters → Setup guide). Every step there has
-been exercised live against the `sunet-test` cluster on 2026-04-30; the
-guide includes inline notes for the gotchas we hit:
+The canonical live procedure is the access-restricted **Customer Kubernetes
+clusters** runbook at
+<https://docs.sunetdc.se/customer-kubernetes/>. The in-portal setup guide is a
+summary and must not replace its readiness gates.
 
-- OpenBao policy needs `update`, not `read`, for credential mint
-  (kubernetes secrets engine generates via POST).
-- OpenBao role's `allowed_kubernetes_namespaces` should be a single
-  entry (`kube-system`), the namespace where `openbao-rbac-manager`
-  lives.
-- Token TTL must be ≥ 600s (K8s TokenRequest API minimum).
-- The `argocd-rbac-manager` ClusterRole needs:
-    - `create` on `serviceaccounts/token` for the bound SA, so OpenBao
-      can mint TokenRequest tokens for itself.
-    - `bind` on `roles` (resourceNames `argocd-tenant`) so K8s privilege-
-      escalation prevention lets it create RoleBindings to that Role.
-- OIDC subs are stored as **annotations**, not labels, on RoleBindings —
-  K8s label values can't contain `@` or `/`. The label is a sha256 hash
-  of the sub for filterable cascade-revoke; the annotation carries the
-  raw sub for human readability.
+The runbook uses the managed `portal-access` base and the reviewed OpenBao
+helpers. Do not recreate their service accounts, RBAC, or secrets from an old
+inline walkthrough. A live test must prove that an issued kubeconfig can list
+Argo CD Applications in `argocd` and receives a denial outside that namespace.
 
-Verification once the live flow lands:
-
-```bash
-# Check the full stack
-kubectl --context <tenant> get csr | tail -10
-kubectl --context <tenant> get rolebindings -n argocd \
-  -o jsonpath='{range .items[?(@.metadata.labels.sunet\.se/oidc-sub-hash)]}{.metadata.name}{"  hash="}{.metadata.labels.sunet\.se/oidc-sub-hash}{"  sub="}{.metadata.annotations.sunet\.se/oidc-sub}{"\n"}{end}'
-
-# Use the issued kubeconfig
-KUBECONFIG=./issued.yaml kubectl get applications -n argocd      # should succeed
-KUBECONFIG=./issued.yaml kubectl get pods -n kube-system         # should be 403
-```
+OpenBao requests 600-second manager tokens, but Kubernetes RBAC cannot cap the
+TokenRequest duration for a holder of the long-lived minter token. Treat that
+token as a privileged cluster credential rather than a hard short-lived-token
+boundary.
 
 ## Adding new tests
 

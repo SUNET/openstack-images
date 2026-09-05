@@ -5,9 +5,9 @@ token from OpenBao's `kubernetes` secrets engine, builds a kubernetes-client
 ApiClient against the tenant cluster's API URL + CA, and exposes the small
 set of operations the portal needs (CSR submit/approve, RoleBinding CRUD).
 
-The token is *not* persisted; it expires on its own ~60s after this client is
-constructed. `aclose()` writes nothing back to the cluster — there's nothing
-to clean up that K8s won't reap on TTL.
+The token is *not* persisted; OpenBao requests a 600-second lifetime when this
+client is constructed. `aclose()` writes nothing back to the cluster — there's
+nothing to clean up that K8s won't reap on TTL.
 """
 
 import asyncio
@@ -40,7 +40,7 @@ class TenantClusterClient:
 
     Usage:
         async with TenantClusterClient(cluster) as tc:
-            cert_pem = await tc.submit_csr(csr_pem, ttl_days=365)
+            cert_pem = await tc.submit_csr(csr_pem, ttl_days=90)
             await tc.create_rolebinding(...)
     """
 
