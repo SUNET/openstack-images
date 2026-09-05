@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title="Customer Portal API", version="0.1.17", lifespan=lifespan)
+app = FastAPI(title="Customer Portal API", version="0.1.18", lifespan=lifespan)
 
 _settings = get_settings()
 _BASE_ORIGIN = (
@@ -314,7 +314,7 @@ _static_dir = Path(__file__).parent.parent / "static"
 def _render_index(static_dir: Path) -> str:
     index = (static_dir / "index.html").read_text()
     bundle_parts: list[bytes] = []
-    for asset in ("app.js", "style.css"):
+    for asset in ("app.js", "style.css", "sunet-logo.svg"):
         path = static_dir / asset
         if path.is_file():
             bundle_parts.append(path.read_bytes())
@@ -323,6 +323,10 @@ def _render_index(static_dir: Path) -> str:
         index
         .replace('href="/style.css"', f'href="/style.css?v={digest}"')
         .replace('src="/app.js"', f'src="/app.js?v={digest}"')
+        .replace(
+            'src="/sunet-logo.svg"',
+            f'src="/sunet-logo.svg?v={digest}"',
+        )
     )
     # In test, recolour the UI and flag the title/brand so it's obvious which
     # environment you're looking at. Gated by PORTAL_IS_IN_TEST.
@@ -335,8 +339,8 @@ def _render_index(static_dir: Path) -> str:
             )
             .replace("<body>", '<body class="test-env">')
             .replace(
-                "<span>SUNET&nbsp;Cloud</span>",
-                '<span>SUNET&nbsp;Cloud</span>'
+                "<span>SUNET&nbsp;Customer&nbsp;Portal</span>",
+                '<span>SUNET&nbsp;Customer&nbsp;Portal</span>'
                 '<span class="env-badge">TEST</span>',
             )
         )

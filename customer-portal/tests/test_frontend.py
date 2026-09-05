@@ -22,12 +22,17 @@ async def test_root_and_index_html_serve_processed_shell() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         root = await client.get("/")
         index = await client.get("/index.html")
+        logo = await client.get("/sunet-logo.svg")
 
     assert root.status_code == 200
     assert index.status_code == 200
+    assert logo.status_code == 200
+    assert logo.headers["content-type"].startswith("image/svg+xml")
     assert root.text == index.text
     assert re.search(r'href="/style\.css\?v=[0-9a-f]{12}"', root.text)
     assert re.search(r'src="/app\.js\?v=[0-9a-f]{12}"', root.text)
+    assert re.search(r'src="/sunet-logo\.svg\?v=[0-9a-f]{12}"', root.text)
+    assert 'href="https://sunetvdc.se/"' in root.text
 
 
 def test_mobile_navigation_has_synchronised_accessibility_hooks() -> None:

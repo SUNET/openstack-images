@@ -6,7 +6,7 @@ triggers:
 
 environment_variables:
   OPERATOR_VERSION: "0.1.6"
-  PORTAL_VERSION: "0.1.17"
+  PORTAL_VERSION: "0.1.18"
 
 extra_jobs:
   # Keystone with OIDC support
