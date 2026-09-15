@@ -21,6 +21,7 @@ from app.auth import (
     is_sunet_admin,
     require_cluster_access,
 )
+from app.cluster_edit import locked_cluster
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.models import KubeconfigIssuance
@@ -94,6 +95,7 @@ async def issue_credential(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, _ = await require_cluster_access(slug, user["sub"], session, settings)
     if cluster.provisioned_at is None:
         raise HTTPException(
@@ -133,6 +135,7 @@ async def rotate_credential(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, _ = await require_cluster_access(slug, user["sub"], session, settings)
     old = (
         await session.execute(
@@ -177,6 +180,7 @@ async def revoke_credential(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, access = await require_cluster_access(slug, user["sub"], session, settings)
     issuance = (
         await session.execute(

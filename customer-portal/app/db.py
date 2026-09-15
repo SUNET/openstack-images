@@ -3,9 +3,10 @@
 import logging
 from pathlib import Path
 
-from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from alembic import command as alembic_command
 
 logger = logging.getLogger(__name__)
 
@@ -55,3 +56,10 @@ async def get_session() -> AsyncSession:
         raise RuntimeError("Database not initialized — call init_db() first")
     async with _session_factory() as session:
         yield session
+
+
+def session_factory() -> async_sessionmaker[AsyncSession]:
+    """Return the initialized factory for bounded background operations."""
+    if _session_factory is None:
+        raise RuntimeError("Database is not initialized")
+    return _session_factory

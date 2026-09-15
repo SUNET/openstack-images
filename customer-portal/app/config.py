@@ -135,10 +135,20 @@ class Settings:
         default_factory=lambda: os.environ.get("CLUSTER_GIT_WORK_DIR", "/tmp/customer-clusters")
     )
     cluster_dns_zone: str = field(default_factory=_cluster_dns_zone)
+    # Empty disables new GitOps operations until the deployment explicitly selects an environment.
     cluster_environment: str = field(
-        default_factory=lambda: "test"
-        if os.environ.get("PORTAL_IS_IN_TEST", "").strip().lower() in ("1", "true", "yes", "on")
-        else "prod"
+        default_factory=lambda: os.environ.get("CLUSTER_ENVIRONMENT", "").strip()
+    )
+    managed_cluster_namespace: str = field(
+        default_factory=lambda: os.environ.get("MANAGED_CLUSTER_NAMESPACE", "").strip()
+    )
+    customer_repository_origin: str = field(
+        default_factory=lambda: os.environ.get(
+            "CUSTOMER_REPOSITORY_ORIGIN", "https://platform.sunet.se"
+        ).strip()
+    )
+    gitops_worker_enabled: bool = field(
+        default_factory=lambda: os.environ.get("GITOPS_WORKER_ENABLED", "1") == "1"
     )
     customer_cluster_bases_url: str = field(
         default_factory=lambda: os.environ.get(

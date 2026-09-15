@@ -15,6 +15,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.cluster_edit import validate_api_url, validate_ca_bundle
+
 # --- Admin: Customers ---
 
 
@@ -500,15 +502,41 @@ class CreateClusterRequest(BaseModel):
     argocd_namespace: str = Field(default="argocd", max_length=63)
     argocd_alias: str | None = Field(default=None, max_length=253)
     worker_groups: int = Field(default=1, ge=1, le=80)
-    customer_repository_url: str | None = Field(default=None, min_length=1, max_length=2048)
-    customer_repository_writer_username: str | None = Field(
-        default=None, min_length=1, max_length=255
+
+    @field_validator("argocd_alias")
+    @classmethod
+    def validate_argocd_alias(cls, value: str | None) -> str | None:
+        return _validate_argocd_alias(value) if value is not None else None
+
+
+class UpdateClusterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    config_version: int | None = Field(default=None, ge=1, strict=True)
+    # openbao_mount is tied to the (immutable) slug, so it can't be patched.
+    name: str | None = Field(
+        default=None, min_length=1, max_length=255,
+        description="Portal-only display label; infrastructure names remain tied to the slug",
     )
-    customer_repository_writer_token: str | None = Field(
-        default=None, min_length=1, max_length=4096
-    )
-    customer_repository_reader_username: str | None = Field(default=None, max_length=255)
-    customer_repository_reader_token: str | None = Field(default=None, max_length=4096)
+    api_url: str | None = Field(default=None, min_length=1, max_length=512)
+    ca_bundle: str | None = Field(default=None, min_length=1, max_length=65536)
+    argocd_alias: str | None = Field(default=None, max_length=253)
+
+    @field_validator("api_url", "ca_bundle", "name")
+    @classmethod
+    def validate_nonempty_metadata(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("must not be null or blank; omit the field to preserve its value")
+        return value
+
+    @field_validator("api_url")
+    @classmethod
+    def validate_api_url(cls, value: str) -> str:
+        return validate_api_url(value)
+
+    @field_validator("ca_bundle")
+    @classmethod
+    def validate_ca_bundle(cls, value: str) -> str:
+        return validate_ca_bundle(value)
 
     @field_validator("argocd_alias")
     @classmethod
@@ -516,39 +544,10 @@ class CreateClusterRequest(BaseModel):
         return _validate_argocd_alias(value) if value is not None else None
 
     @model_validator(mode="after")
-    def validate_repository_reader_credential(self):
-        writer = (
-            self.customer_repository_url,
-            self.customer_repository_writer_username,
-            self.customer_repository_writer_token,
-        )
-        if any(writer) and not all(writer):
-            raise ValueError(
-                "customer repository URL, writer username, and token must be supplied together"
-            )
-        if (self.customer_repository_reader_username is None) != (
-            self.customer_repository_reader_token is None
-        ):
-            raise ValueError(
-                "customer repository reader username and token must be supplied together"
-            )
+    def require_mutation_version(self) -> "UpdateClusterRequest":
+        if self.model_fields_set - {"config_version"} and self.config_version is None:
+            raise ValueError("config_version is required for edits; reload the cluster first")
         return self
-
-
-class UpdateClusterRequest(BaseModel):
-    # openbao_mount is tied to the (immutable) slug, so it can't be patched.
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    api_url: str | None = Field(default=None, min_length=1, max_length=512)
-    ca_bundle: str | None = None
-    openbao_role: str | None = Field(default=None, max_length=255)
-    argocd_role_name: str | None = Field(default=None, max_length=255)
-    argocd_namespace: str | None = Field(default=None, max_length=63)
-    argocd_alias: str | None = Field(default=None, max_length=253)
-
-    @field_validator("argocd_alias")
-    @classmethod
-    def validate_argocd_alias(cls, value: str | None) -> str | None:
-        return _validate_argocd_alias(value) if value is not None else None
 
 
 class UpdateArgocdAliasRequest(BaseModel):
@@ -564,6 +563,9 @@ class UpdateArgocdAliasRequest(BaseModel):
 
 class ClusterResponse(BaseModel):
     id: int
+    customer_id: int
+    environment: str
+    config_version: int
     contract_number: str
     name: str
     slug: str

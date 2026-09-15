@@ -39,3 +39,60 @@ currently add-only in the OpenStack operator to avoid revoking manual or
 cross-domain assignments, so removing either kind of admin from portal state
 requires a manual Keystone revocation. Self-service projects retain their
 existing single customer `member` binding.
+
+## Customer GitOps lifecycle
+
+Repository configuration belongs to a customer and an explicit environment,
+not to an individual cluster creation request. SUNET administrators configure
+and validate it on customer or cluster detail pages. Creating a cluster reuses
+the shared configuration without reading or changing its credentials.
+
+- Repository URLs/usernames and credential version references are database
+  metadata. Tokens are written only to versioned OpenBao KV paths.
+- Explicit credential replacement uses CAS. Blank UI fields preserve existing
+  credentials. Reader installation remains manual, with per-cluster version
+  acknowledgement before revoking an old shared token.
+- Existing and active clusters can attach GitOps without recreating their
+  infrastructure or resetting provisioning, access, or accounting history.
+- Cluster metadata edits require `config_version`. Display-name editing is a
+  portal label; an Argo CD alias is requested metadata, not DNS/TLS activation.
+  Active issued credentials block connection changes requiring a migration.
+
+The cluster GitOps page queues a preview, displays its source snapshot,
+validated manifests and effective bases revision, and requires explicit
+publication approval. The PostgreSQL-backed worker resumes queued/running
+operations across restarts and serializes work per shared repository. A
+confirmed remote commit is recorded separately from service activation.
+Recovery checks for an already completed push before imposing current-input
+freshness requirements; a new push rechecks infrastructure immediately before
+publication. Errors never contain transport output or credential payloads.
+
+Generated inventory is read from `ManagedCluster.status.inventoryCommit`, not
+the mutable branch tip. The canonical hostname, allocated VIP and reviewed
+interface cannot be overridden by coherent but conflicting manual Git edits.
+Compatible manual ACME-contact edits are preserved. Existing root documents
+and gitlinks are retained when adding a second cluster. Adoption is explicit;
+overlapping manual edits require a new review rather than force-pushing.
+
+Required deployment settings for this feature:
+
+| Setting | Purpose |
+| --- | --- |
+| `CLUSTER_ENVIRONMENT` | Explicit `test` or `prod`; never inferred from the UI colour |
+| `MANAGED_CLUSTER_NAMESPACE` | Namespace containing the infrastructure declarations |
+| `CUSTOMER_REPOSITORY_ORIGIN` | Allowed HTTPS Forgejo origin |
+| `CUSTOMER_CLUSTER_BASES_REVISION` | Approved immutable default for a new repository |
+| `CUSTOMER_CLUSTER_BASES_URL` | Reviewed public bases source |
+| `CUSTOMER_CLUSTER_NODE_INTERFACE` | Reviewed Ansible interface policy, default `ens3` |
+| `CUSTOMER_CLUSTER_ACME_CONTACT` | Default for a new cluster draft |
+| `GITOPS_WORKER_ENABLED` | `1` enables execution; `0` blocks queueing new operations |
+
+The image includes standalone Kustomize; missing rendering prerequisites fail
+closed. Migration `015` preserves existing records and adds versioned settings
+and operation history without contacting Git, Kubernetes or OpenBao. Configure
+unbound legacy clusters explicitly; do not infer customer URLs from slugs.
+
+The canonical operational runbook is maintained in platform-manifests under
+`docs-site-internal/content/docs/customer-kubernetes/`. Base upgrades, repository
+relocation, infrastructure resize and decommissioning remain reviewed manual
+workflows. This feature does not add operator infrastructure-mutation support.

@@ -209,6 +209,9 @@ class TenantCluster(Base):
         String(63), nullable=False, default="argocd"
     )
     argocd_alias: Mapped[str | None] = mapped_column(String(253))
+    config_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
     worker_groups: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     initial_worker_groups: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -253,10 +256,60 @@ class CustomerClusterRepository(Base):
     repo_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     writer_username: Mapped[str] = mapped_column(String(255), nullable=False)
     reader_username: Mapped[str | None] = mapped_column(String(255))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    writer_secret_version: Mapped[int | None] = mapped_column(Integer)
+    reader_secret_version: Mapped[int | None] = mapped_column(Integer)
+    writer_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    reader_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    validation_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unvalidated", server_default="unvalidated"
+    )
+    validation_message: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, onupdate=func.now())
 
     customer: Mapped["Customer"] = relationship()
+
+
+class ClusterGitOps(Base):
+    """Stable repository association, pending settings and last published baseline."""
+
+    __tablename__ = "cluster_gitops"
+
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("tenant_cluster.id"), primary_key=True)
+    repository_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_cluster_repository.id"), nullable=False
+    )
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    acme_contact: Mapped[str | None] = mapped_column(String(254))
+    baseline: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    last_commit: Mapped[str | None] = mapped_column(String(64))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    reader_installed_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class GitOpsOperation(Base):
+    """Durable, non-secret preview/publication intent consumed under database locks."""
+
+    __tablename__ = "gitops_operation"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("tenant_cluster.id"), nullable=False)
+    repository_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_cluster_repository.id"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    requested_by_sub: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    result_commit: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class ClusterAccess(Base):

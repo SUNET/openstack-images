@@ -36,6 +36,7 @@ from app.schemas import (
     CreateProjectRequest,
     ProjectResponse,
     ResizeRequestPayload,
+    UpdateClusterRequest,
     _size_label,
 )
 
@@ -387,6 +388,67 @@ def test_create_cluster_request_rejects_legacy_connection_fields() -> None:
             api_url="https://api.acme-one.example:6443",
             ca_bundle="test-ca",
         )
+
+
+@pytest.mark.parametrize("field", [
+    "customer_repository_url", "customer_repository_writer_username",
+    "customer_repository_writer_token", "customer_repository_reader_username",
+    "customer_repository_reader_token",
+])
+def test_create_cluster_schema_rejects_shared_repository_fields(field: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CreateClusterRequest(
+            contract_number="CO-001", name="Acme", slug="acme", **{field: "not-accepted"},
+        )
+
+
+def test_cluster_patch_version_required_for_edits_but_empty_patch_is_compatible() -> None:
+    assert UpdateClusterRequest().model_fields_set == set()
+    with pytest.raises(ValidationError, match="config_version is required"):
+        UpdateClusterRequest(name="New portal label")
+    with pytest.raises(ValidationError, match="config_version is required"):
+        UpdateClusterRequest(argocd_alias=None)
+    assert UpdateClusterRequest(config_version=1, name="New portal label").config_version == 1
+
+
+@pytest.mark.parametrize("version", [0, -1, True, "1", 1.0])
+def test_cluster_patch_requires_positive_integer_version(version) -> None:
+    with pytest.raises(ValidationError):
+        UpdateClusterRequest(config_version=version, name="New portal label")
+
+
+@pytest.mark.parametrize("field", ["name", "api_url", "ca_bundle"])
+@pytest.mark.parametrize("value", [None, "", " \r\n\t"])
+def test_cluster_patch_rejects_null_and_blank_overwrites(field: str, value: str | None) -> None:
+    with pytest.raises(ValidationError):
+        UpdateClusterRequest(config_version=1, **{field: value})
+
+
+@pytest.mark.parametrize("url", [
+    "http://api.acme.example:6443", "https://api.acme.example", "https://api.acme.example:443",
+    "https://user@api.acme.example:6443", "https://user:password@api.acme.example:6443",
+    "https://@api.acme.example:6443", "https://api.acme.example:6443/",
+    "https://api.acme.example:6443/path", "https://api.acme.example:6443?token=value",
+    "https://api.acme.example:6443?", "https://api.acme.example:6443#",
+    "https://api.acme.example:6443#fragment", "https://api.acme.example:6443\n",
+    "\x00https://api.acme.example:6443", "https://api.\texample:6443",
+    "https://api.acme.example:6443/../", "https://api.acme.example:06443",
+    "https://api.acme.example:notaport", "https://API.ACME.EXAMPLE:6443",
+])
+def test_cluster_patch_rejects_noncanonical_api_origins(url: str) -> None:
+    with pytest.raises(ValidationError, match="HTTPS hostname on port 6443"):
+        UpdateClusterRequest(config_version=1, api_url=url)
+
+
+def test_cluster_patch_accepts_canonical_api_origin() -> None:
+    value = "https://api.acme.k8s-test.sunetvdc.se:6443"
+    assert UpdateClusterRequest(config_version=1, api_url=value).api_url == value
+
+
+@pytest.mark.parametrize("field", ["openbao_role", "argocd_role_name", "argocd_namespace"])
+def test_cluster_patch_rejects_advanced_role_and_namespace_edits(field: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        UpdateClusterRequest(config_version=1, **{field: "unsupported"})
 
 
 @pytest.mark.parametrize(

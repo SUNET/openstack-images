@@ -7,14 +7,13 @@
 import asyncio
 import logging
 from typing import Any
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import kubeconfig_service
+from app import kubeconfig_service, repository_service
 from app.audit import audit_log
 from app.auth import (
     get_current_user,
@@ -22,21 +21,24 @@ from app.auth import (
     require_admin,
     require_cluster_access,
 )
+from app.cluster_edit import locked_cluster, require_connection_change_allowed, validate_ca_bundle
 from app.cluster_git_backend import ClusterDeletionBlocked
 from app.cluster_quotas import managed_cluster_quotas
 from app.config import Settings, get_settings
-from app.customer_gitops import CustomerGitOpsError, publish_tree, render_tree
 from app.db import get_session
 from app.git_backend import GitBackend, _sanitize_name, managed_role_bindings
-from app.k8s import find_project_cr_by_spec_name, get_managed_cluster_status
+from app.k8s import find_project_cr_by_spec_name
 from app.models import (
     ClusterAccess,
     ClusterAddon,
+    ClusterGitOps,
+    ClusterRequest,
     Contract,
-    CustomerClusterRepository,
+    Customer,
+    GitOpsOperation,
+    KubeconfigIssuance,
     TenantCluster,
 )
-from app.openbao_client import get_openbao
 from app.schemas import (
     ClusterAccessRequest,
     ClusterAccessResponse,
@@ -52,20 +54,6 @@ logger = logging.getLogger(__name__)
 
 admin_router = APIRouter(prefix="/api/admin/clusters", tags=["admin-clusters"])
 member_router = APIRouter(prefix="/api/clusters", tags=["clusters"])
-
-
-def _repository_secret_path(customer_id: int, environment: str, credential: str) -> str:
-    return f"kv/data/customer-cluster-repositories/{customer_id}/{environment}/{credential}"
-
-
-def _validate_repository_url(value: str) -> str:
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise HTTPException(
-            status_code=422,
-            detail="Customer repository URL must be HTTPS and must not contain credentials",
-        )
-    return value
 
 
 async def _active_addons(cluster_id: int, session: AsyncSession) -> list[str]:
@@ -153,11 +141,20 @@ async def _to_response(
     *,
     caller_role: str | None,
     session: AsyncSession,
+    settings: Settings | None = None,
 ) -> ClusterResponse:
     contract = cluster.contract
-    settings = get_settings()
+    settings = settings or get_settings()
+    environment = await session.scalar(
+        select(ClusterGitOps.environment).where(ClusterGitOps.cluster_id == cluster.id)
+    )
+    if environment is None:
+        environment = repository_service.require_environment(settings)
     return ClusterResponse(
         id=cluster.id,
+        customer_id=contract.customer_id,
+        environment=environment,
+        config_version=cluster.config_version,
         contract_number=contract.contract_number if contract else "",
         name=cluster.name,
         slug=cluster.slug,
@@ -193,20 +190,32 @@ async def admin_create_cluster(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    contract = (
+    environment = repository_service.require_environment(settings)
+    owner = (
         await session.execute(
-            select(Contract)
+            select(Contract.id, Contract.customer_id)
             .where(Contract.contract_number == req.contract_number)
-            .options(selectinload(Contract.customer))
         )
-    ).scalar_one_or_none()
-    if not contract:
+    ).one_or_none()
+    if owner is None:
         raise HTTPException(status_code=404, detail="Contract not found")
-    repository_url = (
-        _validate_repository_url(req.customer_repository_url)
-        if req.customer_repository_url is not None
-        else None
+    # Admin identity changes and repository edits lock parents before children.
+    # Lock the contract before get_repository takes the repository advisory lock.
+    await session.execute(
+        select(Customer.id).where(Customer.id == owner.customer_id).with_for_update()
     )
+    contract = await session.scalar(
+        select(Contract).where(Contract.id == owner.id)
+        .with_for_update().execution_options(populate_existing=True)
+        .options(selectinload(Contract.customer))
+    )
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    if (
+        contract.customer_id != owner.customer_id
+        or contract.contract_number != req.contract_number
+    ):
+        raise HTTPException(409, "Contract ownership or identity changed; reload before retrying")
 
     # Serialize one slug across all portal replicas before checking the DB or
     # publishing either Git resource. The lock is held until commit/rollback.
@@ -221,50 +230,23 @@ async def admin_create_cluster(
     if existing:
         raise HTTPException(status_code=409, detail="Cluster slug already in use")
 
-    if repository_url is not None:
-        repository = (
-            await session.execute(
-                select(CustomerClusterRepository).where(
-                    CustomerClusterRepository.customer_id == contract.customer_id,
-                    CustomerClusterRepository.environment == settings.cluster_environment,
-                )
-            )
-        ).scalar_one_or_none()
-        if repository is None:
-            repository = CustomerClusterRepository(
-                customer_id=contract.customer_id,
-                environment=settings.cluster_environment,
-                repo_url=repository_url,
-                writer_username=req.customer_repository_writer_username or "",
-                reader_username=req.customer_repository_reader_username,
-            )
-            session.add(repository)
-        elif repository.repo_url != repository_url:
-            raise HTTPException(
-                status_code=409,
-                detail="Customer environment already has a different cluster repository",
-            )
-        else:
-            repository.writer_username = req.customer_repository_writer_username or ""
-            repository.reader_username = req.customer_repository_reader_username
-        secret_client = get_openbao()
-        await secret_client.write_kv_secret(
-            _repository_secret_path(contract.customer_id, settings.cluster_environment, "writer"),
-            {
-                "username": req.customer_repository_writer_username or "",
-                "token": req.customer_repository_writer_token or "",
-            },
+    repository = await repository_service.get_repository(
+        contract.customer_id, settings, session, lock=True
+    )
+    if repository is None:
+        raise HTTPException(
+            409, f"Configure and validate the customer's shared {environment} repository "
+            "before creating a cluster",
         )
-        if req.customer_repository_reader_token is not None:
-            await secret_client.write_kv_secret(
-                _repository_secret_path(
-                    contract.customer_id, settings.cluster_environment, "reader"
-                ),
-                {
-                    "username": req.customer_repository_reader_username or "",
-                    "token": req.customer_repository_reader_token,
-                },
-            )
+    if (
+        repository.writer_secret_version is None
+        or repository.writer_secret_version < 1
+        or repository.validation_status != "valid"
+    ):
+        raise HTTPException(
+            409, "Configure the shared repository writer credentials and validate the "
+            "repository before creating a cluster",
+        )
 
     git_backend: GitBackend = request.app.state.git_backend
     cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
@@ -370,6 +352,11 @@ async def admin_create_cluster(
     session.add(cluster)
     try:
         await session.flush()
+        session.add(ClusterGitOps(
+            cluster_id=cluster.id,
+            repository_id=repository.id,
+            environment=environment,
+        ))
         await session.commit()
     except Exception:
         await session.rollback()
@@ -386,85 +373,26 @@ async def admin_create_cluster(
         cluster_id=cluster.id,
         slug=cluster.slug,
     )
-    return await _to_response(cluster, caller_role="sunet_admin", session=session)
+    return await _to_response(
+        cluster, caller_role="sunet_admin", session=session, settings=settings
+    )
 
 
-@admin_router.post("/{slug}/bootstrap-gitops", response_model=ClusterResponse)
+@admin_router.post("/{slug}/bootstrap-gitops", status_code=410)
 async def admin_bootstrap_gitops(
     slug: str,
-    request: Request,
-    user: dict[str, Any] = Depends(require_admin),
-    settings: Settings = Depends(get_settings),
+    _user: dict[str, Any] = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    """Publish the credential-free GitOps tree once infrastructure inventory is ready."""
-    cluster = (
-        await session.execute(
-            select(TenantCluster)
-            .where(TenantCluster.slug == slug)
-            .options(selectinload(TenantCluster.contract).selectinload(Contract.customer))
-        )
-    ).scalar_one_or_none()
-    if cluster is None:
+    """Direct callers to the explicit preview/review/publication workflow."""
+    cluster_id = await session.scalar(select(TenantCluster.id).where(TenantCluster.slug == slug))
+    if cluster_id is None:
         raise HTTPException(status_code=404, detail="Cluster not found")
-    status = get_managed_cluster_status(slug)
-    if not status or status.get("phase") != "VirtualMachinesReady":
-        raise HTTPException(status_code=409, detail="Generated inventory is not ready")
-    cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
-    if cluster_git_backend is None:
-        raise HTTPException(
-            status_code=503, detail="Cluster manifest repository is not configured"
-        )
-    try:
-        inventory = await asyncio.to_thread(cluster_git_backend.read_generated_inventory, slug)
-        variables = inventory["all"]["vars"]
-        ingress_vip = variables["customer_cluster_ingress_vip"]
-        if not isinstance(ingress_vip, str):
-            raise KeyError("customer_cluster_ingress_vip")
-    except (KeyError, TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=409, detail="Generated inventory has no valid ingress VIP"
-        ) from exc
-    customer = cluster.contract.customer
-    repository = (
-        await session.execute(
-            select(CustomerClusterRepository).where(
-                CustomerClusterRepository.customer_id == customer.id,
-                CustomerClusterRepository.environment == settings.cluster_environment,
-            )
-        )
-    ).scalar_one_or_none()
-    if repository is None:
-        raise HTTPException(status_code=409, detail="Customer repository is not configured")
-    writer = await get_openbao().read_kv_secret(
-        _repository_secret_path(customer.id, settings.cluster_environment, "writer")
+    raise HTTPException(
+        410, "Implicit GitOps bootstrap has been retired. Open "
+        f"/api/admin/clusters/{slug}/gitops, save the configuration, and review an explicit "
+        "preview before publishing.",
     )
-    if writer.get("username") != repository.writer_username or not writer.get("token"):
-        raise HTTPException(
-            status_code=409, detail="Customer repository writer credential is invalid"
-        )
-    hostname = f"argocd.{slug}.{settings.cluster_dns_zone}"
-    try:
-        files = render_tree(
-            repo_url=repository.repo_url,
-            slug=slug,
-            hostname=hostname,
-            ingress_vip=ingress_vip,
-            interface=settings.customer_cluster_node_interface,
-            acme_contact=settings.customer_cluster_acme_contact,
-        )
-        await asyncio.to_thread(
-            publish_tree,
-            repo_url=repository.repo_url,
-            username=repository.writer_username,
-            token=writer["token"],
-            files=files,
-            settings=settings,
-        )
-    except CustomerGitOpsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    audit_log(user["sub"], "cluster.bootstrap_gitops", cluster_id=cluster.id, slug=slug)
-    return await _to_response(cluster, caller_role="sunet_admin", session=session)
 
 
 @admin_router.get("", response_model=list[ClusterResponse])
@@ -508,35 +436,46 @@ async def admin_update_cluster(
     req: UpdateClusterRequest,
     request: Request,
     user=Depends(require_admin),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
-    cluster = (
-        await session.execute(
-            select(TenantCluster)
-            .where(TenantCluster.slug == slug)
-            .options(selectinload(TenantCluster.contract))
-        )
-    ).scalar_one_or_none()
-    if not cluster:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+    """Edit portal metadata and connection settings without changing infrastructure identity."""
+    cluster = await locked_cluster(slug, session)
+    fields = req.model_fields_set - {"config_version"}
+    if fields and req.config_version != cluster.config_version:
+        raise HTTPException(409, "Cluster configuration changed; reload before retrying")
 
-    if "argocd_alias" in req.model_fields_set:
+    if fields & {"api_url", "ca_bundle"}:
+        api_url = req.api_url if "api_url" in fields else cluster.api_url
+        ca_bundle = req.ca_bundle if "ca_bundle" in fields else cluster.ca_bundle
+        expected_url = f"https://api.{cluster.slug}.{settings.cluster_dns_zone}:6443"
+        if api_url != expected_url:
+            raise HTTPException(422, f"Cluster API URL must be {expected_url}")
+        if not ca_bundle:
+            raise HTTPException(422, "API URL and CA bundle must be configured together")
+        try:
+            validate_ca_bundle(ca_bundle)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        await require_connection_change_allowed(cluster, api_url, ca_bundle, session)
+
+    changes = {
+        field: getattr(req, field)
+        for field in fields
+        if getattr(req, field) != getattr(cluster, field)
+    }
+    if "argocd_alias" in changes:
         await _set_argocd_alias(cluster, req.argocd_alias, request)
-
-    for field in (
-        "name",
-        "api_url",
-        "ca_bundle",
-        "openbao_role",
-        "argocd_role_name",
-        "argocd_namespace",
-    ):
-        v = getattr(req, field)
-        if v is not None:
-            setattr(cluster, field, v)
+    for field, value in changes.items():
+        setattr(cluster, field, value)
+    if changes:
+        cluster.config_version += 1
     await session.commit()
-    audit_log(user["sub"], "cluster.update", cluster_id=cluster.id, slug=cluster.slug)
-    return await _to_response(cluster, caller_role="sunet_admin", session=session)
+    if changes:
+        audit_log(user["sub"], "cluster.update", cluster_id=cluster.id, slug=cluster.slug)
+    return await _to_response(
+        cluster, caller_role="sunet_admin", session=session, settings=settings
+    )
 
 
 @admin_router.post("/{slug}/provision", response_model=ClusterResponse)
@@ -545,15 +484,7 @@ async def admin_provision_cluster(
     user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    cluster = (
-        await session.execute(
-            select(TenantCluster)
-            .where(TenantCluster.slug == slug)
-            .options(selectinload(TenantCluster.contract))
-        )
-    ).scalar_one_or_none()
-    if not cluster:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+    cluster = await locked_cluster(slug, session)
     if cluster.provisioned_at is not None:
         raise HTTPException(status_code=409, detail="Cluster already provisioned")
     if not cluster.api_url or not cluster.ca_bundle:
@@ -576,11 +507,20 @@ async def admin_delete_cluster(
     user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    cluster = (
-        await session.execute(select(TenantCluster).where(TenantCluster.slug == slug))
-    ).scalar_one_or_none()
-    if not cluster:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+    cluster = await locked_cluster(slug, session)
+    blocked = "portal deletion is disabled until coordinated manual decommissioning is available"
+    if cluster.management_project_resource_name or cluster.backup_project_resource_name:
+        raise HTTPException(409, f"Cluster has managed project state; {blocked}")
+    if cluster.provisioned_at is not None or cluster.api_url or cluster.ca_bundle:
+        raise HTTPException(409, f"Cluster has provisioning or connection history; {blocked}")
+    for model in (
+        ClusterGitOps, GitOpsOperation, KubeconfigIssuance, ClusterAddon, ClusterRequest,
+    ):
+        history = await session.scalar(
+            select(model.cluster_id).where(model.cluster_id == cluster.id).limit(1)
+        )
+        if history is not None:
+            raise HTTPException(409, f"Cluster has configuration or lifecycle history; {blocked}")
 
     cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
     if cluster_git_backend is None:
@@ -592,17 +532,11 @@ async def admin_delete_cluster(
         await asyncio.to_thread(cluster_git_backend.delete_cluster, cluster.slug)
     except ClusterDeletionBlocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError:
+    except ValueError as exc:
+        if str(exc) != f"Cluster manifest '{cluster.slug}' not found":
+            raise HTTPException(409, f"Cluster cleanup state is unknown; {blocked}") from exc
         # A pre-publication legacy record may have no desired-state manifest.
         logger.warning("Cluster manifest %s not in git", cluster.slug)
-    if cluster.management_project_resource_name or cluster.backup_project_resource_name:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Cluster has managed project state; portal deletion is disabled "
-                "until coordinated manual decommissioning is available"
-            ),
-        )
 
     await session.delete(cluster)
     await session.commit()
@@ -662,6 +596,7 @@ async def update_argocd_alias(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, access = await require_cluster_access(
         slug,
         user["sub"],
@@ -669,7 +604,9 @@ async def update_argocd_alias(
         settings,
         min_role="customer_admin",
     )
-    await _set_argocd_alias(cluster, req.argocd_alias, request)
+    if cluster.argocd_alias != req.argocd_alias:
+        await _set_argocd_alias(cluster, req.argocd_alias, request)
+        cluster.config_version += 1
     await session.commit()
     audit_log(
         user["sub"],
@@ -713,6 +650,7 @@ async def grant_cluster_access(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, caller_access = await require_cluster_access(
         slug, user["sub"], session, settings, min_role="customer_admin"
     )
@@ -769,6 +707,7 @@ async def revoke_cluster_access(
     settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_session),
 ):
+    await locked_cluster(slug, session)
     cluster, caller_access = await require_cluster_access(
         slug, user["sub"], session, settings, min_role="customer_admin"
     )

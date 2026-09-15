@@ -1,5 +1,6 @@
 """Customer Portal API — FastAPI application."""
 
+import asyncio
 import hashlib
 import logging
 import uuid
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 
 import git
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,16 +20,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
+from app._version import VERSION
 from app.auth import get_current_user, get_user_contracts, init_oauth, oauth
 from app.cluster_client import TenantClusterError
 from app.cluster_git_backend import ClusterGitBackend
 from app.config import get_settings
 from app.crypto import init_crypto
-from app.db import close_db, get_session, init_db, run_migrations
+from app.db import close_db, get_session, init_db, run_migrations, session_factory
 from app.git_backend import GitBackend
+from app.gitops_worker import run_worker
 from app.k8s import init_k8s
 from app.openbao_client import OpenBaoError, init_openbao, shutdown_openbao
-from app.routers import admin, billing, cluster_requests, clusters, kubeconfig, projects
+from app.routers import (
+    admin,
+    billing,
+    cluster_requests,
+    clusters,
+    customer_repositories,
+    gitops,
+    kubeconfig,
+    projects,
+)
 from app.schemas import ContractWithCustomerResponse, UserInfo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -81,13 +94,26 @@ async def lifespan(app: FastAPI):
     init_oauth(settings)
     logger.info("OIDC provider configured")
 
-    yield
+    stop = asyncio.Event()
+    worker = None
+    if (
+        settings.gitops_worker_enabled and settings.cluster_environment in {"test", "prod"}
+        and settings.managed_cluster_namespace and app.state.cluster_git_backend is not None
+    ):
+        worker = asyncio.create_task(run_worker(
+            stop, session_factory(), settings, app.state.cluster_git_backend
+        ))
+    try:
+        yield
+    finally:
+        stop.set()
+        if worker is not None:
+            await worker
+        await shutdown_openbao()
+        await close_db()
 
-    await shutdown_openbao()
-    await close_db()
 
-
-app = FastAPI(title="Customer Portal API", version="0.1.19", lifespan=lifespan)
+app = FastAPI(title="Customer Portal API", version=VERSION, lifespan=lifespan)
 
 _settings = get_settings()
 _BASE_ORIGIN = (
@@ -196,10 +222,22 @@ app.include_router(clusters.member_router)
 app.include_router(cluster_requests.admin_router)
 app.include_router(cluster_requests.member_router)
 app.include_router(kubeconfig.router)
+app.include_router(customer_repositories.router)
+app.include_router(gitops.router)
 
 
 def _correlation_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Never echo submitted tokens, request bodies or validator context in a 422."""
+    errors = [
+        {key: error[key] for key in ("loc", "msg", "type")}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 @app.exception_handler(ValueError)

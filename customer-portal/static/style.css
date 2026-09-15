@@ -437,6 +437,47 @@ input:disabled, select:disabled, textarea:disabled {
 }
 .form textarea.sans { font-family: var(--sans); font-size: 14px; }
 .form textarea.cluster-ca-bundle { min-height: 130px; font-size: 12px; }
+
+/* Shared repository and reviewed GitOps workflow */
+.workflow-section { margin-top: 20px; min-width: 0; }
+.workflow-section > .btn-row + div { margin-top: 12px; }
+.workflow-progress { padding: 10px 0; }
+.workflow-details { margin-top: 16px; }
+.workflow-details > summary {
+  font-family: var(--mono); font-weight: 700; font-size: 12px;
+  color: var(--ink); cursor: pointer; padding: 10px 0;
+}
+.workflow-details > summary:focus-visible, .gitops-diff:focus-visible, .gitops-metadata:focus-visible {
+  outline: 2px solid var(--orange); outline-offset: 3px;
+}
+.workflow-details > .form, .workflow-details > .kv { margin-top: 10px; }
+.repository-clusters li { flex-wrap: wrap; overflow-wrap: anywhere; }
+.credential-recovery-warning {
+  margin: 8px 0 12px; padding: 12px 16px;
+  border-left: 3px solid var(--warn); background: var(--warn-soft); font-size: 13px;
+}
+.credential-recovery input[type="number"] { max-width: 280px; }
+.gitops-blocker {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px; margin-top: 10px; padding: 12px 16px;
+  border-left: 3px solid var(--warn); background: var(--warn-soft);
+  font-size: 13px; overflow-wrap: anywhere;
+}
+.gitops-blocker p { flex: 1 1 260px; }
+.gitops-diff, .gitops-metadata {
+  max-height: 480px; overflow: auto; margin-top: 14px; padding: 16px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--ink);
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  white-space: pre; tab-size: 2;
+}
+.gitops-operation .alert { margin: 12px 0 0; }
+.gitops-operation .hint { overflow-wrap: anywhere; }
+.gitops-lifecycle .alert { overflow-wrap: anywhere; }
+@media (max-width: 540px) {
+  .gitops-lifecycle .btn, .repository-editor .btn { max-width: 100%; white-space: normal; }
+}
+
 .form select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23595959' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;

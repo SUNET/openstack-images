@@ -3,10 +3,11 @@
 Two layers of testing live in this directory:
 
 1. **Local automated suite** — fast, deterministic, no infra except a
-   throwaway Postgres in Docker. Covers pure logic, the synthetic-billing
+   throwaway Postgres. Covers pure logic, the synthetic-billing
    emitter (DB-backed), the OpenBao HTTP client (HTTP-mocked), and the
    FastAPI router stack (real DB + httpx ASGITransport, with the
-   tenant-cluster boundary mocked).
+   tenant-cluster boundary mocked), local bare-Git publication and browser
+   interactions with the actual SPA and mocked remote APIs.
 2. **Live end-to-end walkthrough** — runs against a real kubespray
    cluster + OpenBao mount + the deployed portal. Recipe is in the
    in-portal setup guide (`Admin → Clusters → Setup guide`).
@@ -71,24 +72,64 @@ pytest -k billing          # filter by name
 pytest -x                  # stop on first failure
 ```
 
-Expect ~2s wall time for the full suite. The conftest fixture runs
+Allow several minutes for the complete suite, including browser and real Git
+workflows. The conftest fixture runs
 `alembic upgrade head` once per session against the test DB; subsequent
 test runs reuse the schema and TRUNCATE non-seed tables before each
 DB-backed test.
 
-### What's covered
+### GitOps prerequisites and verification
 
-| File | Surface | Count |
-|---|---|---|
-| `test_unit.py` | Pure-logic helpers: size labels, CSR/kubeconfig builders, OIDC-sub hashing, payload + slug-regex validation, issuance status. | 24 |
-| `test_billing_runner.py` | Fail-closed, metric-family-aware Gnocchi queries and pagination, history-aware usage aggregation, logical storage GB-month pricing, canonical Cinder volume-type rollup, contract mapping, and empty combined-report delivery protection. | 31 |
-| `test_migration_009.py` | Cinder volume-price migration convergence, live-price preservation, and downgrade behavior. | 4 |
-| `test_migration_010.py` | Snapshot and backup base-price insertion, custom-price preservation, duplicate convergence, idempotency, and downgrade behavior. | 5 |
-| `test_billing_synthetic.py` | DB-backed `_emit_synthetic_cluster_lines`: provisioning period, subsequent period, applied resize, per-contract override, addon disable boundary, unprovisioned cluster. | 6 |
-| `test_openbao_client.py` | HTTP shape contract with OpenBao: K8s-auth login body, creds POST (regression-proofs the GET→POST fix), 403 retry, error propagation. | 4 |
-| `test_api_clusters.py` | FastAPI router stack with tenant-cluster boundary mocked: cluster create/provision, access mgmt + RBAC negatives, kubeconfig issue + cascade-revoke, addon/resize/backup request flows, managed-project policy gate. | 11 |
+Install the development extras and a Playwright Chromium browser before the
+browser run. In a normal development image:
 
-Total: 85 tests.
+```bash
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m pytest tests/test_gitops_browser.py
+```
+
+Chromium's Linux runtime libraries must be available in the development image;
+the production portal image does not include browser tooling. The publisher
+tests require Git and standalone Kustomize on `PATH`. PostgreSQL server tools
+(`pg_config`, `initdb`, `pg_ctl`) are required for lifecycle/migration tests,
+which start private Unix-socket-only servers and clean them up automatically.
+Other DB-backed suites use the disposable database configured above. Never
+point these fixtures at a live portal database: tests migrate/truncate tables.
+
+The important new suites are:
+
+- `test_api_customer_repositories.py`: shared binding ownership, isolation,
+  rotation/CAS recovery, validation and redaction with real PostgreSQL.
+- `test_gitops_lifecycle.py`: actual API/worker transactions, explicit approval,
+  multi-replica locks, cancellation, stale inputs, and confirmed Git publication
+  followed by DB commit failure and recovery.
+- `test_gitops_source.py`: exact inventory provenance, authoritative values,
+  readiness and categorized Kubernetes failures.
+- `test_gitops_publisher.py`, `test_gitops_recovery.py`: real disposable Git
+  repositories, initial publication, second cluster, adoption, safe updates,
+  rejected/racing pushes, no-op retries and read-only recovery.
+- `test_gitops_render.py`, `test_gitops_reviewed.py`: schema, Kustomize, pruning
+  protections and parity with the reviewed object shapes.
+- `test_gitops_browser.py`: interactive create/edit, credential preservation,
+  CAS recovery, live clusters, preview approval and status polling.
+- `test_migration_015.py`: a populated 014 database is upgraded without
+  changing tenant, access, credential-issuance or accounting history.
+- `test_release.py`: runtime, Jenkins and deployment version consistency.
+
+No tests use real Forgejo credentials, push to a remote customer repository,
+or apply objects to a live Kubernetes cluster. A passing mocked API test does
+not replace the documented operator acceptance checks after deployment.
+
+### Existing coverage
+
+| File | Surface |
+|---|---|
+| `test_unit.py` | Size labels, CSR/kubeconfig builders, validation, issuance status. |
+| `test_billing_runner.py` | Metric-family-aware billing queries, usage history, export delivery. |
+| `test_migration_009.py`, `test_migration_010.py` | Pricing migration convergence and preservation. |
+| `test_billing_synthetic.py` | Provisioning, resize and addon accounting periods. |
+| `test_openbao_client.py` | Kubernetes login/mint, KV v2 CAS/versioning, expiry and error handling. |
+| `test_api_clusters.py` | Creation reuse, versioned editing, live connection guards, access/issuance concurrency and lifecycle boundaries. |
 
 ### What's deliberately mocked
 

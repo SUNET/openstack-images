@@ -119,3 +119,45 @@ def test_route_requests_abort_obsolete_renderers() -> None:
         "renderAdminClusterRequests",
     ):
         assert len(re.findall(rf"\b{renderer}\(", js)) == 2
+
+
+def test_gitops_uses_text_only_diffs_and_cancellable_polling() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+
+    assert 'diff.textContent = typeof operation.diff === "string"' in js
+    assert 'className: "gitops-diff"' in js
+    assert "bootstrap-gitops" not in js
+    assert "setInterval(" not in js
+    assert "clearTimeout(timer)" in js
+    assert 'signal.removeEventListener("abort", abort)' in js
+    assert "await waitForPoll(controller.signal)" in js
+    assert "request_id: ${requestId}" in js
+    assert "error.detail = body.detail" in js
+
+
+def test_cluster_creation_has_no_repository_credential_fields() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+    create = js.split("async function renderAdminCreateCluster()", 1)[1].split(
+        "function clusterSettingsEditor", 1
+    )[0]
+
+    assert "Create and start provisioning" in create
+    assert "repositoryReady(repository)" in create
+    assert "customer_repository_" not in create
+    assert 'type: "password"' not in create
+    assert "localStorage" not in js
+    assert "sessionStorage" not in js
+
+
+def test_live_cluster_keeps_versioned_settings_and_shared_repository_editor() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+    detail = js.split("async function renderAdminClusterDetail(slug)", 1)[1].split(
+        "async function renderAdminClusterRequests", 1
+    )[0]
+
+    assert "sharedRepositoryEditor(c.customer_id" in detail
+    assert "clusterSettingsEditor(c," in detail
+    assert "if (!c.provisioned_at)" not in detail
+    assert "config_version: cluster.config_version" in js
+    assert "expected_version: repository.version" in js
+    assert "Advanced RBAC (read-only)" in js

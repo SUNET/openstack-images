@@ -1,6 +1,6 @@
 [project]
 name = "customer-portal-api"
-version = "0.1.21"
+version = "0.1.24"
 description = "SUNET OpenStack Customer Self-Service Portal API"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "playwright>=1.49.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "respx>=0.21.0",
@@ -40,3 +41,6 @@ select = ["E", "F", "I", "W"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra --tb=short"
+markers = [
+    "browser: browser tests requiring Playwright and Chromium",
+]

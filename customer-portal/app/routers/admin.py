@@ -17,7 +17,9 @@ from app.models import (
     ContractPriceOverride,
     ContractRebate,
     Customer,
+    CustomerClusterRepository,
     ResourcePrice,
+    TenantCluster,
 )
 from app.routers.projects import (
     _enrich_project,
@@ -46,6 +48,72 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+async def _require_customer_identity_mutable(customer_id: int, session: AsyncSession) -> None:
+    # Wait for in-flight cluster FK inserts before inspecting the customer's clusters.
+    await session.execute(
+        select(Contract.id).where(Contract.customer_id == customer_id)
+        .order_by(Contract.id).with_for_update()
+    )
+    repository = await session.scalar(
+        select(CustomerClusterRepository.id)
+        .where(CustomerClusterRepository.customer_id == customer_id).limit(1)
+    )
+    cluster = await session.scalar(
+        select(TenantCluster.id).join(Contract)
+        .where(Contract.customer_id == customer_id).limit(1)
+    )
+    if repository is not None or cluster is not None:
+        raise HTTPException(
+            409, "Customer identity is locked by tenant clusters or repository configuration"
+        )
+
+
+async def _locked_contract(
+    contract_id: int, session: AsyncSession, *, target_customer_id: int | None = None
+) -> Contract:
+    """Lock parents before children, also excluding concurrent repository creation."""
+    customer_id = await session.scalar(
+        select(Contract.customer_id).where(Contract.id == contract_id)
+    )
+    if customer_id is None:
+        raise HTTPException(404, "Contract not found")
+    customer_ids = {customer_id}
+    if target_customer_id is not None:
+        customer_ids.add(target_customer_id)
+    await session.execute(
+        select(Customer.id).where(Customer.id.in_(customer_ids))
+        .order_by(Customer.id).with_for_update()
+    )
+    contract = await session.scalar(
+        select(Contract).where(Contract.id == contract_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if contract is None:
+        raise HTTPException(404, "Contract not found")
+    if contract.customer_id != customer_id:
+        raise HTTPException(409, "Contract ownership changed; reload before retrying")
+    return contract
+
+
+async def _require_contract_identity_mutable(
+    contract: Contract, session: AsyncSession, *, target_customer_id: int | None = None
+) -> None:
+    customer_ids = {contract.customer_id}
+    if target_customer_id is not None:
+        customer_ids.add(target_customer_id)
+    repository = await session.scalar(
+        select(CustomerClusterRepository.id)
+        .where(CustomerClusterRepository.customer_id.in_(customer_ids)).limit(1)
+    )
+    cluster = await session.scalar(
+        select(TenantCluster.id).where(TenantCluster.contract_id == contract.id).limit(1)
+    )
+    if repository is not None or cluster is not None:
+        raise HTTPException(
+            409, "Contract identity is locked by tenant clusters or repository configuration"
+        )
 
 
 # --- Customers ---
@@ -103,11 +171,14 @@ async def update_customer(
     user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    customer = await session.get(Customer, customer_id)
+    customer = await session.scalar(
+        select(Customer).where(Customer.id == customer_id).with_for_update()
+    )
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
 
     if req.domain is not None and req.domain != customer.domain:
+        await _require_customer_identity_mutable(customer_id, session)
         # Check if any projects exist under this customer's contracts
         git_backend = request.app.state.git_backend
         contracts = await session.execute(
@@ -149,11 +220,13 @@ async def delete_customer(
     customer = await session.execute(
         select(Customer)
         .where(Customer.id == customer_id)
+        .with_for_update()
         .options(selectinload(Customer.contracts))
     )
     customer = customer.scalar_one_or_none()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
+    await _require_customer_identity_mutable(customer_id, session)
     if customer.contracts:
         raise HTTPException(status_code=409, detail="Cannot delete customer with contracts")
 
@@ -270,9 +343,7 @@ async def move_contract(
     domain) — only the customer link changes. Renaming projects would be
     destructive, so it is intentionally out of scope.
     """
-    contract = await session.get(Contract, contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = await _locked_contract(contract_id, session, target_customer_id=req.customer_id)
 
     customer = await session.get(Customer, req.customer_id)
     if not customer:
@@ -281,6 +352,9 @@ async def move_contract(
     if contract.customer_id == req.customer_id:
         raise HTTPException(status_code=409, detail="Contract already belongs to this customer")
 
+    await _require_contract_identity_mutable(
+        contract, session, target_customer_id=req.customer_id
+    )
     old_customer_id = contract.customer_id
     contract.customer_id = req.customer_id
     await session.commit()
@@ -309,15 +383,14 @@ async def rename_contract(
     non-destructive. The DB change is committed only after the git rewrite
     succeeds.
     """
-    contract = await session.get(Contract, contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = await _locked_contract(contract_id, session)
 
     old_number = contract.contract_number
     new_number = req.contract_number
     if new_number == old_number:
         raise HTTPException(status_code=409, detail="Contract already has this number")
 
+    await _require_contract_identity_mutable(contract, session)
     git_backend = request.app.state.git_backend
     projects = git_backend.list_projects(old_number)
     _require_contract_renamable(projects)
@@ -357,9 +430,8 @@ async def delete_contract(
     user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    contract = await session.get(Contract, contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = await _locked_contract(contract_id, session)
+    await _require_contract_identity_mutable(contract, session)
 
     # Check if contract has projects in git
     git_backend = request.app.state.git_backend

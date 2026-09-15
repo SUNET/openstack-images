@@ -197,14 +197,24 @@ function formatApiError(detail) {
                 ? e.loc.filter((p) => p !== "body").join(".")
                 : "";
             const errorPrefix = "Value error, ";
-            const rawMessage = e.msg || JSON.stringify(e);
+            const rawMessage = e.msg || e.message || "Invalid value";
             const message = rawMessage.startsWith(errorPrefix)
                 ? rawMessage.slice(errorPrefix.length)
                 : rawMessage;
             return loc ? `${loc}: ${message}` : message;
         }).join("; ");
     }
-    return JSON.stringify(detail);
+    return detail.message || formatApiError(detail.detail) || detail.code || "Request failed";
+}
+
+function apiError(response, body) {
+    const requestId = body.request_id || body.detail?.request_id || response.headers.get("X-Request-ID");
+    const message = formatApiError(body.detail || body.message) || "Request failed";
+    const error = new Error(message + (requestId ? ` (request_id: ${requestId})` : ""));
+    error.status = response.status;
+    error.request_id = requestId;
+    error.detail = body.detail;
+    return error;
 }
 
 async function api(path, opts = {}) {
@@ -221,11 +231,21 @@ async function api(path, opts = {}) {
     }
     if (resp.status === 401) { currentUser = null; renderLogin(); return null; }
     if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(formatApiError(err.detail) || "Request failed");
+        const err = await resp.json().catch(async error => {
+            if (error?.name === "AbortError") await suspendAbortedRoute(error, signal);
+            return { detail: resp.statusText };
+        });
+        if (signal?.aborted) await suspendAbortedRoute(new DOMException("Aborted", "AbortError"), signal);
+        throw apiError(resp, err);
     }
     if (resp.status === 204) return null;
-    return resp.json();
+    try {
+        const body = await resp.json();
+        if (signal?.aborted) await suspendAbortedRoute(new DOMException("Aborted", "AbortError"), signal);
+        return body;
+    } catch (error) {
+        await suspendAbortedRoute(error, signal);
+    }
 }
 
 async function downloadApi(path, body) {
@@ -413,6 +433,55 @@ function fmtDay(s) {
     if (!s) return "—";
     try { return new Date(s).toLocaleDateString(undefined, { dateStyle: "medium" }); }
     catch { return s; }
+}
+
+function inlineFeedback(target, message, type = "error") {
+    clear(target);
+    if (message) target.appendChild(h("div", {
+        className: type === "progress" ? "hint workflow-progress" : `alert ${type}`,
+        role: type === "error" ? "alert" : "status",
+    }, message));
+}
+
+/** Lock related forms together: they share an optimistic concurrency version. */
+async function runInlineAction(container, feedback, progress, action) {
+    if (container.getAttribute("aria-busy") === "true") return;
+    const signal = routeAbortController?.signal;
+    const controls = [...container.querySelectorAll("button, input, select, textarea")];
+    const disabled = controls.map(el => el.disabled);
+    container.setAttribute("aria-busy", "true");
+    controls.forEach(el => { el.disabled = true; });
+    inlineFeedback(feedback, progress, "progress");
+    try {
+        await action();
+    } catch (error) {
+        if (!signal?.aborted) inlineFeedback(feedback, error.message);
+    } finally {
+        container.setAttribute("aria-busy", "false");
+        controls.forEach((el, i) => { el.disabled = disabled[i]; });
+    }
+}
+
+function childRouteController(signal = routeAbortController?.signal) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    controller.signal.addEventListener("abort", () => signal?.removeEventListener("abort", abort), { once: true });
+    return controller;
+}
+
+/** Resolve false on navigation and release both the timer and abort listener. */
+function waitForPoll(signal, milliseconds = 1000) {
+    return new Promise(resolve => {
+        if (signal.aborted) { resolve(false); return; }
+        const abort = () => { clearTimeout(timer); resolve(false); };
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", abort);
+            resolve(true);
+        }, milliseconds);
+        signal.addEventListener("abort", abort, { once: true });
+    });
 }
 
 // ---------- Login ----------
@@ -1379,6 +1448,10 @@ async function renderAdminCustomerDetail(customerId) {
             kvRow("Created", fmtDate(customer.created_at)),
         ));
 
+        const repository = sharedRepositoryEditor(customer.id);
+        app.appendChild(repository.element);
+        void repository.refresh();
+
         // Add contract form
         app.appendChild(h("div", { className: "slbl" }, "Add contract"));
         const addForm = h("form", { className: "form", onsubmit: async (e) => {
@@ -1472,6 +1545,11 @@ async function renderAdminEditCustomer(customerId) {
         h("button", { className: "btn primary", onclick: () => form.requestSubmit() }, isNew ? "Create customer" : "Save changes"),
         h("a", { className: "btn ghost", href: isNew ? "#/admin" : `#/admin/customers/${customerId}` }, "Cancel"),
     ));
+    if (!isNew) {
+        const repository = sharedRepositoryEditor(customerId);
+        app.appendChild(repository.element);
+        void repository.refresh();
+    }
 }
 
 // ---------- Admin: contract detail ----------
@@ -2180,6 +2258,9 @@ async function renderClusterDetail(slug) {
                 ? [h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}/users` }, "Manage users")]
                 : null,
         }));
+        if (currentUser.is_admin) app.appendChild(h("div", { className: "btn-row" },
+            h("a", { className: "btn ghost sm", href: `#/admin/clusters/${encodeURIComponent(slug)}` }, "Manage cluster / GitOps"),
+        ));
 
         // Overview
         app.appendChild(h("div", { className: "slbl first" }, "Overview"));
@@ -2542,7 +2623,7 @@ function renderAdmin() {
     app.appendChild(tile("#/admin/customers", "Customers & Contracts",
         "Create customer organisations, contracts, and grant user access to contracts."));
     app.appendChild(tile("#/admin/clusters", "Tenant Clusters",
-        "Register Kubernetes clusters, mark as provisioned, manage admin access. Includes the bootstrap setup guide."));
+        "Start provisioning, review GitOps publications, activate clusters and manage admin access. Includes the setup guide."));
     app.appendChild(tile("#/admin/cluster-requests", "Cluster Change Requests",
         "Review and apply customer-admin requests for addons, resizes, and backup enablement."));
     app.appendChild(tile("#/admin/billing", "Billing Jobs",
@@ -2585,6 +2666,257 @@ async function renderAdminClusters() {
     } catch (e) { showAlert(e.message); }
 }
 
+function repositoryReady(repository) {
+    return !!(repository?.configured && repository.writer_configured && repository.validation_status === "valid");
+}
+
+function repositorySummary(repository) {
+    const validationKind = repositoryReady(repository) ? "ready"
+        : ["invalid", "failed", "error"].includes(repository.validation_status) ? "error" : "pending";
+    return kv(
+        kvRow("Scope", `Customer ${repository.customer_id} · ${repository.environment}`),
+        kvRowMono("Repository", repository.repo_url || "Not configured"),
+        kvRow("Writer", repository.writer_configured ? `Configured · ${repository.writer_username}` : "Not configured"),
+        kvRow("Validation", badge(repository.validation_status || "unvalidated", validationKind)),
+        repository.validation_message ? kvRow("Validation message", repository.validation_message) : null,
+        kvRow("Last validated", fmtDate(repository.validated_at)),
+    );
+}
+
+/** The repository and its credentials belong to a customer/environment, not a cluster. */
+function sharedRepositoryEditor(customerId, { onChange = () => {} } = {}) {
+    const path = `/api/admin/customers/${encodeURIComponent(customerId)}/cluster-repository`;
+    const signal = routeAbortController?.signal;
+    let repository = null;
+    let details;
+    const credentialFailures = new Map();
+    const recoveryViews = new Map();
+    const feedback = h("div", {});
+    const content = h("div", {});
+    const refreshButton = h("button", { type: "button", className: "btn ghost sm", onclick: () => refresh() }, "Refresh repository status");
+    const element = h("section", { className: "repository-editor workflow-section", "aria-label": "Shared customer repository" },
+        slbl("Shared customer repository"), content,
+        h("div", { className: "btn-row" }, refreshButton), feedback,
+    );
+    const clearTokens = () => element.querySelectorAll("input[type=password]").forEach(input => { input.value = ""; });
+    signal?.addEventListener("abort", clearTokens, { once: true });
+
+    async function load(changed = false, reloaded = false) {
+        const previousVersion = repository?.version;
+        repository = await api(path, { signal });
+        if (reloaded) credentialFailures.forEach(failure => { failure.reloaded = true; });
+        await onChange(repository, changed || (previousVersion != null && previousVersion !== repository.version));
+        render();
+    }
+
+    async function refresh() {
+        await runInlineAction(element, feedback, "Loading shared repository…", async () => {
+            await load(false, true);
+            clear(feedback);
+        });
+    }
+
+    async function save(suffix, body, message, method = "POST") {
+        await runInlineAction(element, feedback, "Saving shared repository configuration…", async () => {
+            try {
+                await api(path + suffix, { method, body: JSON.stringify({ expected_version: repository.version, ...body }), signal });
+            } catch (error) {
+                const detail = error.detail;
+                if (detail && ["writer", "reader"].includes(detail.kind) && detail.code) {
+                    credentialFailures.set(detail.kind, { detail, requestId: error.request_id, reloaded: false });
+                    const view = recoveryViews.get(detail.kind);
+                    if (view) {
+                        view.version.value = "";
+                        view.details.open = true;
+                        view.update();
+                    }
+                }
+                throw error;
+            }
+            if (suffix.startsWith("/credentials/")) credentialFailures.delete(suffix.split("/").pop());
+            await load(true);
+            if (suffix === "/validate" && !repositoryReady(repository)) {
+                inlineFeedback(feedback, repository.validation_message || "Repository validation failed. Check its URL and writer credential.");
+            } else inlineFeedback(feedback, message, "success");
+        });
+        recoveryViews.forEach(view => view.update());
+    }
+
+    function credentialForm(kind) {
+        const title = kind === "writer" ? "Writer" : "Reader";
+        const username = h("input", {
+            id: `repo-${kind}-username`, name: "username", maxlength: "255", autocomplete: "off",
+            value: repository[`${kind}_username`] || "",
+        });
+        const token = h("input", {
+            id: `repo-${kind}-token`, name: "token", type: "password", maxlength: "4096",
+            autocomplete: "new-password", placeholder: "Leave blank to keep current credential", spellcheck: "false",
+        });
+        const recoveryVersion = h("input", {
+            id: `repo-${kind}-recovery-version`, name: "expected_secret_version", type: "number", min: "0", step: "1",
+            max: String(Number.MAX_SAFE_INTEGER), autocomplete: "off", placeholder: "Blank uses the database pin",
+        });
+        const metadata = h("div", { "aria-label": `${title} recovery version metadata` });
+        const recovery = h("details", { className: "workflow-details credential-recovery", open: credentialFailures.has(kind), ontoggle: () => {
+            if (!recovery.open) recoveryVersion.value = "";
+        }},
+            h("summary", {}, `Advanced ${kind} credential recovery`),
+            h("p", { className: "credential-recovery-warning" },
+                "Recovery can replace a KV version that differs from the database pin, affecting every cluster in this customer/environment. Reload repository status, then verify the current OpenBao version before confirming a replacement. Observed or written versions are snapshots; they are never used automatically."),
+            metadata,
+            h("div", { className: "btn-row" }, h("button", {
+                type: "button", className: "btn ghost sm", onclick: () => refresh(),
+            }, `Reload ${kind} repository status`)),
+            h("label", { htmlFor: `repo-${kind}-recovery-version` }, `Confirmed ${kind} secret version (advanced)`), recoveryVersion,
+            h("p", { className: "hint" }, "Optional expected_secret_version override for explicit CAS recovery only. Enter 0 only after verifying that the secret does not exist. Blank keeps normal replacement semantics. Reloading clears this field and any entered tokens."),
+        );
+
+        function updateRecovery() {
+            const failure = credentialFailures.get(kind);
+            recoveryVersion.disabled = !repository.configured || !!(failure && !failure.reloaded);
+            recoveryVersion.min = String(repository[`${kind}_secret_version`] ?? 0);
+            clear(metadata).appendChild(kv(
+                kvRow("Current repository version", String(repository.version)),
+                kvRow("Current database pin", repository[`${kind}_secret_version`] ?? "Unpinned"),
+            ));
+            if (!failure) return;
+            const detail = failure.detail;
+            metadata.append(
+                h("p", { className: "hint" }, "Last failed attempt — these values do not confirm the current database or KV state."),
+                kv(
+                    kvRowMono("Error code", detail.code),
+                    kvRow("Credential kind", detail.kind),
+                    kvRow("Repository version at attempt", detail.repository_version ?? "Not reported"),
+                    kvRow("Pinned version at attempt", detail.pinned_secret_version ?? "Unpinned"),
+                    kvRow("Attempted CAS version", detail.expected_secret_version ?? "Not reported"),
+                    kind === "writer" ? kvRow("Observed writer KV version", detail.latest_secret_version ?? "Not observed — verify in OpenBao") : null,
+                    kvRow("Confirmed KV write version", detail.written_secret_version ?? "Not reported"),
+                    failure.requestId ? kvRowMono("request_id", failure.requestId) : null,
+                ),
+                h("p", { className: "hint" }, detail.written_secret_version != null
+                    ? "The KV write succeeded, but its database commit was not confirmed. Reload before deciding whether another replacement is needed."
+                    : "Confirm the current secret version in OpenBao; the reader secret is never read by this editor."),
+                h("p", { className: "hint" }, failure.reloaded
+                    ? "Repository status reloaded. Verify the KV version independently and enter it explicitly if recovery is still needed."
+                    : "Reload repository status before another replacement or entering a recovery version."),
+            );
+        }
+        recoveryViews.set(kind, { details: recovery, version: recoveryVersion, update: updateRecovery });
+        updateRecovery();
+        const form = h("form", { className: "form", autocomplete: "off", onsubmit: async e => {
+            e.preventDefault();
+            if (element.getAttribute("aria-busy") === "true") return;
+            if (!token.value) {
+                inlineFeedback(feedback, `${title} credential kept. To replace it, enter both a username and a new token.`, "success");
+                return;
+            }
+            if (!username.value.trim() || !token.value.trim()) {
+                inlineFeedback(feedback, "Credential replacement requires both a non-empty username and token.");
+                return;
+            }
+            if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(username.value.trim()) || /[^\x21-\x7e]/.test(token.value)) {
+                inlineFeedback(feedback, "Use a Forgejo username and a token with printable ASCII characters and no whitespace.");
+                return;
+            }
+            const failure = credentialFailures.get(kind);
+            if (failure && !failure.reloaded) {
+                inlineFeedback(feedback, "Reload repository status before replacing this credential again. Verify the current KV version for explicit recovery.");
+                return;
+            }
+            const body = { username: username.value.trim(), token: token.value };
+            if (recoveryVersion.value !== "") {
+                const expected = Number(recoveryVersion.value);
+                const pinned = repository[`${kind}_secret_version`];
+                if (!Number.isSafeInteger(expected) || expected < 0 || (pinned != null && expected < pinned)) {
+                    inlineFeedback(feedback, "Recovery requires a non-negative integer that is not older than the current database pin.");
+                    return;
+                }
+                if (!confirm(`Recover the shared ${kind} credential for customer ${repository.customer_id} (${repository.environment}) using expected_secret_version=${expected}? Current repository version: ${repository.version}; database pin: ${pinned ?? "unpinned"}. Confirm that you verified this OpenBao version. This writes a new credential version for all affected clusters.`)) return;
+                body.expected_secret_version = expected;
+            }
+            token.value = "";
+            recoveryVersion.value = "";
+            await save(`/credentials/${kind}`, body, `${title} credential replaced for this customer and environment. Validate the repository again.`);
+        }},
+            h("h3", {}, `${title} credential`),
+            h("p", { className: "hint" }, kind === "writer"
+                ? "Used by the portal to publish to this shared repository."
+                : "Used by Argo CD to read this shared repository. After replacement, install it manually on each affected cluster and acknowledge each cluster separately."),
+            h("p", { className: "hint" }, `${repository[`${kind}_configured`] ? "Configured" : "Not configured"} · pinned secret version ${repository[`${kind}_secret_version`] ?? "unpinned"} · updated ${fmtDate(repository[`${kind}_updated_at`])}`),
+            h("label", { htmlFor: `repo-${kind}-username` }, `${title} username`), username,
+            h("label", { htmlFor: `repo-${kind}-token` }, `New ${kind} token`), token,
+            h("p", { className: "hint" }, "Blank token keeps the current credential. Tokens are write-only and are never filled in by the portal."),
+            recovery,
+            h("div", { className: "btn-row" },
+                h("button", { type: "submit", className: "btn ghost sm", disabled: !repository.configured }, `Replace ${kind} credential`),
+            ),
+        );
+        return form;
+    }
+
+    function render() {
+        const open = details?.open ?? !repository.configured;
+        clearTokens();
+        clear(content);
+        content.appendChild(repositorySummary(repository));
+        content.appendChild(h("p", { className: "hint" },
+            `Shared by all clusters for customer ${repository.customer_id} in ${repository.environment}. URL and credential changes affect this entire scope and are saved independently of cluster settings.`));
+        content.appendChild(slbl("Affected clusters", (repository.clusters || []).length));
+        content.appendChild((repository.clusters || []).length
+            ? h("ul", { className: "ilist repository-clusters" }, ...repository.clusters.map(cluster => h("li", {},
+                h("a", { className: "text-link", href: `#/admin/clusters/${encodeURIComponent(cluster.slug)}` }, `${cluster.name} (${cluster.slug})`),
+                h("span", { className: "meta" }, `Reader installed: ${cluster.reader_installed_version ?? "not acknowledged"}`),
+            )))
+            : h("p", { className: "hint" }, "No clusters are associated with this repository yet. Future clusters in this scope will reuse this configuration."));
+        content.appendChild(h("p", { className: "hint" }, `Configuration version ${repository.version}`));
+        content.appendChild(kv(kvRowMono("Approved default bases revision", repository.bases_revision || "—")));
+        content.appendChild(h("p", { className: "hint" }, "An existing repository gitlink may pin a different revision. Review the actual bases revision in the prepared operation before publishing."));
+
+        const url = h("input", {
+            id: "shared-repo-url", name: "repo_url", type: "url", maxlength: "2048", required: !repository.configured,
+            value: repository.repo_url || "", placeholder: "https://platform.sunet.se/VDC/customer-example-clusters.git", autocomplete: "off",
+        });
+        const urlForm = h("form", { className: "form", onsubmit: async e => {
+            e.preventDefault();
+            const value = url.value.trim();
+            if (!value || value === repository.repo_url) {
+                inlineFeedback(feedback, "Repository URL kept. Credentials are saved using their separate replacement buttons.", "success");
+                return;
+            }
+            const parsed = new URL(value);
+            if (parsed.username || parsed.password) {
+                inlineFeedback(feedback, "Use a repository URL without embedded credentials. Save credentials separately below.");
+                return;
+            }
+            await save("", { repo_url: value }, "Shared repository URL saved. Configure its credentials and validate before creating a cluster.", "PUT");
+        }},
+            h("label", { htmlFor: "shared-repo-url" }, "Shared repository URL"), url,
+            h("div", { className: "btn-row" }, h("button", { type: "submit", className: "btn primary sm" }, "Save repository URL")),
+        );
+        details = h("details", { className: "workflow-details", open },
+            h("summary", {}, repository.configured ? "Edit shared repository" : "Configure repository"),
+            urlForm, credentialForm("writer"), credentialForm("reader"),
+            h("div", { className: "btn-row" }, h("button", {
+                type: "button", className: "btn primary sm", disabled: !repository.configured || !repository.writer_configured,
+                onclick: () => save("/validate", {}, "Repository validation completed. See the validation status above."),
+            }, "Validate repository")),
+        );
+        content.appendChild(details);
+    }
+
+    return {
+        element, refresh,
+        get value() { return repository; },
+        async focus(credential = null) {
+            if (!details) await refresh();
+            if (!details) return;
+            details.open = true;
+            details.scrollIntoView({ block: "center" });
+            details.querySelector(credential ? `#repo-${credential}-token` : "input[name=repo_url]")?.focus();
+        },
+    };
+}
+
 async function renderAdminCreateCluster() {
     clear(app); app.className = "page narrow-form";
     app.appendChild(bc(
@@ -2594,8 +2926,8 @@ async function renderAdminCreateCluster() {
     ));
     app.appendChild(phead({
         eyebrow: "Operator",
-        title: "Plan tenant cluster",
-        lead: "Create the managed OpenStack project and write the initial cluster manifest before provisioning starts.",
+        title: "Create tenant cluster",
+        lead: "Creates the managed OpenStack project and publishes the initial cluster manifest, starting VM provisioning.",
     }));
 
     let contracts = [];
@@ -2614,30 +2946,69 @@ async function renderAdminCreateCluster() {
         return;
     }
 
-    const form = h("form", { className: "form",
+    let repository = null;
+    let selectionController;
+    const feedback = h("div", {});
+    const repositoryStatus = h("section", { className: "workflow-section", "aria-label": "Selected customer repository" },
+        h("p", { className: "hint" }, "Select a contract to check the shared customer repository."));
+    const createButton = h("button", { type: "submit", className: "btn primary sm", disabled: true }, "Create and start provisioning");
+    const contractSelect = h("select", {
+        id: "new-cluster-contract", name: "contract_number", required: true, onchange: () => loadRepository(),
+    },
+        h("option", { value: "" }, "— select contract —"),
+        ...contracts.map(c => {
+            const cust = customersById[c.customer_id] || c.customer;
+            return h("option", { value: c.contract_number }, cust ? `${c.contract_number} — ${cust.name} (${cust.domain})` : c.contract_number);
+        }),
+    );
+
+    async function loadRepository() {
+        selectionController?.abort();
+        selectionController = childRouteController();
+        const signal = selectionController.signal;
+        repository = null;
+        createButton.disabled = true;
+        clear(repositoryStatus);
+        const contract = contracts.find(c => c.contract_number === contractSelect.value);
+        if (!contract) return;
+        const customerId = contract.customer_id ?? contract.customer?.id;
+        const result = h("div", {});
+        repositoryStatus.appendChild(result);
+        repositoryStatus.appendChild(h("div", { className: "btn-row" },
+            h("a", { className: "btn ghost sm", href: `#/admin/customers/${customerId}` }, "Configure shared repository"),
+            h("button", { type: "button", className: "btn ghost sm", onclick: () => loadRepository() }, "Refresh repository status"),
+        ));
+        inlineFeedback(result, "Checking shared repository…", "progress");
+        try {
+            repository = await api(`/api/admin/customers/${customerId}/cluster-repository`, { signal });
+            clear(result).appendChild(repositorySummary(repository));
+            result.appendChild(h("p", { className: "hint" }, repositoryReady(repository)
+                ? "This cluster will reuse the customer's validated writer. No tokens are needed here."
+                : "Configure the shared repository and writer credential, then validate it before creating a cluster."));
+            createButton.disabled = !repositoryReady(repository);
+        } catch (error) { if (!signal.aborted) inlineFeedback(result, error.message); }
+    }
+
+    const form = h("form", { className: "form", id: "create-cluster-form",
         onsubmit: async (e) => {
             e.preventDefault();
+            if (form.getAttribute("aria-busy") === "true" || !repositoryReady(repository)) return;
             const data = Object.fromEntries(new FormData(e.target).entries());
             data.worker_groups = parseInt(data.worker_groups, 10) || 1;
+            data.name = data.name.trim();
+            data.slug = data.slug.trim();
             data.argocd_alias = data.argocd_alias.trim() || null;
-            try {
+            await runInlineAction(form, feedback, "Creating cluster and starting VM provisioning…", async () => {
                 const created = await api("/api/admin/clusters", {
                     method: "POST", body: JSON.stringify(data),
                 });
                 navigate(`/admin/clusters/${encodeURIComponent(created.slug)}`);
-            } catch (err) { showAlert(err.message); }
+            });
         }},
         h("label", { htmlFor: "new-cluster-contract" }, "Contract"),
-        h("select", { id: "new-cluster-contract", name: "contract_number", required: true },
-            h("option", { value: "" }, "— select contract —"),
-            ...contracts.map(c => {
-                const cust = customersById[c.customer_id];
-                const lbl = cust ? `${c.contract_number} — ${cust.name} (${cust.domain})` : c.contract_number;
-                return h("option", { value: c.contract_number }, lbl);
-            }),
-        ),
-        h("label", { htmlFor: "new-cluster-name" }, "Display name"),
-        h("input", { id: "new-cluster-name", name: "name", required: true, placeholder: "Acme cluster one" }),
+        contractSelect, repositoryStatus,
+        h("label", { htmlFor: "new-cluster-name" }, "Portal display name"),
+        h("input", { id: "new-cluster-name", name: "name", required: true, maxlength: "255", placeholder: "Acme cluster one" }),
         h("label", { htmlFor: "new-cluster-slug" }, "Slug (used in OpenBao mount path & cert O)"),
         h("input", { id: "new-cluster-slug", name: "slug", required: true, pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?", maxlength: "63", placeholder: "acme-one" }),
         h("div", { className: "meta", style: "margin-top:6px" },
@@ -2646,28 +3017,375 @@ async function renderAdminCreateCluster() {
         h("input", { id: "new-cluster-workers", name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Maximum 80 worker groups for the standard-v1 /24 network."),
-        h("label", { htmlFor: "customer-repository-url" }, "Customer cluster repository URL"),
-        h("input", { id: "customer-repository-url", name: "customer_repository_url", type: "url", required: true, placeholder: "https://platform.sunet.se/VDC/customer-acme-clusters-test.git" }),
-        h("label", { htmlFor: "customer-repository-writer" }, "Repository write bot username"),
-        h("input", { id: "customer-repository-writer", name: "customer_repository_writer_username", required: true, autocomplete: "username", placeholder: "platform-test-bot" }),
-        h("label", { htmlFor: "customer-repository-writer-token" }, "Repository write bot token"),
-        h("input", { id: "customer-repository-writer-token", name: "customer_repository_writer_token", type: "password", required: true, autocomplete: "new-password" }),
-        h("p", { className: "hint" },
-            "Stored in OpenBao for this customer and environment only; it is never returned or committed."),
-        h("label", { htmlFor: "customer-repository-reader" }, "Argo CD read bot username (optional)"),
-        h("input", { id: "customer-repository-reader", name: "customer_repository_reader_username", autocomplete: "username", placeholder: "platform-test-bot" }),
-        h("label", { htmlFor: "customer-repository-reader-token" }, "Argo CD read bot token (optional)"),
-        h("input", { id: "customer-repository-reader-token", name: "customer_repository_reader_token", type: "password", autocomplete: "new-password" }),
         h("label", { htmlFor: "new-cluster-argocd-alias" }, "Argo CD DNS alias"),
         h("input", { id: "new-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", placeholder: "argocd.example.org" }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Optional metadata/requested alias only. Saving it does not activate DNS, routing, or TLS. The required canonical CNAME target is shown after creation."),
+        h("p", { className: "hint" }, "Create and start provisioning writes to the shared repository and starts infrastructure work. Review and publish the GitOps configuration separately on the cluster page."),
         h("div", { className: "btn-row" },
             h("a", { className: "btn ghost sm", href: "#/admin/clusters" }, "Cancel"),
-            h("button", { type: "submit", className: "btn primary sm" }, "Create cluster"),
-        ),
+            createButton,
+        ), feedback,
     );
     app.appendChild(form);
+}
+
+function clusterSettingsEditor(cluster, onChange) {
+    const path = `/api/admin/clusters/${encodeURIComponent(cluster.slug)}`;
+    const feedback = h("div", {});
+    const element = h("section", { className: "workflow-section", "aria-label": "Cluster settings" });
+    const name = h("input", { id: "admin-cluster-name", name: "name", maxlength: "255", value: cluster.name });
+    const alias = h("input", { id: "admin-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", value: cluster.argocd_alias || "", placeholder: "argocd.example.org" });
+    const apiUrl = h("input", { id: "cluster-api-url", name: "api_url", type: "url", value: cluster.api_url || "", placeholder: `https://${cluster.api_hostname}:6443` });
+    const ca = h("textarea", { id: "cluster-ca-bundle", name: "ca_bundle", className: "cluster-ca-bundle", placeholder: "Leave blank to keep current CA bundle", autocomplete: "off", spellcheck: "false" });
+
+    async function save(fields, message) {
+        const changes = Object.fromEntries(Object.entries(fields).filter(([key, value]) => value && value !== cluster[key]));
+        if (!Object.keys(changes).length) {
+            inlineFeedback(feedback, "No changes to save. Blank fields keep their current values.", "success");
+            return;
+        }
+        await runInlineAction(element, feedback, "Saving cluster settings…", async () => {
+            await api(path, { method: "PATCH", body: JSON.stringify({ ...changes, config_version: cluster.config_version }) });
+            Object.assign(cluster, await api(path));
+            if ("name" in changes) name.value = cluster.name;
+            if ("argocd_alias" in changes) alias.value = cluster.argocd_alias || "";
+            if ("api_url" in changes) apiUrl.value = cluster.api_url || "";
+            if ("ca_bundle" in changes) ca.value = "";
+            await onChange();
+            inlineFeedback(feedback, message, "success");
+        });
+    }
+
+    element.append(
+        slbl("Cluster settings"),
+        h("form", { className: "form", onsubmit: e => {
+            e.preventDefault();
+            void save({ name: name.value.trim(), argocd_alias: alias.value.trim() }, "Portal display settings saved. Requested DNS alias remains metadata until activated separately.");
+        }},
+            h("label", { htmlFor: "admin-cluster-name" }, "Portal display name"), name,
+            h("p", { className: "hint" }, "Display label only. The cluster slug and infrastructure identity are fixed."),
+            h("label", { htmlFor: "admin-cluster-argocd-alias" }, "Requested Argo CD DNS alias"), alias,
+            h("p", { className: "hint" }, "Blank fields keep current values. The requested alias is metadata; DNS, routing and TLS require separate activation. Required CNAME target: ", h("code", {}, cluster.argocd_hostname), "."),
+            h("div", { className: "btn-row" }, h("button", { type: "submit", className: "btn primary sm" }, "Save cluster settings")),
+        ),
+        slbl("Kubernetes connection"),
+        h("form", { className: "form", onsubmit: e => {
+            e.preventDefault();
+            void save({ api_url: apiUrl.value.trim(), ca_bundle: ca.value.trim() }, "Kubernetes connection saved for this cluster.");
+        }},
+            h("p", { className: "hint" }, "Replace the API endpoint or CA bundle after verifying the cluster's administrative kubeconfig. This editor is available on live clusters too. Blank or unchanged values are omitted."),
+            h("label", { htmlFor: "cluster-api-url" }, "API URL"), apiUrl,
+            h("label", { htmlFor: "cluster-ca-bundle" }, "CA bundle (PEM)"), ca,
+            h("div", { className: "btn-row" }, h("button", { type: "submit", className: "btn primary sm" }, "Save connection details")),
+        ), feedback,
+        h("div", { className: "btn-row" }, h("button", { type: "button", className: "btn ghost sm", onclick: () => runInlineAction(element, feedback, "Refreshing cluster settings…", async () => {
+            Object.assign(cluster, await api(path));
+            name.value = cluster.name;
+            alias.value = cluster.argocd_alias || "";
+            apiUrl.value = cluster.api_url || "";
+            ca.value = "";
+            await onChange();
+            inlineFeedback(feedback, "Latest cluster settings loaded.", "success");
+        }) }, "Reload cluster settings")),
+        h("details", { className: "workflow-details" },
+            h("summary", {}, "Advanced RBAC (read-only)"),
+            kv(
+                kvRowMono("Argo CD namespace", cluster.argocd_namespace),
+                kvRowMono("OpenBao role", cluster.openbao_role || "Managed by platform"),
+                kvRowMono("Argo CD role", cluster.argocd_role_name || "Managed by platform"),
+            ),
+        ),
+    );
+    return element;
+}
+
+function gitopsLifecycle(cluster, repository) {
+    const path = `/api/admin/clusters/${encodeURIComponent(cluster.slug)}/gitops`;
+    const signal = routeAbortController?.signal;
+    let state = null;
+    let selectedId = null;
+    let pollController = null;
+    const invalidated = new Set();
+    const feedback = h("div", {});
+    const status = h("div", { "aria-label": "Lifecycle status" });
+    const blockers = h("div", {});
+    const review = h("section", { "aria-label": "Operation review", className: "workflow-section" });
+    const history = h("div", { "aria-label": "GitOps operation history" });
+    const readerStatus = h("p", { className: "hint" });
+    const acme = h("input", { id: "gitops-acme-contact", type: "email", name: "acme_contact", maxlength: "254", required: true, oninput: () => updateControls() });
+    const adopt = h("input", { id: "gitops-adopt", type: "checkbox" });
+    const readerVersion = h("input", { id: "gitops-reader-version", type: "number", min: "1", step: "1", required: true, oninput: () => updateControls() });
+    const saveDraft = h("button", { type: "submit", className: "btn ghost sm", disabled: true }, "Save GitOps draft");
+    const previewButton = h("button", { type: "button", className: "btn primary sm", disabled: true, onclick: () => perform("Queuing preview…", async () => {
+        const operation = await api(path + "/preview", { method: "POST", body: JSON.stringify({ adopt: adopt.checked }), signal });
+        await acceptOperation({ kind: "preview", ...operation });
+    }) }, "Generate preview");
+    const refreshButton = h("button", { type: "button", className: "btn ghost sm", onclick: () => refresh() }, "Refresh status");
+    const publishButton = h("button", { type: "button", className: "btn primary sm", disabled: true, onclick: async () => {
+        const operation = selected();
+        if (!canPublish(operation) || !confirm(`Publish the reviewed diff for ${cluster.slug}? This writes a commit to the shared customer repository. Argo CD may reconcile the published configuration.`)) return;
+        await perform("Queuing approved publication…", async () => {
+            const response = await api(path + "/publish", { method: "POST", body: JSON.stringify({ operation_id: operation.id }), signal });
+            await acceptOperation({ ...operation, kind: "publish", error_code: null, error_message: null, ...response });
+        });
+    } }, "Publish reviewed diff");
+    const acknowledgeButton = h("button", { type: "submit", className: "btn ghost sm", disabled: true }, "Acknowledge reader installation");
+    const draftHint = h("p", { className: "hint" });
+    const element = h("section", { className: "gitops-lifecycle workflow-section", "aria-label": "GitOps lifecycle" },
+        slbl("Lifecycle status"), status,
+        slbl("GitOps publication"),
+        h("p", { className: "hint" }, "Save a draft, generate a preview, then review its diff before explicitly publishing. Publication and operator activation are separate steps."),
+        h("div", { className: "btn-row" }, refreshButton), feedback, blockers,
+        h("form", { className: "form workflow-section", onsubmit: e => {
+            e.preventDefault();
+            if (!state || !draftDirty()) return;
+            void perform("Saving GitOps draft…", async () => {
+                await api(path, { method: "PUT", body: JSON.stringify({ expected_version: state.version, acme_contact: acme.value.trim() }), signal });
+                invalidatePreviews();
+                await load(true);
+                inlineFeedback(feedback, "GitOps draft saved. Generate a new preview to review the changes.", "success");
+            });
+        }},
+            h("label", { htmlFor: "gitops-acme-contact" }, "ACME contact email"), acme,
+            h("div", { className: "btn-row" }, saveDraft),
+            h("label", { className: "checkbox", htmlFor: "gitops-adopt" }, adopt, "Adopt existing GitOps files in this preview"),
+            h("p", { className: "hint" }, "Adoption includes existing files in the proposed managed baseline. Inspect all changes in the preview."),
+            draftHint, h("div", { className: "btn-row" }, previewButton),
+        ), review,
+        slbl("Reader credential installation"),
+        h("form", { className: "form", onsubmit: e => {
+            e.preventDefault();
+            const version = Number(readerVersion.value);
+            if (!Number.isInteger(version) || version < 1 || !repository.value?.reader_configured) return;
+            if (!confirm(`Acknowledge that reader credential version ${version} is installed on ${cluster.slug}? This records a manual operator check for this cluster only.`)) return;
+            void perform("Recording reader installation…", async () => {
+                await api(path + "/reader-installed", { method: "POST", body: JSON.stringify({ version }), signal });
+                await load();
+                await repository.refresh();
+                inlineFeedback(feedback, `Reader version ${version} acknowledged on ${cluster.slug} only.`, "success");
+            });
+        }},
+            h("p", { className: "hint" }, `Install the shared read credential manually in Argo CD on ${cluster.slug}, then record the installed version here. This acknowledgement applies only to this cluster; it does not install or rotate credentials.`),
+            readerStatus,
+            h("label", { htmlFor: "gitops-reader-version" }, "Reader version installed on this cluster"), readerVersion,
+            h("div", { className: "btn-row" }, acknowledgeButton),
+        ),
+        slbl("Operation history"), history,
+    );
+
+    function selected() { return state?.operations.find(op => op.id === selectedId); }
+    function isActive(operation) { return ["queued", "running"].includes(operation.status); }
+    function active() { return (state?.operations || []).filter(isActive); }
+    function draftDirty() { return !!state && acme.value.trim() !== (state.acme_contact || ""); }
+    function canPublish(operation) {
+        return !!(operation && operation.diff != null && !invalidated.has(operation.id) && !draftDirty() && !active().length
+            && (operation.status === "preview_ready" || (operation.status === "failed" && operation.kind === "publish")));
+    }
+    function upsert(operation) {
+        const index = state.operations.findIndex(op => op.id === operation.id);
+        if (index === -1) state.operations.unshift(operation);
+        else state.operations[index] = { ...state.operations[index], ...operation };
+    }
+    function invalidatePreviews() {
+        for (const operation of state?.operations || []) invalidated.add(operation.id);
+    }
+
+    function showOperationResult(operation) {
+        if (!operation) { clear(feedback); return; }
+        const kind = operation.kind === "publish" ? "Publication" : "Preview";
+        if (isActive(operation)) {
+            inlineFeedback(feedback, `${kind} ${operation.status}. Waiting for the worker…`, "progress");
+        } else if (operation.status === "succeeded") {
+            inlineFeedback(feedback, `${kind} succeeded.${operation.result_commit ? ` Commit: ${operation.result_commit}.` : ""}`, "success");
+        } else if (operation.status === "preview_ready") {
+            inlineFeedback(feedback, "Preview ready. Review the diff and its source and validation metadata before publishing.", "success");
+        } else {
+            inlineFeedback(feedback, `${kind} ${operation.status}. Review the operation details below.`);
+        }
+    }
+
+    async function acceptOperation(operation) {
+        upsert(operation);
+        selectedId = operation.id;
+        renderState();
+        showOperationResult(operation);
+        // A retry after a lost response may already have completed on the server.
+        if (!isActive(operation)) await load();
+    }
+
+    function updateControls() {
+        const busy = element.getAttribute("aria-busy") === "true";
+        const pending = active().length > 0;
+        saveDraft.disabled = busy || pending || !draftDirty();
+        previewButton.disabled = busy || pending || !state?.can_preview || draftDirty();
+        publishButton.disabled = busy || !canPublish(selected());
+        publishButton.textContent = selected()?.status === "failed" ? "Retry approved publish" : "Publish reviewed diff";
+        acme.disabled = busy || pending || !state;
+        adopt.disabled = busy || pending || !state;
+        acknowledgeButton.disabled = busy || pending || !repository.value?.reader_configured || !Number.isInteger(Number(readerVersion.value)) || Number(readerVersion.value) < 1;
+        refreshButton.disabled = busy;
+        draftHint.textContent = draftDirty() ? "Save the changed draft before generating or publishing a preview." : pending ? "An operation is in progress. Its status is refreshed automatically while this page is open." : "Preview generation does not publish changes.";
+    }
+
+    function operationStatus(operation) {
+        return badge(operation.status, ["failed", "conflict"].includes(operation.status) ? "error" : operation.status === "succeeded" ? "ready" : "pending");
+    }
+
+    function operationError(operation) {
+        if (!["failed", "conflict"].includes(operation.status)) return null;
+        return h("div", { className: "alert error", role: "alert" },
+            `${operation.error_code ? operation.error_code + ": " : ""}${operation.error_message || "Operation failed."}`,
+            operation.request_id ? ` (request_id: ${operation.request_id})` : "",
+            operation.status === "conflict" ? " Refresh status and generate a new preview." : "",
+        );
+    }
+
+    function renderReview() {
+        clear(review);
+        const operation = selected();
+        if (!operation) {
+            review.appendChild(h("p", { className: "hint" }, "No preview yet. Generate one after resolving the blockers."));
+            return;
+        }
+        review.append(slbl("Review operation"), kv(
+            kvRowMono("Operation", operation.id),
+            kvRow("Kind / status", h("span", {}, `${operation.kind} · `, operationStatus(operation))),
+            kvRowMono("Proposed action", operation.action || "—"),
+            kvRowMono("Result commit", operation.result_commit || "—"),
+            kvRowMono("Preview bases revision", operation.bases_revision ?? "Not prepared"),
+            kvRowMono("Expected repository HEAD", operation.expected_head ?? (operation.expected_head === null && operation.diff != null ? "Empty repository (no HEAD)" : "Not prepared")),
+            kvRowMono("Source inventory commit", operation.source?.inventory_commit ?? "Not captured"),
+        ));
+        for (const [label, value] of [["Preview source snapshot", operation.source], ["Preview validation metadata", operation.validation]]) {
+            review.appendChild(slbl(label));
+            if (value != null) {
+                const metadata = h("pre", { className: "gitops-metadata", tabindex: "0", "aria-label": label });
+                metadata.textContent = JSON.stringify(value, null, 2);
+                review.appendChild(metadata);
+            } else review.appendChild(h("p", { className: "hint" }, isActive(operation)
+                ? "Awaiting prepared operation metadata."
+                : "Not available for this operation."));
+        }
+        const error = operationError(operation);
+        if (error) review.appendChild(error);
+        if (operation.diff != null) {
+            const diff = h("pre", { className: "gitops-diff", tabindex: "0", "aria-label": "GitOps diff" });
+            diff.textContent = typeof operation.diff === "string" ? operation.diff : JSON.stringify(operation.diff, null, 2);
+            review.appendChild(diff);
+            if (operation.diff === "") review.appendChild(h("p", { className: "hint" }, "The preview contains no file changes."));
+            if (invalidated.has(operation.id)) review.appendChild(h("p", { className: "hint" }, "Configuration changed since this preview. Generate a new preview before publishing."));
+            if (operation.status === "failed" && operation.kind === "publish") review.appendChild(h("p", { className: "hint" }, "For a transient publication failure, retry this same approved operation. Conflicts require a new preview."));
+            review.appendChild(h("div", { className: "btn-row" }, publishButton));
+        } else review.appendChild(h("p", { className: "hint" }, isActive(operation)
+            ? "The diff will appear when preview generation completes."
+            : "No prepared preview is available for this operation."));
+        updateControls();
+    }
+
+    function renderState() {
+        if (!state) return;
+        const infra = state.infrastructure || {};
+        const sourceError = ["failed", "suspended"].includes(infra.status);
+        clear(status).appendChild(kv(
+            kvRow("VM infrastructure", h("span", {}, badge(infra.status || "unknown", infra.status === "ready" ? "ready" : sourceError ? "error" : "pending"), ` · ${infra.phase || "Phase unknown"}`)),
+            kvRowMono("Infrastructure resource", [infra.namespace, infra.name].filter(Boolean).join("/") || "—"),
+            kvRow("Infrastructure reason", infra.reason || "—"),
+            kvRow("Infrastructure message", infra.message || "—"),
+            kvRowMono("Inventory path", infra.inventory_path || "—"),
+            kvRowMono("Inventory commit", infra.inventory_commit || "—"),
+            kvRow("GitOps publication", state.published_at ? `Published ${fmtDate(state.published_at)}` : "Not published"),
+            kvRowMono("Published commit", state.last_commit || "—"),
+            kvRow("Operator activation", cluster.provisioned_at ? `Activated ${fmtDate(cluster.provisioned_at)}` : "Not activated — complete the setup gates before marking provisioned"),
+            kvRow("GitOps draft version", String(state.version)),
+        ));
+        if (sourceError) status.appendChild(h("p", { className: "hint err" }, infra.status === "suspended"
+            ? "Infrastructure is suspended. Resume operator reconciliation before generating a preview."
+            : "Infrastructure failed. Resolve the reported operator error before generating a preview."));
+        readerStatus.textContent = `Shared reader version: ${repository.value?.reader_secret_version ?? "not configured"} · acknowledged on ${cluster.slug}: ${state.reader_installed_version ?? "none"}.`;
+        clear(blockers);
+        for (const blocker of state.blockers || []) {
+            const code = String(blocker.code).toLowerCase();
+            const credential = /credential|writer|reader/.test(code) ? (/reader/.test(code) ? "reader" : "writer") : null;
+            const config = /repository|repo/.test(code) || credential;
+            blockers.appendChild(h("div", { className: "gitops-blocker" },
+                h("p", {}, h("strong", {}, blocker.code), ": ", blocker.message),
+                config ? h("button", { type: "button", className: "btn ghost tiny", onclick: () => repository.focus(credential) }, credential ? "Replace credential" : "Configure repository")
+                    : h("button", { type: "button", className: "btn ghost tiny", onclick: () => refresh() }, "Refresh status"),
+            ));
+        }
+        if (!state.can_preview && !state.blockers?.length) blockers.appendChild(h("p", { className: "hint" }, "Preview is unavailable. Refresh status to check readiness."));
+        clear(history);
+        if (!state.operations.length) history.appendChild(h("p", { className: "hint" }, "No operations recorded."));
+        for (const operation of state.operations) {
+            history.appendChild(h("div", { className: "card gitops-operation" },
+                h("div", { className: "card-head" }, h("span", { className: "mono" }, operation.kind), operationStatus(operation)),
+                h("p", { className: "hint" }, `${operation.id} · ${fmtDate(operation.created_at)}`),
+                operationError(operation),
+                h("div", { className: "btn-row" }, h("button", { type: "button", className: "btn ghost tiny", onclick: () => { selectedId = operation.id; renderReview(); } }, `Review operation ${operation.id}`)),
+            ));
+        }
+        renderReview();
+        updateControls();
+    }
+
+    async function load(resetDraft = false, requestSignal = signal) {
+        const keepDraft = !resetDraft && draftDirty();
+        state = await api(path, { signal: requestSignal });
+        state.operations = state.operations || [];
+        if (!keepDraft) acme.value = state.acme_contact || "";
+        if (!selected()) selectedId = active()[0]?.id || state.operations[0]?.id || null;
+        renderState();
+    }
+
+    function stopPolling() { pollController?.abort(); pollController = null; }
+
+    function startPolling() {
+        stopPolling();
+        if (signal?.aborted || !active().length) return;
+        const controller = childRouteController(signal);
+        pollController = controller;
+        void (async () => {
+            try {
+                while (active().length && await waitForPoll(controller.signal)) {
+                    const operations = await Promise.all(active().map(operation => api(`/api/admin/gitops-operations/${encodeURIComponent(operation.id)}`, { signal: controller.signal })));
+                    if (controller.signal.aborted) return;
+                    operations.forEach(upsert);
+                    renderState();
+                    if (!active().length) {
+                        await load(false, controller.signal);
+                        showOperationResult(selected());
+                    }
+                }
+            } catch (error) {
+                if (!controller.signal.aborted) inlineFeedback(feedback, `Status polling stopped: ${error.message}. Use Refresh status to resume.`);
+            } finally {
+                if (pollController === controller) pollController = null;
+                controller.abort();
+            }
+        })();
+    }
+
+    async function perform(progress, action) {
+        if (element.getAttribute("aria-busy") === "true") return;
+        stopPolling();
+        await runInlineAction(element, feedback, progress, action);
+        updateControls();
+        startPolling();
+    }
+
+    async function refresh() {
+        await perform("Loading GitOps status…", async () => { await load(); clear(feedback); });
+    }
+
+    return {
+        element, refresh,
+        async repositoryChanged(value, changed) {
+            if (changed) { invalidatePreviews(); await refresh(); }
+            else renderState();
+        },
+        async settingsChanged() { invalidatePreviews(); await refresh(); },
+    };
 }
 
 async function renderAdminClusterDetail(slug) {
@@ -2679,97 +3397,60 @@ async function renderAdminClusterDetail(slug) {
     ));
     try {
         const c = await api(`/api/admin/clusters/${slug}`);
-        app.appendChild(phead({
-            eyebrow: `Cluster · ${c.size_label}`,
-            title: c.name,
-            lead: c.provisioned_at ? "Provisioned and live." : "Not yet provisioned.",
-            actions: [
-                !c.provisioned_at && c.connection_configured ? h("button", { className: "btn primary sm",
-                    onclick: async () => {
-                        if (!confirm("Mark this cluster as provisioned? This starts billing for the initial setup fee in the next billing run.")) return;
-                        try {
-                            await api(`/api/admin/clusters/${slug}/provision`, { method: "POST" });
-                            route();
-                        } catch (err) { showAlert(err.message); }
-                    }}, "Mark provisioned") : null,
-                h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
-            ].filter(Boolean),
+        const summary = h("div", { "aria-label": "Cluster overview" });
+        app.appendChild(summary);
+        function renderSummary() {
+            clear(summary).appendChild(phead({
+                eyebrow: `Cluster · ${c.size_label}`,
+                title: c.name,
+                lead: c.provisioned_at ? "Activated for customer use. Infrastructure and publication status are tracked below." : "Provisioning, GitOps publication and operator activation are tracked separately.",
+                actions: [
+                    !c.provisioned_at && c.connection_configured ? h("button", { className: "btn primary sm",
+                        onclick: async e => {
+                            if (!confirm("Mark this cluster as provisioned? Complete all setup gates first. This enables credential issuance and starts billing for the initial setup fee in the next billing run.")) return;
+                            const button = e.currentTarget;
+                            button.disabled = true;
+                            try {
+                                await api(`/api/admin/clusters/${encodeURIComponent(slug)}/provision`, { method: "POST" });
+                                route();
+                            } catch (err) { button.disabled = false; showAlert(err.message); }
+                        }}, "Mark provisioned") : null,
+                    h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
+                ].filter(Boolean),
+            }));
+            summary.appendChild(h("p", { className: "hint" },
+                "Resize, deletion and requested-alias DNS automation require operator work outside this lifecycle. Cluster, project and credential cleanup requires coordinated manual decommissioning."));
+            summary.appendChild(slbl("Cluster identity (read-only)"));
+            summary.appendChild(kv(
+                kvRowMono("Slug", c.slug),
+                kvRow("Customer / environment", h("span", {}, h("a", { className: "text-link", href: `#/admin/customers/${c.customer_id}` }, `Customer ${c.customer_id}`), ` · ${c.environment}`)),
+                kvRow("Size", `${c.size_label} (${c.total_servers} Kubernetes nodes; jumphost excluded)`),
+                kvRowMono("API", c.api_url || "(not configured)"),
+                kvRowMono("Planned API DNS", c.api_hostname),
+                kvRowMono("Canonical Argo CD DNS / required CNAME target", c.argocd_hostname),
+                kvRowMono("Requested Argo CD DNS alias (metadata only)", c.argocd_alias || "—"),
+                kvRowMono("OpenBao secrets", c.openbao_secret_root),
+                kvRowMono("Cluster manifest", c.manifest_path),
+                kvRow("Contract", c.contract_number),
+                kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
+                kvRow("Management project", c.management_project_resource_name || "—"),
+                kvRow("Backup project", c.backup_project_resource_name || "—"),
+                kvRow("Configuration version", String(c.config_version)),
+            ));
+        }
+        renderSummary();
+
+        let gitops;
+        const repository = sharedRepositoryEditor(c.customer_id, { onChange: (value, changed) => gitops?.repositoryChanged(value, changed) });
+        gitops = gitopsLifecycle(c, repository);
+        app.appendChild(gitops.element);
+        app.appendChild(repository.element);
+        app.appendChild(clusterSettingsEditor(c, async () => {
+            renderSummary();
+            await gitops.settingsChanged();
         }));
-        app.appendChild(h("div", { className: "alert error" },
-            "Portal deletion is disabled in phase one. Cluster, project, and credential cleanup requires coordinated manual decommissioning."));
-        if (!c.provisioned_at) {
-            app.appendChild(h("div", { className: "btn-row" },
-                h("button", { className: "btn primary sm", onclick: async () => {
-                    try {
-                        await api(`/api/admin/clusters/${encodeURIComponent(slug)}/bootstrap-gitops`, { method: "POST" });
-                        showAlert("GitOps bootstrap tree published.", "success");
-                    } catch (err) { showAlert(err.message); }
-                }}, "Publish GitOps bootstrap"),
-            ));
-        }
-
-        app.appendChild(h("div", { className: "slbl first" }, "Cluster"));
-        app.appendChild(kv(
-            kvRowMono("Slug", c.slug),
-            kvRow("Size", `${c.size_label} (${c.total_servers} Kubernetes nodes; jumphost excluded)`),
-            kvRowMono("API", c.api_url || "(not configured)"),
-            kvRowMono("Planned API DNS", c.api_hostname),
-            kvRowMono("Canonical Argo CD DNS / required CNAME target", c.argocd_hostname),
-            kvRowMono("Requested Argo CD DNS alias (metadata only)", c.argocd_alias || "—"),
-            kvRowMono("OpenBao secrets", c.openbao_secret_root),
-            kvRowMono("Cluster manifest", c.manifest_path),
-            kvRow("Contract", c.contract_number),
-            kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
-            kvRow("Management project", c.management_project_resource_name || "—"),
-            kvRow("Backup project", c.backup_project_resource_name || "—"),
-        ));
-
-        app.appendChild(h("div", { className: "slbl" }, "Argo CD DNS alias"));
-        app.appendChild(h("form", { className: "form",
-            onsubmit: async (e) => {
-                e.preventDefault();
-                const value = new FormData(e.target).get("argocd_alias").trim();
-                try {
-                    await api(`/api/admin/clusters/${slug}`, {
-                        method: "PATCH",
-                        body: JSON.stringify({ argocd_alias: value || null }),
-                    });
-                    route();
-                } catch (err) { showAlert(err.message); }
-            }},
-            h("label", { htmlFor: "admin-cluster-argocd-alias" }, "Argo CD DNS alias"),
-            h("input", { id: "admin-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", value: c.argocd_alias || "", placeholder: "argocd.example.org" }),
-            h("p", { className: "hint" },
-                "Metadata/requested alias only. Saving or clearing it does not activate DNS, routing, or TLS. If activated separately, configure the alias as a CNAME to the required canonical target ",
-                h("code", {}, c.argocd_hostname), "."),
-            h("div", { className: "btn-row" },
-                h("button", { type: "submit", className: "btn primary sm" }, "Save alias"),
-            ),
-        ));
-
-        if (!c.provisioned_at) {
-            app.appendChild(h("div", { className: "slbl" }, "Kubernetes connection"));
-            app.appendChild(h("form", { className: "form",
-                onsubmit: async (e) => {
-                    e.preventDefault();
-                    const data = Object.fromEntries(new FormData(e.target).entries());
-                    try {
-                        await api(`/api/admin/clusters/${slug}`, {
-                            method: "PATCH", body: JSON.stringify(data),
-                        });
-                        route();
-                    } catch (err) { showAlert(err.message); }
-                }},
-                h("p", { className: "hint" }, "Complete these values after Kubespray has created the cluster. Both are required before it can be marked provisioned."),
-                h("label", { htmlFor: "cluster-api-url" }, "API URL"),
-                h("input", { id: "cluster-api-url", name: "api_url", required: true, value: c.api_url || `https://${c.api_hostname}:6443` }),
-                h("label", { htmlFor: "cluster-ca-bundle" }, "CA bundle (PEM)"),
-                h("textarea", { id: "cluster-ca-bundle", name: "ca_bundle", required: true, className: "cluster-ca-bundle", placeholder: "-----BEGIN CERTIFICATE-----\n..." }),
-                h("div", { className: "btn-row" },
-                    h("button", { type: "submit", className: "btn primary sm" }, "Save connection details"),
-                ),
-            ));
-        }
+        void repository.refresh();
+        void gitops.refresh();
     } catch (e) { showAlert(e.message); }
 }
 
@@ -2897,19 +3578,19 @@ function renderClusterSetupHelp() {
     app.appendChild(sect("Per-cluster bootstrap"));
     app.appendChild(h("p", { className: "hint" },
         "Run these every time you onboard a new tenant cluster. ",
-        h("code", {}, "<slug>"), " must match the slug entered in the Plan Tenant Cluster form."));
+        h("code", {}, "<slug>"), " must match the slug entered in the Create Tenant Cluster form."));
 
-    app.appendChild(sub("1. Plan the cluster in the portal"));
+    app.appendChild(sub("1. Configure the shared repository and create the cluster"));
     app.appendChild(h("p", {},
         "Open ", h("a", { className: "text-link", href: "#/admin/clusters/new" }, "Admin → Clusters → + New cluster"),
-        ". This creates the managed OpenStack project and writes ",
+        ". Select the contract and configure its shared customer repository, writer credential and validation under the customer editor. Create and start provisioning creates the managed OpenStack project and writes ",
         h("code", {}, "clusters/<slug>/cluster.yaml"), " to the customer-clusters repository. ",
-        "The currently supported provisioning workflow requires exactly one worker group."));
+        "This starts VM provisioning. Later clusters reuse the shared configuration without re-entering tokens."));
 
     app.appendChild(sub("2. Provision the cluster"));
     app.appendChild(h("p", {},
-        "Use the generated cluster manifest to provision the OpenStack servers, run kubespray, and install ArgoCD into the ",
-        h("code", {}, "argocd"), " namespace. The remaining steps connect that cluster to the portal."));
+        "Follow VM readiness and the inventory commit on the cluster page, then run Kubespray and install Argo CD into the ",
+        h("code", {}, "argocd"), " namespace. Save the GitOps draft, generate a preview and review its diff before explicitly publishing. Install the shared reader credential manually and acknowledge its version on this cluster only. The remaining steps connect that cluster to the portal."));
 
     app.appendChild(sub("3. Apply the managed portal-access base"));
     app.appendChild(h("p", {},

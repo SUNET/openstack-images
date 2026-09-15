@@ -1,6 +1,7 @@
 """Git backend for managed customer cluster desired-state manifests."""
 
 import logging
+import re
 import threading
 from pathlib import Path
 
@@ -146,17 +147,44 @@ class ClusterGitBackend:
             self._pull()
             return self._manifest_path(slug).exists()
 
-    def read_generated_inventory(self, slug: str) -> dict:
-        """Read the latest operator-generated inventory for a ready cluster."""
+    def read_cluster_snapshot(self, slug: str, commit: str) -> tuple[dict, dict]:
+        """Read the declaration and inventory from the operator-reported Git commit.
+
+        Only committed regular blobs reachable from the configured remote branch
+        are accepted. Cached working-tree changes are not authoritative.
+        """
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", slug):
+            raise ValueError("Invalid cluster identity")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+            raise ValueError("Inventory commit must be a full Git object ID")
         with self._lock:
-            self._pull()
-            path = self.clusters_dir / slug / "generated" / "ansible" / "hosts.yml"
-            if not path.is_file():
-                raise ValueError(f"Generated inventory for '{slug}' is not available")
-            document = yaml.safe_load(path.read_text())
-            if not isinstance(document, dict):
-                raise ValueError(f"Generated inventory for '{slug}' has an invalid shape")
-            return document
+            if self.repo is None:
+                raise ValueError("Management repository is not initialized")
+            try:
+                with self.repo.git.custom_environment(**self._auth_env):
+                    self.repo.remotes.origin.fetch(
+                        self.settings.cluster_git_branch, kill_after_timeout=120
+                    )
+                self.repo.git.merge_base(
+                    "--is-ancestor", commit, f"origin/{self.settings.cluster_git_branch}"
+                )
+                tree = self.repo.commit(commit).tree
+                documents = []
+                for relative in (
+                    f"clusters/{slug}/cluster.yaml",
+                    f"clusters/{slug}/generated/ansible/hosts.yml",
+                ):
+                    blob = tree / relative
+                    if blob.type != "blob" or blob.mode != 0o100644 or blob.size > 1024 * 1024:
+                        raise ValueError("Inventory snapshot contains an unsafe Git entry")
+                    content = blob.data_stream.read().decode("utf-8")
+                    document = yaml.safe_load(content)
+                    if not isinstance(document, dict):
+                        raise ValueError("Inventory snapshot must contain YAML mappings")
+                    documents.append(document)
+                return documents[0], documents[1]
+            except (git.GitCommandError, KeyError, UnicodeError, yaml.YAMLError):
+                raise ValueError("Operator inventory snapshot is unavailable or invalid") from None
 
     def write_cluster(
         self,

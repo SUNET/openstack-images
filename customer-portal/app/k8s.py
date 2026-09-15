@@ -73,10 +73,22 @@ def find_project_cr_by_spec_name(spec_name: str) -> str | None:
     return None
 
 
-def get_managed_cluster_status(name: str, namespace: str = "openstack-operator") -> dict | None:
-    """Return the status of a ManagedCluster, or None when it is absent."""
+class ManagedClusterLookupError(RuntimeError):
+    """A categorized, credential-free management API lookup failure."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def get_managed_cluster(name: str, namespace: str) -> dict:
+    """Read identity, desired state and observed status without hiding API failures."""
+    if not namespace:
+        raise ManagedClusterLookupError(
+            "unconfigured", "ManagedCluster namespace is not configured"
+        )
     if _api is None:
-        return None
+        raise ManagedClusterLookupError("unavailable", "Management Kubernetes API is unavailable")
     try:
         cr = _api.get_namespaced_custom_object(
             group="customer-clusters.sunet.se",
@@ -84,11 +96,26 @@ def get_managed_cluster_status(name: str, namespace: str = "openstack-operator")
             namespace=namespace,
             plural="managedclusters",
             name=name,
+            _request_timeout=10,
         )
-        status = cr.get("status")
-        return status if isinstance(status, dict) else None
+        if not isinstance(cr, dict):
+            raise ManagedClusterLookupError("invalid", "Management API returned an invalid object")
+        return cr
     except client.ApiException as exc:
         if exc.status == 404:
-            return None
-        logger.warning("Failed to get ManagedCluster %s: %s", name, exc)
-        return None
+            raise ManagedClusterLookupError(
+                "missing", f"ManagedCluster {namespace}/{name} was not found"
+            ) from None
+        if exc.status in (401, 403):
+            raise ManagedClusterLookupError(
+                "forbidden", f"Portal cannot read ManagedCluster {namespace}/{name}; check RBAC"
+            ) from None
+        raise ManagedClusterLookupError(
+            "unavailable", "Management Kubernetes API could not complete the request"
+        ) from None
+    except ManagedClusterLookupError:
+        raise
+    except Exception:
+        raise ManagedClusterLookupError(
+            "unavailable", "Management Kubernetes API connection failed"
+        ) from None

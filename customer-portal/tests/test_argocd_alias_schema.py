@@ -39,6 +39,8 @@ def test_argocd_alias_rejects_non_fqdn_values(alias, schema) -> None:
     values = {"argocd_alias": alias}
     if schema is CreateClusterRequest:
         values.update(contract_number="CO-001", name="Cluster", slug="cluster")
+    elif schema is UpdateClusterRequest:
+        values["config_version"] = 1
 
     with pytest.raises(ValidationError):
         schema(**values)
@@ -52,6 +54,8 @@ def test_argocd_alias_accepts_lowercase_ascii_fqdn_and_null(schema) -> None:
     values = {"argocd_alias": "argocd.customer.example.org"}
     if schema is CreateClusterRequest:
         values.update(contract_number="CO-001", name="Cluster", slug="cluster")
+    elif schema is UpdateClusterRequest:
+        values["config_version"] = 1
 
     assert schema(**values).argocd_alias == "argocd.customer.example.org"
     values["argocd_alias"] = None
