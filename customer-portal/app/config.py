@@ -135,6 +135,28 @@ class Settings:
         default_factory=lambda: os.environ.get("CLUSTER_GIT_WORK_DIR", "/tmp/customer-clusters")
     )
     cluster_dns_zone: str = field(default_factory=_cluster_dns_zone)
+    cluster_environment: str = field(
+        default_factory=lambda: "test"
+        if os.environ.get("PORTAL_IS_IN_TEST", "").strip().lower() in ("1", "true", "yes", "on")
+        else "prod"
+    )
+    customer_cluster_bases_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "CUSTOMER_CLUSTER_BASES_URL",
+            "https://platform.sunet.se/VDC/customer-clusters-k8s-bases.git",
+        )
+    )
+    customer_cluster_bases_revision: str = field(
+        default_factory=lambda: os.environ.get("CUSTOMER_CLUSTER_BASES_REVISION", "").strip()
+    )
+    customer_cluster_node_interface: str = field(
+        default_factory=lambda: os.environ.get("CUSTOMER_CLUSTER_NODE_INTERFACE", "ens3").strip()
+    )
+    customer_cluster_acme_contact: str = field(
+        default_factory=lambda: os.environ.get(
+            "CUSTOMER_CLUSTER_ACME_CONTACT", "noc@sunet.se"
+        ).strip()
+    )
     cluster_profile_name: str = field(default_factory=_cluster_profile_name)
     cluster_provisioner_user: str = field(
         default_factory=lambda: (

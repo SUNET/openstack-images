@@ -235,6 +235,30 @@ class TenantCluster(Base):
     )
 
 
+class CustomerClusterRepository(Base):
+    """One private cluster GitOps repository per customer and environment.
+
+    Authentication tokens deliberately live only in OpenBao.  This table keeps
+    the non-secret repository address and bot identity needed to use them.
+    """
+
+    __tablename__ = "customer_cluster_repository"
+    __table_args__ = (
+        UniqueConstraint("customer_id", "environment", name="uq_customer_cluster_repository"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer.id"), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    repo_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    writer_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    reader_username: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, onupdate=func.now())
+
+    customer: Mapped["Customer"] = relationship()
+
+
 class ClusterAccess(Base):
     """User → cluster grant. role: 'customer_admin' or 'user'."""
 

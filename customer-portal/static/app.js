@@ -2646,6 +2646,18 @@ async function renderAdminCreateCluster() {
         h("input", { id: "new-cluster-workers", name: "worker_groups", type: "number", min: "1", max: "80", value: "1", required: true }),
         h("div", { className: "meta", style: "margin-top:6px" },
             "Maximum 80 worker groups for the standard-v1 /24 network."),
+        h("label", { htmlFor: "customer-repository-url" }, "Customer cluster repository URL"),
+        h("input", { id: "customer-repository-url", name: "customer_repository_url", type: "url", required: true, placeholder: "https://platform.sunet.se/VDC/customer-acme-clusters-test.git" }),
+        h("label", { htmlFor: "customer-repository-writer" }, "Repository write bot username"),
+        h("input", { id: "customer-repository-writer", name: "customer_repository_writer_username", required: true, autocomplete: "username", placeholder: "platform-test-bot" }),
+        h("label", { htmlFor: "customer-repository-writer-token" }, "Repository write bot token"),
+        h("input", { id: "customer-repository-writer-token", name: "customer_repository_writer_token", type: "password", required: true, autocomplete: "new-password" }),
+        h("p", { className: "hint" },
+            "Stored in OpenBao for this customer and environment only; it is never returned or committed."),
+        h("label", { htmlFor: "customer-repository-reader" }, "Argo CD read bot username (optional)"),
+        h("input", { id: "customer-repository-reader", name: "customer_repository_reader_username", autocomplete: "username", placeholder: "platform-test-bot" }),
+        h("label", { htmlFor: "customer-repository-reader-token" }, "Argo CD read bot token (optional)"),
+        h("input", { id: "customer-repository-reader-token", name: "customer_repository_reader_token", type: "password", autocomplete: "new-password" }),
         h("label", { htmlFor: "new-cluster-argocd-alias" }, "Argo CD DNS alias"),
         h("input", { id: "new-cluster-argocd-alias", name: "argocd_alias", maxlength: "253", placeholder: "argocd.example.org" }),
         h("div", { className: "meta", style: "margin-top:6px" },
@@ -2685,6 +2697,16 @@ async function renderAdminClusterDetail(slug) {
         }));
         app.appendChild(h("div", { className: "alert error" },
             "Portal deletion is disabled in phase one. Cluster, project, and credential cleanup requires coordinated manual decommissioning."));
+        if (!c.provisioned_at) {
+            app.appendChild(h("div", { className: "btn-row" },
+                h("button", { className: "btn primary sm", onclick: async () => {
+                    try {
+                        await api(`/api/admin/clusters/${encodeURIComponent(slug)}/bootstrap-gitops`, { method: "POST" });
+                        showAlert("GitOps bootstrap tree published.", "success");
+                    } catch (err) { showAlert(err.message); }
+                }}, "Publish GitOps bootstrap"),
+            ));
+        }
 
         app.appendChild(h("div", { className: "slbl first" }, "Cluster"));
         app.appendChild(kv(

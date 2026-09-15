@@ -500,11 +500,39 @@ class CreateClusterRequest(BaseModel):
     argocd_namespace: str = Field(default="argocd", max_length=63)
     argocd_alias: str | None = Field(default=None, max_length=253)
     worker_groups: int = Field(default=1, ge=1, le=80)
+    customer_repository_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    customer_repository_writer_username: str | None = Field(
+        default=None, min_length=1, max_length=255
+    )
+    customer_repository_writer_token: str | None = Field(
+        default=None, min_length=1, max_length=4096
+    )
+    customer_repository_reader_username: str | None = Field(default=None, max_length=255)
+    customer_repository_reader_token: str | None = Field(default=None, max_length=4096)
 
     @field_validator("argocd_alias")
     @classmethod
     def validate_argocd_alias(cls, value: str | None) -> str | None:
         return _validate_argocd_alias(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_repository_reader_credential(self):
+        writer = (
+            self.customer_repository_url,
+            self.customer_repository_writer_username,
+            self.customer_repository_writer_token,
+        )
+        if any(writer) and not all(writer):
+            raise ValueError(
+                "customer repository URL, writer username, and token must be supplied together"
+            )
+        if (self.customer_repository_reader_username is None) != (
+            self.customer_repository_reader_token is None
+        ):
+            raise ValueError(
+                "customer repository reader username and token must be supplied together"
+            )
+        return self
 
 
 class UpdateClusterRequest(BaseModel):

@@ -146,6 +146,18 @@ class ClusterGitBackend:
             self._pull()
             return self._manifest_path(slug).exists()
 
+    def read_generated_inventory(self, slug: str) -> dict:
+        """Read the latest operator-generated inventory for a ready cluster."""
+        with self._lock:
+            self._pull()
+            path = self.clusters_dir / slug / "generated" / "ansible" / "hosts.yml"
+            if not path.is_file():
+                raise ValueError(f"Generated inventory for '{slug}' is not available")
+            document = yaml.safe_load(path.read_text())
+            if not isinstance(document, dict):
+                raise ValueError(f"Generated inventory for '{slug}' has an invalid shape")
+            return document
+
     def write_cluster(
         self,
         *,

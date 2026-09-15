@@ -128,6 +128,32 @@ class OpenBaoClient:
             raise OpenBaoError("OpenBao response missing service_account_token")
         return data
 
+    async def write_kv_secret(self, path: str, data: dict[str, str]) -> None:
+        """Write a v2 KV secret without logging its values."""
+        token = await self._token_or_login()
+        clean_path = path.strip("/")
+        response = await self._http.post(
+            f"{self._addr}/v1/{clean_path}", headers={"X-Vault-Token": token}, json={"data": data}
+        )
+        if response.status_code not in (200, 204):
+            raise OpenBaoError(f"OpenBao secret write failed (status {response.status_code})")
+
+    async def read_kv_secret(self, path: str) -> dict[str, str]:
+        """Read a v2 KV secret, returning only string entries."""
+        token = await self._token_or_login()
+        response = await self._http.get(
+            f"{self._addr}/v1/{path.strip('/')}", headers={"X-Vault-Token": token}
+        )
+        if response.status_code != 200:
+            raise OpenBaoError(f"OpenBao secret read failed (status {response.status_code})")
+        body = response.json()
+        payload = (body.get("data") or {}).get("data")
+        if not isinstance(payload, dict) or not all(
+            isinstance(value, str) for value in payload.values()
+        ):
+            raise OpenBaoError("OpenBao secret has an invalid shape")
+        return payload
+
 
 _client: OpenBaoClient | None = None
 

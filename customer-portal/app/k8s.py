@@ -71,3 +71,24 @@ def find_project_cr_by_spec_name(spec_name: str) -> str | None:
             meta = cr.get("metadata", {})
             return f"{meta.get('namespace', '')}/{meta.get('name', '')}"
     return None
+
+
+def get_managed_cluster_status(name: str, namespace: str = "customer-clusters") -> dict | None:
+    """Return the status of a ManagedCluster, or None when it is absent."""
+    if _api is None:
+        return None
+    try:
+        cr = _api.get_namespaced_custom_object(
+            group="customer-clusters.sunet.se",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="managedclusters",
+            name=name,
+        )
+        status = cr.get("status")
+        return status if isinstance(status, dict) else None
+    except client.ApiException as exc:
+        if exc.status == 404:
+            return None
+        logger.warning("Failed to get ManagedCluster %s: %s", name, exc)
+        return None
