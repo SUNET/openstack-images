@@ -73,7 +73,7 @@ def find_project_cr_by_spec_name(spec_name: str) -> str | None:
     return None
 
 
-def get_managed_cluster_status(name: str, namespace: str = "customer-clusters") -> dict | None:
+def get_managed_cluster_status(name: str, namespace: str = "openstack-operator") -> dict | None:
     """Return the status of a ManagedCluster, or None when it is absent."""
     if _api is None:
         return None
