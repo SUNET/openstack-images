@@ -150,9 +150,6 @@ class Lifecycle:
     async def validate(self, version: int) -> dict[str, Any]:
         identity_path = urlsplit(self.repo_url).path.lstrip("/").removesuffix(".git")
         with respx.mock() as router:
-            identity = router.get("https://forgejo.example.test/api/v1/user").respond(
-                200, json={"login": "writer"},
-            )
             repository = router.get(
                 f"https://forgejo.example.test/api/v1/repos/{identity_path}"
             ).respond(200, json={
@@ -163,8 +160,8 @@ class Lifecycle:
                 "expected_version": version,
             })
             assert response.status_code == 200, response.text
-            assert identity.called and repository.called
-            assert identity.calls.last.request.headers["Authorization"].startswith("token ")
+            assert repository.called and len(router.calls) == 1
+            assert repository.calls.last.request.headers["Authorization"].startswith("token ")
         assert response.json()["validation_status"] == "valid"
         return response.json()
 
@@ -283,6 +280,8 @@ async def lifecycle(
     engine = create_async_engine(gitops_database.async_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(db, "_session_factory", sessions)
+    # This suite models publication and database recovery; transport is tested separately.
+    monkeypatch.setattr(repository_service, "check_repository_read_access", Mock())
     settings = Settings(
         database_url=gitops_database.async_url.render_as_string(hide_password=False),
         cluster_environment="test", managed_cluster_namespace=NAMESPACE,

@@ -18,6 +18,7 @@ from app.gitops_render import BASE_PATH, validate_url
 from app.gitops_types import CustomerGitOpsError
 
 GIT_TIMEOUT = 120
+ACCESS_CHECK_TIMEOUT = 10
 MAX_OUTPUT = 32 * 1024 * 1024
 MAX_MANAGED_BLOB = 256 * 1024
 SHA_PATTERN = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
@@ -124,6 +125,7 @@ def _run(
     data: bytes | None = None,
     check: bool = True,
     code: str = "repository_unavailable",
+    timeout: int = GIT_TIMEOUT,
 ) -> CommandResult:
     # Never retain stderr: transport failures may echo HTTP headers or passwords.
     try:
@@ -135,7 +137,7 @@ def _run(
                 input=data,
                 stdout=output,
                 stderr=subprocess.DEVNULL,
-                timeout=GIT_TIMEOUT,
+                timeout=timeout,
                 check=False,
             )
             output.seek(0)
@@ -156,8 +158,12 @@ class TreeEntry:
     oid: str
 
 
-def remote_refs(transport: Transport, env: dict[str, str], cwd: Path) -> dict[str, str]:
-    result = _run(["ls-remote", "--refs", "--", transport.url], env=env, cwd=cwd)
+def remote_refs(
+    transport: Transport, env: dict[str, str], cwd: Path, *, timeout: int = GIT_TIMEOUT
+) -> dict[str, str]:
+    result = _run(
+        ["ls-remote", "--refs", "--", transport.url], env=env, cwd=cwd, timeout=timeout
+    )
     refs: dict[str, str] = {}
     for line in result.stdout.splitlines():
         try:
@@ -170,6 +176,18 @@ def remote_refs(transport: Transport, env: dict[str, str], cwd: Path) -> dict[st
             raise CustomerGitOpsError("Invalid repository ref advertisement", "unsafe_repository")
         refs[name] = oid
     return refs
+
+
+def check_repository_read_access(repo_url: str, username: str, token: str) -> None:
+    """Check supplied Git credentials without cloning, fetching or writing the remote.
+
+    An empty private repository is valid. The caller checks the allowed origin
+    and repository privacy through the Forgejo API before invoking this check.
+    """
+    transport = _transport(repo_url)
+    env = git_environment(transport, repo_url=repo_url, username=username, token=token)
+    with tempfile.TemporaryDirectory(prefix="customer-repository-access-") as directory:
+        remote_refs(transport, env, Path(directory), timeout=ACCESS_CHECK_TIMEOUT)
 
 
 def main_head(refs: dict[str, str]) -> str | None:

@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 PORTAL_ROOT = Path(__file__).resolve().parents[1]
-RELEASE_VERSION = "0.1.24"
+RELEASE_VERSION = "0.1.25"
 KUSTOMIZE_VERSION = "v5.8.0"
 DEPLOYMENT = PORTAL_ROOT.parents[2] / "k8s/platform-manifests/customer-portal/base/deployment.yaml"
 

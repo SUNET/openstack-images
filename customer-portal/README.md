@@ -96,3 +96,31 @@ The canonical operational runbook is maintained in platform-manifests under
 `docs-site-internal/content/docs/customer-kubernetes/`. Base upgrades, repository
 relocation, infrastructure resize and decommissioning remain reviewed manual
 workflows. This feature does not add operator infrastructure-mutation support.
+
+## Repository credential validation (0.1.25)
+
+Create the portal writer as a Forgejo **Specific repositories**
+(`SpecificRepositories`) token, selecting only the private customer repository
+and granting `write:repository`. Use a separate `read:repository` token for
+tenant Argo CD. No `read:user`, account, global-repository, or administrator
+scope is necessary.
+
+The **Validate** action uses only `GET /api/v1/repos/{owner}/{repo}` for Forgejo
+API metadata. It requires the returned repository to match the configured
+HTTPS URL and owner/name identity, be private, and report `permissions.push`
+as true. It then runs read-only `git ls-remote` against that repository using
+the supplied username/token through isolated HTTPS authentication to check Git
+read access. The username/token are checked as Git credentials.
+
+Validation never creates a commit, pushes, or mutates the remote repository.
+Repository metadata alone cannot prove a narrowly scoped token's actual write
+permission; real publishing checks push authorization and protected-branch
+restrictions.
+
+Release 0.1.24 could reject a correctly scoped writer because it queried
+`/api/v1/user`, which can return `403` for a specific-repository token. Release
+0.1.25 removes that account-read dependency. Reuse the existing stored token:
+after building/releasing 0.1.25 and syncing the portal Application, click
+**Validate** again in the shared customer repository editor. Upgrading from
+0.1.24 requires no token rotation, database or OpenBao migration, or sync of
+other Applications.

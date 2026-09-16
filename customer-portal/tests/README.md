@@ -114,11 +114,30 @@ The important new suites are:
   CAS recovery, live clusters, preview approval and status polling.
 - `test_migration_015.py`: a populated 014 database is upgraded without
   changing tenant, access, credential-issuance or accounting history.
-- `test_release.py`: runtime, Jenkins and deployment version consistency.
+- `test_release.py`: 0.1.25 runtime, Jenkins and deployment version consistency,
+  plus the pinned Kustomize and legacy-builder image contracts.
+
+Run the release checks without a database or image build:
+
+```bash
+python3 -B -m pytest -p no:cacheprovider tests/test_release.py
+```
 
 No tests use real Forgejo credentials, push to a remote customer repository,
 or apply objects to a live Kubernetes cluster. A passing mocked API test does
 not replace the documented operator acceptance checks after deployment.
+
+For the 0.1.25 rollout, reuse the existing stored writer token and click
+**Validate** after the portal Application is synced. This checks matching
+private-repository metadata and reported push permission through
+`GET /api/v1/repos/{owner}/{repo}`, then actual Git read access with the supplied
+username/token through isolated HTTPS `git ls-remote`. It needs only a
+**Specific repositories** writer token for the selected repository with
+`write:repository`, without account-read or broader scopes. Validation never
+creates a commit, pushes, or changes the remote; metadata cannot prove the
+token's actual write permission. A real reviewed publication checks push
+authorization and protected-branch restrictions. See
+[Repository credential validation](../README.md#repository-credential-validation-0125).
 
 ### Existing coverage
 

@@ -155,16 +155,20 @@ async def cluster_for(session, customer_id: int, slug: str = "alpha-cluster") ->
 
 
 def forgejo_routes(router, **changes):
-    user = router.get("https://platform.sunet.se/api/v1/user").mock(
-        return_value=httpx.Response(200, json={"login": "writer"})
-    )
     repository = router.get("https://platform.sunet.se/api/v1/repos/vdc/shared").mock(
         return_value=httpx.Response(200, json={
             "private": True, "full_name": "VDC/shared", "clone_url": REPO_URL,
             "permissions": {"push": True, "pull": True}, **changes,
         })
     )
-    return user, repository
+    return repository
+
+
+@pytest.fixture(autouse=True)
+def git_read_access(monkeypatch):
+    check = Mock()
+    monkeypatch.setattr(repository_service, "check_repository_read_access", check)
+    return check
 
 
 async def test_missing_config_and_nonsecret_create(client, customers, bao, settings):
@@ -478,7 +482,7 @@ async def test_legacy_reader_requires_explicit_cas_without_reading_it(
 
 
 async def test_validation_adopts_legacy_writer_and_labels_evidence(
-    client, session, customers, bao, settings
+    client, session, customers, bao, settings, git_read_access
 ):
     customer = customers[0]
     repository = CustomerClusterRepository(
@@ -489,12 +493,13 @@ async def test_validation_adopts_legacy_writer_and_labels_evidence(
     path = repository_service.repository_secret_path(customer.id, "test", "writer")
     bao.secrets[path] = [{"username": "writer", "token": SECRET}] * 3
     with respx.mock() as router:
-        user_route, repo_route = forgejo_routes(router)
+        repo_route = forgejo_routes(router)
         response = await client.post(
             f"{endpoint(customer.id)}/validate", json={"expected_version": 1}
         )
-        assert user_route.calls.last.request.headers["Authorization"] == f"token {SECRET}"
+        assert repo_route.calls.last.request.headers["Authorization"] == f"token {SECRET}"
         assert repo_route.calls.last.request.method == "GET"
+        assert len(router.calls) == 1
     assert response.status_code == 200
     body = response.json()
     assert body["validation_status"] == "valid" and body["writer_secret_version"] == 3
@@ -503,14 +508,45 @@ async def test_validation_adopts_legacy_writer_and_labels_evidence(
     await session.refresh(repository)
     assert await repository_service.writer_credentials(repository, settings) == ("writer", SECRET)
     assert bao.reads[-1] == (path, 3)
+    git_read_access.assert_called_once_with(REPO_URL, "writer", SECRET)
+
+
+async def test_git_validation_failure_does_not_pin_legacy_writer(
+    client, session, customers, bao, git_read_access,
+):
+    from app.gitops_types import CustomerGitOpsError
+
+    customer = customers[0]
+    repository = CustomerClusterRepository(
+        customer_id=customer.id, environment="test", repo_url=REPO_URL,
+        writer_username="writer",
+    )
+    session.add(repository)
+    await session.commit()
+    path = repository_service.repository_secret_path(customer.id, "test", "writer")
+    bao.secrets[path] = [{"username": "writer", "token": SECRET}]
+    git_read_access.side_effect = CustomerGitOpsError(SECRET)
+    with respx.mock() as router:
+        forgejo_routes(router)
+        response = await client.post(
+            f"{endpoint(customer.id)}/validate", json={"expected_version": 1}
+        )
+    assert response.status_code == 200
+    assert response.json()["validation_status"] == "error"
+    assert "Git read access failed" in response.json()["validation_message"]
+    assert SECRET not in response.text
+    await session.refresh(repository)
+    assert repository.writer_secret_version is None
+    assert repository.version == 1
+    assert not bao.writes
 
 
 @pytest.mark.parametrize("changes", [
     {"private": False}, {"private": "true"}, {"full_name": "vdc/other"},
     {"clone_url": "https://evil.test/vdc/shared.git"}, {"permissions": {"push": False}},
 ])
-async def test_validation_requires_private_matching_repository_and_user_access(
-    client, customers, changes
+async def test_validation_requires_private_matching_repository_and_push_permission(
+    client, customers, changes, git_read_access
 ):
     customer = customers[0]
     await configure(client, customer.id)
@@ -523,6 +559,7 @@ async def test_validation_requires_private_matching_repository_and_user_access(
     assert response.status_code == 200
     assert response.json()["validation_status"] == "invalid"
     assert SECRET not in response.text
+    git_read_access.assert_not_called()
 
 
 async def test_validation_does_not_follow_redirects_or_echo_malformed_body(client, customers):
@@ -530,7 +567,7 @@ async def test_validation_does_not_follow_redirects_or_echo_malformed_body(clien
     await configure(client, customer.id)
     await credential(client, customer.id, "writer", 1)
     with respx.mock() as router:
-        route = router.get("https://platform.sunet.se/api/v1/user").mock(
+        route = router.get("https://platform.sunet.se/api/v1/repos/vdc/shared").mock(
             return_value=httpx.Response(302, headers={"Location": f"https://evil.test/{SECRET}"})
         )
         response = await client.post(

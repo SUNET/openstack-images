@@ -4,6 +4,7 @@ Mutation helpers hold transaction-scoped locks but leave commit/rollback to thei
 caller. Workers share the repository advisory lock before reading or publishing.
 """
 
+import asyncio
 import hmac
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,6 +18,8 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app.gitops_git import check_repository_read_access
+from app.gitops_types import CustomerGitOpsError
 from app.models import (
     ClusterGitOps,
     Contract,
@@ -469,6 +472,12 @@ def _api_object(response: httpx.Response) -> dict[str, Any] | None:
 async def _validate_forgejo(
     repo_url: str, username: str, token: str, settings: Settings
 ) -> tuple[str, str]:
+    """Use repository-scoped API evidence and the actual Git credential pair.
+
+    Specific-repository tokens need no access to /user. Successful validation
+    proves read access, not that a later write can bypass branch protection.
+    """
+    repo_url = _canonical_url(repo_url, settings)
     parsed = urlsplit(repo_url)
     identity = parsed.path.removeprefix("/").removesuffix(".git")
     api_origin = f"{parsed.scheme}://{parsed.netloc}/api/v1"
@@ -477,19 +486,17 @@ async def _validate_forgejo(
             timeout=10.0, follow_redirects=False, trust_env=False,
             headers={"Authorization": f"token {token}"},
         ) as client:
-            user_response = await client.get(f"{api_origin}/user")
-            if user_response.status_code != 200:
-                return "invalid", "Forgejo API could not verify the writer identity"
-            user = _api_object(user_response)
-            if user is None or not isinstance(user.get("login"), str):
-                return "error", "Forgejo API returned an invalid identity response"
-            if user["login"].lower() != username.lower():
-                return "invalid", "Forgejo API writer identity does not match configuration"
             response = await client.get(f"{api_origin}/repos/{identity}")
     except httpx.RequestError:
         return "error", "Forgejo API is unavailable"
     if response.status_code != 200:
-        return "invalid", "Forgejo API could not verify access to the configured repository"
+        status = (
+            "error" if response.status_code == 429 or response.status_code >= 500 else "invalid"
+        )
+        return status, (
+            "Forgejo API could not verify access to the configured repository "
+            f"(HTTP {response.status_code})"
+        )
     body = _api_object(response)
     if body is None:
         return "error", "Forgejo API returned an invalid repository response"
@@ -508,9 +515,16 @@ async def _validate_forgejo(
     permissions = body.get("permissions")
     if not isinstance(permissions, dict) or permissions.get("push") is not True:
         return "invalid", "Forgejo API did not confirm the writer user's push permission"
+    try:
+        await asyncio.to_thread(check_repository_read_access, repo_url, username, token)
+    except CustomerGitOpsError:
+        return "error", (
+            "Git read access failed; check the stored username/token and repository availability"
+        )
     return "valid", (
-        "Writer API confirms private repository identity and user push permission; "
-        "this is API permission evidence, not proof of token scope or Git write capability."
+        "Repository API confirms private repository identity and user push permission; "
+        "Git read access succeeds with the supplied credentials. This is not proof of token scope "
+        "or Git write capability; publication checks write authorization and branch protection."
     )
 
 
