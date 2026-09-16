@@ -93,15 +93,39 @@ spec:
                       minLength: 1
                 dns:
                   type: object
+                  description: >-
+                    Canonical API and Argo CD hostnames must be explicit before
+                    the operator creates new Jobs. Optional at admission during
+                    rollout; hostnames are never derived from a zone or alias.
                   properties:
                     zone:
                       type: string
                     apiHostname:
                       type: string
+                      maxLength: 253
+                      # yamllint disable rule:line-length
+                      pattern: ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$
+                      # yamllint enable rule:line-length
+                      x-kubernetes-validations:
+                        - rule: >-
+                            !self.matches('^[0-9]+([.][0-9]+){3}$')
+                          message: >-
+                            must be a lowercase ASCII FQDN, not an IP literal
                     argocdHostname:
                       type: string
+                      maxLength: 253
+                      # yamllint disable rule:line-length
+                      pattern: ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$
+                      # yamllint enable rule:line-length
+                      x-kubernetes-validations:
+                        - rule: >-
+                            !self.matches('^[0-9]+([.][0-9]+){3}$')
+                          message: >-
+                            must be a lowercase ASCII FQDN, not an IP literal
                     argocdAlias:
                       type: string
+                      description: >-
+                        Optional metadata; never a canonical inventory hostname.
                       maxLength: 253
                       # yamllint disable rule:line-length
                       pattern: ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$
@@ -141,12 +165,38 @@ spec:
                 inputHash:
                   type: string
                   pattern: ^[0-9a-f]{64}$
+                  description: >-
+                    Exact v1 immutable infrastructure SHA-256, retained across
+                    upgrades. Inventory policy metadata leaves it unchanged.
+                inventoryInputHash:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+                  description: >-
+                    SHA-256 of canonical allowlisted inventory policy inputs.
+                publicationHash:
+                  type: string
+                  pattern: ^[0-9a-f]{64}$
+                  description: >-
+                    SHA-256 of full worker Job input, including render policy
+                    version 2 and source ClusterProfile UID/generation revision.
+                    Identifies the Job and immutable input ConfigMap.
                 inventoryPath:
                   type: string
                   pattern: ^clusters/[^/]+/generated/ansible/hosts[.]yml$
+                  description: Generated host inventory at inventoryCommit.
+                policyInventoryPath:
+                  type: string
+                  pattern: >-
+                    ^inventory/clusters/[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?[.]yml$
+                  description: >-
+                    Cluster policy inventory published or verified at the same
+                    inventoryCommit as the generated host inventory.
                 inventoryCommit:
                   type: string
                   pattern: ^([0-9a-f]{40}|[0-9a-f]{64})$
+                  description: >-
+                    Git commit containing both inventory files, confirmed by the
+                    current owned Job's matching input and publication hashes.
                 apiFloatingIp:
                   type: string
                   format: ipv4

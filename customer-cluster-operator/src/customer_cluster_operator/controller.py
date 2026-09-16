@@ -25,13 +25,17 @@ from .errors import ValidationError
 from .kube import (
     cleanup_history,
     condition,
+    input_annotations,
     input_config_map,
+    inventory_conflict,
     job_failure_message,
+    job_finished,
     job_result,
     labels,
     provisioning_job,
 )
 from .models import build_input, is_suspended, job_name, profile_name
+from .reconciliation_lock import reconciliation_lock
 
 LOG = logging.getLogger(__name__)
 _apis: tuple[client.CustomObjectsApi, client.CoreV1Api, client.BatchV1Api] | None = None
@@ -60,6 +64,9 @@ def _set_status(
     input_hash: str | None = None,
     inventory_path: str | None = None,
     inventory_commit: str | None = None,
+    policy_inventory_path: str | None = None,
+    inventory_hash: str | None = None,
+    publication_hash: str | None = None,
     last_verified_at: str | None = None,
     api_floating_ip: str | None = None,
     ingress_floating_ip: str | None = None,
@@ -84,6 +91,12 @@ def _set_status(
         patch.status["inventoryPath"] = inventory_path
     if inventory_commit is not None:
         patch.status["inventoryCommit"] = inventory_commit
+    if policy_inventory_path is not None:
+        patch.status["policyInventoryPath"] = policy_inventory_path
+    if inventory_hash is not None:
+        patch.status["inventoryInputHash"] = inventory_hash
+    if publication_hash is not None:
+        patch.status["publicationHash"] = publication_hash
     if last_verified_at is not None:
         patch.status["lastVerifiedAt"] = last_verified_at
     if api_floating_ip is not None:
@@ -176,7 +189,7 @@ def _verification_bucket(settings: Settings) -> int:
     return int(_utcnow().timestamp()) // settings.verification_interval
 
 
-def reconcile(
+def _reconcile_locked(
     *,
     spec: dict[str, Any],
     status: dict[str, Any],
@@ -207,6 +220,12 @@ def reconcile(
             return
         custom_api, core_api, batch_api = get_apis()
         selected_profile = _read_profile(custom_api, profile_name(spec))
+        profile_metadata = selected_profile.get("metadata")
+        if (
+            not isinstance(profile_metadata, dict)
+            or profile_metadata.get("deletionTimestamp") is not None
+        ):
+            raise ValidationError("ClusterProfile identity is missing or the profile is deleting")
         profile_spec = selected_profile.get("spec")
         if not isinstance(profile_spec, dict):
             raise ValidationError("ClusterProfile spec must be an object")
@@ -247,6 +266,10 @@ def reconcile(
         desired = build_input(
             spec=spec,
             profile=profile_spec,
+            profile_revision={
+                "uid": profile_metadata.get("uid"),
+                "generation": profile_metadata.get("generation"),
+            },
             uid=body["metadata"]["uid"],
             slug=name,
             namespace=namespace,
@@ -273,7 +296,9 @@ def reconcile(
             return
 
         bucket = _verification_bucket(settings)
-        expected_job = job_name(name, body["metadata"]["uid"], desired_hash, generation, bucket)
+        expected_job = job_name(
+            name, body["metadata"]["uid"], desired.publication_hash, generation, bucket
+        )
         jobs = _find_jobs(batch_api, namespace, body["metadata"]["uid"])
         if any(not _job_owned(job, body["metadata"]["uid"]) for job in jobs):
             raise ValidationError("found provisioning Job not owned by this ManagedCluster")
@@ -286,11 +311,13 @@ def reconcile(
             current_job_name=expected_job,
             status_job_name=status.get("jobName"),
         )
-        active = [job for job in jobs if job.status.active]
-        if len(active) > 1:
-            raise ValidationError("multiple provisioning Jobs are active for this ManagedCluster")
-        if active and active[0].metadata.name != expected_job:
-            active_hash = (getattr(active[0].metadata, "annotations", None) or {}).get(
+        unfinished = [job for job in jobs if not job_finished(job)]
+        if len(unfinished) > 1:
+            raise ValidationError(
+                "multiple unfinished provisioning Jobs exist for this ManagedCluster"
+            )
+        if unfinished and unfinished[0].metadata.name != expected_job:
+            active_hash = (getattr(unfinished[0].metadata, "annotations", None) or {}).get(
                 "customer-clusters.sunet.se/input-hash"
             )
             if active_hash != desired_hash:
@@ -301,8 +328,10 @@ def reconcile(
                 generation=generation,
                 ready="False",
                 reason="ProvisioningJobRunning",
-                message="Waiting for the previous-generation idempotent Job",
-                job=active[0].metadata.name,
+                message=(
+                    "Waiting for the previous idempotent Job before publishing current inventories"
+                ),
+                job=unfinished[0].metadata.name,
                 input_hash=desired_hash,
                 inventory_path=desired.inventory_path,
                 existing_status=status,
@@ -311,34 +340,67 @@ def reconcile(
 
         existing_job = next((job for job in jobs if job.metadata.name == expected_job), None)
         if existing_job is not None:
-            if existing_job.status.succeeded:
+            annotations = getattr(existing_job.metadata, "annotations", None) or {}
+            if any(
+                annotations.get(key) != value for key, value in input_annotations(desired).items()
+            ):
+                raise ValidationError(
+                    "provisioning Job does not match the current publication input"
+                )
+            conditions = getattr(existing_job.status, "conditions", None) or []
+            succeeded = any(
+                item.type == "Complete" and item.status == "True"
+                for item in conditions
+            ) and not any(
+                item.type == "Failed" and item.status == "True" for item in conditions
+            )
+            if job_finished(existing_job) and succeeded:
                 result = job_result(core_api, namespace, existing_job)
-                if result["inventoryPath"] != desired.inventory_path:
-                    raise ValidationError("worker returned an unexpected inventoryPath")
+                expected_result = {
+                    "inventoryPath": desired.inventory_path,
+                    "policyInventoryPath": desired.policy_inventory_path,
+                    "inputHash": desired.input_hash,
+                    "inventoryInputHash": desired.inventory_hash,
+                    "publicationHash": desired.publication_hash,
+                }
+                for key, value in expected_result.items():
+                    if result[key] != value:
+                        raise ValidationError(f"worker returned an unexpected {key}")
                 _set_status(
                     patch,
                     phase="VirtualMachinesReady",
                     generation=generation,
                     ready="True",
                     reason="ProvisioningSucceeded",
-                    message="OpenStack resources and generated inventory are ready",
+                    message=(
+                        "OpenStack resources, host inventory, "
+                        "and cluster policy inventory are ready"
+                    ),
                     job=expected_job,
                     input_hash=desired_hash,
                     inventory_path=result["inventoryPath"],
                     inventory_commit=result["inventoryCommit"],
+                    policy_inventory_path=result["policyInventoryPath"],
+                    inventory_hash=result["inventoryInputHash"],
+                    publication_hash=result["publicationHash"],
                     last_verified_at=_utcnow().isoformat().replace("+00:00", "Z"),
                     api_floating_ip=result["apiFloatingIp"],
                     ingress_floating_ip=result["ingressFloatingIp"],
                     existing_status=status,
                 )
-            elif existing_job.status.failed and not existing_job.status.active:
+            elif job_finished(existing_job):
+                conflict = inventory_conflict(core_api, namespace, existing_job)
                 _set_status(
                     patch,
                     phase="Failed",
                     generation=generation,
                     ready="False",
-                    reason="ProvisioningJobFailed",
-                    message=job_failure_message(existing_job),
+                    reason="InventoryConflict" if conflict else "ProvisioningJobFailed",
+                    message=(
+                        "Inventory publication conflicts with existing policy "
+                        "or current desired state; "
+                        "review the worker logs without replacing retained infrastructure"
+                    ) if conflict else job_failure_message(existing_job),
                     job=expected_job,
                     input_hash=desired_hash,
                     inventory_path=desired.inventory_path,
@@ -378,7 +440,10 @@ def reconcile(
                 raise
             existing = core_api.read_namespaced_config_map(config_map.metadata.name, namespace)
             owner_uids = {item.uid for item in existing.metadata.owner_references or []}
-            if existing.data != config_map.data or body["metadata"]["uid"] not in owner_uids:
+            if (
+                existing.data != config_map.data or body["metadata"]["uid"] not in owner_uids
+                or existing.metadata.annotations != config_map.metadata.annotations
+            ):
                 raise ValidationError("conflicting provisioning input ConfigMap exists") from exc
         job = provisioning_job(
             name=expected_job,
@@ -393,9 +458,17 @@ def reconcile(
             if exc.status != 409:
                 raise
             existing = batch_api.read_namespaced_job(expected_job, namespace)
-            if existing.metadata.labels != labels(
-                body["metadata"]["uid"], desired_hash
-            ) or not _job_owned(existing, body["metadata"]["uid"]):
+            annotations = getattr(existing.metadata, "annotations", None) or {}
+            if (
+                existing.metadata.labels != labels(
+                    body["metadata"]["uid"], desired_hash, desired.publication_hash
+                )
+                or not _job_owned(existing, body["metadata"]["uid"])
+                or any(
+                    annotations.get(key) != value
+                    for key, value in input_annotations(desired).items()
+                )
+            ):
                 raise ValidationError("conflicting provisioning Job exists") from exc
         _set_status(
             patch,
@@ -436,6 +509,15 @@ def reconcile(
             last_verified_at=status.get("lastVerifiedAt"),
             existing_status=status,
         )
+
+
+def reconcile(
+    *, body: dict[str, Any], namespace: str, name: str, **kwargs: Any,
+) -> None:
+    """Serialize the complete profile read and Job decision across both Kopf entry points."""
+    uid = str(body.get("metadata", {}).get("uid", ""))
+    with reconciliation_lock(namespace, name, uid):
+        _reconcile_locked(body=body, namespace=namespace, name=name, **kwargs)
 
 
 @kopf.on.create(API_GROUP, API_VERSION, CLUSTER_PLURAL)

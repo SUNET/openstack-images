@@ -1,15 +1,12 @@
-import subprocess
-from pathlib import Path
-from unittest.mock import Mock
+from copy import deepcopy
 
 import pytest
 import yaml
 
 from customer_cluster_operator.errors import ValidationError
 from customer_cluster_operator.inventory import (
-    _git_env,
     inventory_document,
-    publish_inventory,
+    render_cluster_policy,
     render_inventory,
 )
 
@@ -65,65 +62,48 @@ def test_rendered_inventory_has_warning_and_no_credentials(resources):
     assert yaml.safe_load(rendered)["all"]["hosts"]
 
 
-def test_git_auth_is_process_scoped(monkeypatch):
-    monkeypatch.setenv("UNCHANGED", "yes")
-    repo_url = "https://git.example/repo.git"
-    env = _git_env(repo_url, "bot", "super-secret")
-    assert env["GIT_CONFIG_KEY_0"] == f"http.{repo_url}.extraHeader"
-    assert env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
-    assert "super-secret" not in env["GIT_CONFIG_VALUE_0"]
-    assert "GIT_CONFIG_KEY_0" not in __import__("os").environ
+def test_policy_uses_only_reviewed_metadata(provisioning_input):
+    data = deepcopy(provisioning_input.data)
+    data["credentials"] = {"token": "do-not-export"}
+    data["dns"] = {"apiAlias": "alias.example.org"}
+    rendered = render_cluster_policy(data)
+    assert yaml.safe_load(rendered) == {"all": {"vars": {
+        "customer_cluster_name": "example",
+        "customer_cluster_profile": "standard-v1",
+        "customer_cluster_node_interface": "ens3",
+        "customer_cluster_api_hostname": "api.example.example.org",
+        "customer_cluster_argocd_hostname": "argocd.example.example.org",
+        "ansible_python_interpreter": "/usr/bin/python3",
+    }}}
+    assert "# GENERATED FILE: customer-cluster-operator" in rendered
+    assert "# owner: customer-cluster-operator" in rendered
+    assert "# formatVersion: 1" in rendered
+    assert f"# ManagedClusterUID: {data['cluster']['uid']}" in rendered
+    assert "do-not-export" not in rendered
+    assert "alias.example.org" not in rendered
+    assert "10.44." not in rendered
+    assert "project-id" not in rendered
 
 
-def test_publish_uses_env_not_url_or_command(monkeypatch):
-    calls = []
-
-    def fake_git(args, cwd, env):
-        calls.append((args, env))
-        if args[0] == "clone":
-            Path(args[-1]).mkdir(parents=True)
-        return Mock(returncode=0, stdout="a" * 40 + "\n")
-
-    monkeypatch.setattr("customer_cluster_operator.inventory._run_git", fake_git)
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: Mock(returncode=1),
-    )
-    config = {
-        "repoUrl": "https://git.example/repo.git",
-        "branch": "main",
-        "username": "bot",
-    }
-    path, commit = publish_inventory(config, "example", "inventory", "secret")
-    assert path.endswith("hosts.yml")
-    assert commit == "a" * 40
-    assert all("secret" not in " ".join(args) for args, _ in calls)
-    assert all("secret" not in config["repoUrl"] for _ in calls)
+@pytest.mark.parametrize("key,value", [
+    ("profileName", "../profile"),
+    ("apiHostname", "192.0.2.1"),
+    ("argocdHostname", "alias"),
+    ("nodeInterface", "ens3; command"),
+    ("pythonInterpreter", "auto"),
+])
+def test_policy_validates_inventory_inputs(provisioning_input, key, value):
+    data = deepcopy(provisioning_input.data)
+    data["inventory"][key] = value
+    with pytest.raises(ValidationError):
+        render_cluster_policy(data)
 
 
-def test_publish_rejects_empty_token():
-    with pytest.raises(ValidationError, match="empty"):
-        publish_inventory({}, "example", "inventory", "")
-
-
-def test_unchanged_inventory_returns_head_without_commit_or_push(monkeypatch):
-    calls = []
-
-    def fake_git(args, cwd, env):
-        calls.append(args)
-        if args[0] == "clone":
-            Path(args[-1]).mkdir(parents=True)
-        return Mock(returncode=0, stdout="c" * 40 + "\n")
-
-    monkeypatch.setattr("customer_cluster_operator.inventory._run_git", fake_git)
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: Mock(returncode=0))
-    config = {
-        "repoUrl": "https://git.example/repo.git",
-        "branch": "main",
-        "username": "bot",
-    }
-    path, commit = publish_inventory(config, "example", "inventory", "secret")
-    assert path.endswith("hosts.yml")
-    assert commit == "c" * 40
-    assert not any("commit" in args or "push" in args for args in calls)
+def test_policy_rejects_extra_fields_and_missing_canonical_dns(provisioning_input):
+    data = deepcopy(provisioning_input.data)
+    data["inventory"]["apiAlias"] = data["inventory"].pop("apiHostname")
+    with pytest.raises(ValidationError):
+        render_cluster_policy(data)
+    data["inventory"]["apiHostname"] = "api.example.org"
+    with pytest.raises(ValidationError):
+        render_cluster_policy(data)

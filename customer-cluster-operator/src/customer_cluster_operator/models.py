@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from .constants import DEFAULT_PROFILE
 from .errors import ValidationError
+from .inventory_inputs import build_inventory_parameters, validate_profile_revision
 
 DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 MAX_WORKER_GROUPS = 80
@@ -64,11 +65,32 @@ class ProvisioningInput:
 
     @property
     def input_hash(self) -> str:
+        """Preserve the exact v1 hash used to protect already-provisioned resources."""
+        infrastructure = dict(self.data)
+        if infrastructure.get("schemaVersion") == 2:
+            infrastructure.pop("inventory")
+            infrastructure.pop("profileRevision")
+            infrastructure["schemaVersion"] = 1
+        encoded = json.dumps(infrastructure, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @property
+    def inventory_hash(self) -> str:
+        encoded = json.dumps(self.data["inventory"], sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @property
+    def publication_hash(self) -> str:
+        """Complete immutable Job input identity, including publication-only changes."""
         return hashlib.sha256(self.canonical_json.encode()).hexdigest()
 
     @property
     def inventory_path(self) -> str:
         return f"clusters/{self.data['cluster']['slug']}/generated/ansible/hosts.yml"
+
+    @property
+    def policy_inventory_path(self) -> str:
+        return f"inventory/clusters/{self.data['cluster']['slug']}.yml"
 
 
 def profile_name(spec: dict[str, Any]) -> str:
@@ -94,13 +116,14 @@ def build_input(
     *,
     spec: dict[str, Any],
     profile: dict[str, Any],
+    profile_revision: dict[str, Any],
     uid: str,
     slug: str,
     namespace: str,
     project_id: str,
     operator_namespace: str,
 ) -> ProvisioningInput:
-    """Validate API data and return only infrastructure-affecting fields."""
+    """Build the worker envelope, separating policy from the v1 infrastructure hash."""
     if namespace != operator_namespace:
         raise ValidationError(f"ManagedCluster namespace must be {operator_namespace}")
     if not uid:
@@ -196,7 +219,7 @@ def build_input(
         }
 
     data = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "cluster": {"uid": uid, "slug": slug},
         "project": {"id": project_id, "name": project_name},
         "openstack": {
@@ -239,6 +262,8 @@ def build_input(
             ),
         },
         "nodes": {"controllers": 3, "workers": 3 * worker_groups},
+        "inventory": build_inventory_parameters(spec, profile, profile_name(spec)),
+        "profileRevision": validate_profile_revision(profile_revision),
     }
     return ProvisioningInput(deepcopy(data))
 

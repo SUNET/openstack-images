@@ -7,3 +7,7 @@ class ValidationError(ValueError):
 
 class OwnershipError(RuntimeError):
     """An existing external resource is not owned by this cluster."""
+
+
+class InventoryConflict(ValidationError):
+    """Publication would overwrite unowned policy or stale desired state."""

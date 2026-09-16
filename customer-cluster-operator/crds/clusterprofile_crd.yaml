@@ -47,6 +47,34 @@ spec:
                   format: int32
                   minimum: 1
                   maximum: 80
+                ansible:
+                  type: object
+                  description: >-
+                    Reviewed cluster inventory policy. Optional at admission for
+                    rollout compatibility; both explicit values are required by
+                    the operator before creating new provisioning Jobs. No
+                    defaults are inferred from the image or network.
+                  required:
+                    - nodeInterface
+                    - pythonInterpreter
+                  properties:
+                    nodeInterface:
+                      type: string
+                      minLength: 1
+                      maxLength: 15
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$
+                      description: >-
+                        Literal Linux node interface name for inventory policy.
+                    pythonInterpreter:
+                      type: string
+                      maxLength: 512
+                      pattern: ^/([A-Za-z0-9_.+-]+/)*python3([.][0-9]+)?$
+                      description: >-
+                        Normalized absolute Python 3 path with basename python3
+                        or python3.NUM; no whitespace or shell metacharacters.
+                      x-kubernetes-validations:
+                        - rule: "!self.matches('/[.]{1,2}/')"
+                          message: must not contain '.' or '..' path segments
                 openstack:
                   type: object
                   required:

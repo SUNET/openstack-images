@@ -16,7 +16,11 @@ def spec():
             "projectName": "customer-example",
             "projectResourceName": "customer-example",
         },
-        "dns": {"zone": "example.org"},
+        "dns": {
+            "zone": "example.org",
+            "apiHostname": "api.example.example.org",
+            "argocdHostname": "argocd.example.example.org",
+        },
         "openbao": {"mount": "kubernetes/example"},
     }
 
@@ -26,6 +30,7 @@ def profile():
     return {
         "projectNamespace": "customer-projects",
         "maxWorkerGroups": 80,
+        "ansible": {"nodeInterface": "ens3", "pythonInterpreter": "/usr/bin/python3"},
         "openstack": {
             "cloud": "production",
             "image": "Debian 13 Trixie",
@@ -62,6 +67,7 @@ def provisioning_input(spec, profile):
     return build_input(
         spec=deepcopy(spec),
         profile=deepcopy(profile),
+        profile_revision={"uid": "profile-uid", "generation": 1},
         uid="12345678-1234-1234-1234-123456789abc",
         slug="example",
         namespace="openstack-operator",

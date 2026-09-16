@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -6,6 +7,7 @@ import pytest
 from kubernetes.client.exceptions import ApiException
 
 from customer_cluster_operator import controller
+from customer_cluster_operator.kube import input_annotations
 
 
 def APIs(
@@ -15,10 +17,15 @@ def APIs(
     project_status=None,
     project_spec=None,
     project_generation=2,
+    profile_uid="profile-uid",
+    profile_generation=1,
     pods=None,
 ):
     custom = Mock()
-    custom.get_cluster_custom_object.return_value = {"spec": profile}
+    custom.get_cluster_custom_object.return_value = {
+        "metadata": {"uid": profile_uid, "generation": profile_generation},
+        "spec": profile,
+    }
     custom.get_namespaced_custom_object.return_value = {
         "metadata": {"generation": project_generation},
         "status": project_status
@@ -139,6 +146,54 @@ def test_creates_one_configmap_and_job(monkeypatch, spec, profile, body):
     )
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param(None, id="null-metadata"),
+        pytest.param({}, id="empty-metadata"),
+        pytest.param({"generation": 1}, id="missing-uid"),
+        pytest.param({"uid": None, "generation": 1}, id="null-uid"),
+        pytest.param({"uid": "", "generation": 1}, id="empty-uid"),
+        pytest.param({"uid": " ", "generation": 1}, id="blank-uid"),
+        pytest.param({"uid": 1, "generation": 1}, id="integer-uid"),
+        pytest.param({"uid": True, "generation": 1}, id="boolean-uid"),
+        pytest.param({"uid": "profile-uid"}, id="missing-generation"),
+        pytest.param({"uid": "profile-uid", "generation": None}, id="null-generation"),
+        pytest.param({"uid": "profile-uid", "generation": "1"}, id="string-generation"),
+        pytest.param({"uid": "profile-uid", "generation": 1.0}, id="float-generation"),
+        pytest.param({"uid": "profile-uid", "generation": True}, id="boolean-generation"),
+        pytest.param({"uid": "profile-uid", "generation": 0}, id="zero-generation"),
+        pytest.param({"uid": "profile-uid", "generation": -1}, id="negative-generation"),
+        pytest.param({
+            "uid": "profile-uid", "generation": 1, "deletionTimestamp": "2026-09-16T14:00:00Z",
+        }, id="deleting-profile"),
+    ],
+)
+def test_invalid_or_deleting_profile_metadata_fails_before_job_creation(
+    monkeypatch, spec, profile, body, metadata,
+):
+    apis = APIs(profile)
+    apis[0].get_cluster_custom_object.return_value["metadata"] = metadata
+    patch = reconcile(monkeypatch, spec, body, apis)
+    assert patch.status["phase"] == "Failed"
+    assert patch.status["conditions"][0]["reason"] == "InvalidConfiguration"
+    assert patch.status["conditions"][0]["status"] == "False"
+    apis[2].list_namespaced_job.assert_not_called()
+    apis[1].read_namespaced_secret.assert_not_called()
+    apis[1].create_namespaced_config_map.assert_not_called()
+    apis[2].create_namespaced_job.assert_not_called()
+
+
+def test_missing_profile_metadata_fails_before_job_creation(monkeypatch, spec, profile, body):
+    apis = APIs(profile)
+    del apis[0].get_cluster_custom_object.return_value["metadata"]
+    patch = reconcile(monkeypatch, spec, body, apis)
+    assert patch.status["phase"] == "Failed"
+    assert patch.status["conditions"][0]["reason"] == "InvalidConfiguration"
+    apis[1].create_namespaced_config_map.assert_not_called()
+    apis[2].create_namespaced_job.assert_not_called()
+
+
 @pytest.mark.parametrize("resource", ["credentials", "git", "ssh"])
 @pytest.mark.parametrize("failure", ["missing", "missing-key"])
 def test_missing_prerequisite_waits_without_creating_resources(
@@ -179,13 +234,14 @@ def test_prerequisite_api_failure_propagates(monkeypatch, spec, profile, body):
     apis[2].create_namespaced_job.assert_not_called()
 
 
+@pytest.mark.parametrize("succeeded", [None, 0, 1])
 def test_ready_status_is_verified_from_owned_job_result(
-    monkeypatch, spec, profile, body, provisioning_input
+    monkeypatch, spec, profile, body, provisioning_input, succeeded,
 ):
     name = controller.job_name(
         "example",
         body["metadata"]["uid"],
-        provisioning_input.input_hash,
+        provisioning_input.publication_hash,
         body["metadata"]["generation"],
         7,
     )
@@ -194,16 +250,25 @@ def test_ready_status_is_verified_from_owned_job_result(
         metadata=SimpleNamespace(
             name=name,
             uid=job_uid,
+            annotations=input_annotations(provisioning_input),
             owner_references=[SimpleNamespace(uid=body["metadata"]["uid"])],
         ),
-        status=SimpleNamespace(active=None, failed=None, succeeded=1, conditions=[]),
+        status=SimpleNamespace(
+            active=0, terminating=0, failed=None, succeeded=succeeded,
+            conditions=[SimpleNamespace(type="Complete", status="True")],
+        ),
     )
-    result = (
-        '{"inventoryPath":"clusters/example/generated/ansible/hosts.yml",'
-        '"inventoryCommit":"'
-        + "a" * 40
-        + '","apiFloatingIp":"192.0.2.11","ingressFloatingIp":"192.0.2.12"}'
-    )
+    result = json.dumps({
+        "schemaVersion": 2,
+        "inventoryPath": provisioning_input.inventory_path,
+        "policyInventoryPath": provisioning_input.policy_inventory_path,
+        "inputHash": provisioning_input.input_hash,
+        "inventoryInputHash": provisioning_input.inventory_hash,
+        "publicationHash": provisioning_input.publication_hash,
+        "inventoryCommit": "a" * 40,
+        "apiFloatingIp": "192.0.2.11",
+        "ingressFloatingIp": "192.0.2.12",
+    })
     pod = SimpleNamespace(
         metadata=SimpleNamespace(owner_references=[SimpleNamespace(uid=job_uid)]),
         status=SimpleNamespace(
@@ -225,6 +290,12 @@ def test_ready_status_is_verified_from_owned_job_result(
         status={"phase": "VirtualMachinesReady", "inputHash": provisioning_input.input_hash},
     )
     assert patch.status["phase"] == "VirtualMachinesReady"
+    assert patch.status["conditions"][0]["status"] == "True"
+    assert patch.status["inputHash"] == provisioning_input.input_hash
+    assert patch.status["inventoryInputHash"] == provisioning_input.inventory_hash
+    assert patch.status["publicationHash"] == provisioning_input.publication_hash
+    assert patch.status["inventoryPath"] == provisioning_input.inventory_path
+    assert patch.status["policyInventoryPath"] == provisioning_input.policy_inventory_path
     assert patch.status["inventoryCommit"] == "a" * 40
     assert patch.status["apiFloatingIp"] == "192.0.2.11"
     assert patch.status["ingressFloatingIp"] == "192.0.2.12"
@@ -254,7 +325,9 @@ def test_active_different_job_is_rejected(monkeypatch, spec, profile, body):
             name="old-job",
             owner_references=[SimpleNamespace(uid=body["metadata"]["uid"])],
         ),
-        status=SimpleNamespace(active=1, failed=None, succeeded=None, conditions=[]),
+        status=SimpleNamespace(
+            active=1, terminating=None, failed=None, succeeded=None, conditions=[],
+        ),
     )
     patch = reconcile(monkeypatch, spec, body, APIs(profile, jobs=[job]))
     assert patch.status["phase"] == "Failed"
@@ -265,17 +338,20 @@ def test_failed_job_message_is_bounded(monkeypatch, spec, profile, body, provisi
     name = controller.job_name(
         "example",
         body["metadata"]["uid"],
-        provisioning_input.input_hash,
+        provisioning_input.publication_hash,
         body["metadata"]["generation"],
         7,
     )
     job = SimpleNamespace(
         metadata=SimpleNamespace(
             name=name,
+            uid="job-uid",
+            annotations=input_annotations(provisioning_input),
             owner_references=[SimpleNamespace(uid=body["metadata"]["uid"])],
         ),
         status=SimpleNamespace(
             active=None,
+            terminating=None,
             failed=1,
             succeeded=None,
             conditions=[SimpleNamespace(type="Failed", status="True", message="x" * 1000)],
@@ -283,6 +359,7 @@ def test_failed_job_message_is_bounded(monkeypatch, spec, profile, body, provisi
     )
     patch = reconcile(monkeypatch, spec, body, APIs(profile, jobs=[job]))
     assert patch.status["phase"] == "Failed"
+    assert patch.status["conditions"][0]["reason"] == "ProvisioningJobFailed"
     assert len(patch.status["conditions"][0]["message"]) == 512
 
 
@@ -353,13 +430,16 @@ def test_new_generation_launches_idempotent_verification_job(
             name=controller.job_name(
                 "example",
                 body["metadata"]["uid"],
-                provisioning_input.input_hash,
+                provisioning_input.publication_hash,
                 3,
                 7,
             ),
             owner_references=[SimpleNamespace(uid=body["metadata"]["uid"])],
         ),
-        status=SimpleNamespace(active=None, failed=None, succeeded=1, conditions=[]),
+        status=SimpleNamespace(
+            active=0, terminating=0, failed=None, succeeded=1,
+            conditions=[SimpleNamespace(type="Complete", status="True")],
+        ),
     )
     apis = APIs(profile, jobs=[old_job])
     patch = reconcile(
@@ -386,13 +466,16 @@ def test_new_time_bucket_launches_periodic_verification_job(
             name=controller.job_name(
                 "example",
                 body["metadata"]["uid"],
-                provisioning_input.input_hash,
+                provisioning_input.publication_hash,
                 body["metadata"]["generation"],
                 6,
             ),
             owner_references=[SimpleNamespace(uid=body["metadata"]["uid"])],
         ),
-        status=SimpleNamespace(active=None, failed=None, succeeded=1, conditions=[]),
+        status=SimpleNamespace(
+            active=0, terminating=0, failed=None, succeeded=1,
+            conditions=[SimpleNamespace(type="Complete", status="True")],
+        ),
     )
     apis = APIs(profile, jobs=[previous])
     patch = reconcile(

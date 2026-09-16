@@ -54,11 +54,24 @@ def owner_reference(body: dict[str, Any]) -> client.V1OwnerReference:
     )
 
 
-def labels(uid: str, input_hash: str) -> dict[str, str]:
-    return {
+def labels(uid: str, input_hash: str, publication_hash: str | None = None) -> dict[str, str]:
+    result = {
         "app.kubernetes.io/managed-by": MANAGED_BY,
         "customer-clusters.sunet.se/cluster-uid": uid,
         "customer-clusters.sunet.se/input-hash": input_hash[:63],
+    }
+    if publication_hash is not None:
+        result["customer-clusters.sunet.se/publication-hash"] = publication_hash[:63]
+    return result
+
+
+def input_annotations(value: ProvisioningInput) -> dict[str, str]:
+    return {
+        "customer-clusters.sunet.se/input-hash": value.input_hash,
+        "customer-clusters.sunet.se/publication-hash": value.publication_hash,
+        "customer-clusters.sunet.se/inventory-input-hash": value.inventory_hash,
+        "customer-clusters.sunet.se/inventory-path": value.inventory_path,
+        "customer-clusters.sunet.se/policy-inventory-path": value.policy_inventory_path,
     }
 
 
@@ -70,8 +83,8 @@ def input_config_map(
         metadata=client.V1ObjectMeta(
             name=f"{name}-input",
             namespace=body["metadata"]["namespace"],
-            labels=labels(body["metadata"]["uid"], input_hash),
-            annotations={"customer-clusters.sunet.se/input-hash": input_hash},
+            labels=labels(body["metadata"]["uid"], input_hash, provisioning_input.publication_hash),
+            annotations=input_annotations(provisioning_input),
             owner_references=[owner_reference(body)],
         ),
         immutable=True,
@@ -161,7 +174,9 @@ def provisioning_job(
         client.V1VolumeMount(name="tmp", mount_path="/tmp")  # noqa: S108
     )
     template = client.V1PodTemplateSpec(
-        metadata=client.V1ObjectMeta(labels=labels(uid, input_hash)),
+        metadata=client.V1ObjectMeta(
+            labels=labels(uid, input_hash, provisioning_input.publication_hash)
+        ),
         spec=client.V1PodSpec(
             restart_policy="Never",
             service_account_name=service_account,
@@ -175,12 +190,9 @@ def provisioning_job(
         metadata=client.V1ObjectMeta(
             name=name,
             namespace=namespace,
-            labels=labels(uid, input_hash),
+            labels=labels(uid, input_hash, provisioning_input.publication_hash),
             owner_references=[owner_reference(body)],
-            annotations={
-                "customer-clusters.sunet.se/input-hash": input_hash,
-                "customer-clusters.sunet.se/inventory-path": provisioning_input.inventory_path,
-            },
+            annotations=input_annotations(provisioning_input),
         ),
         spec=client.V1JobSpec(
             template=template,
@@ -197,11 +209,39 @@ def job_failure_message(job: client.V1Job) -> str:
     return "provisioning Job failed"
 
 
-def _job_finished(job: client.V1Job) -> bool:
-    if job.status.succeeded:
-        return True
+def inventory_conflict(core_api: client.CoreV1Api, namespace: str, job: client.V1Job) -> bool:
+    """Recognize a bounded failure code from an owned worker, never arbitrary pod log text."""
+    uid = getattr(job.metadata, "uid", None)
+    if not uid:
+        return False
+    pods = core_api.list_namespaced_pod(
+        namespace, label_selector=f"job-name={job.metadata.name}"
+    ).items
+    for pod in pods:
+        if not any(ref.uid == uid for ref in pod.metadata.owner_references or []):
+            continue
+        for status in pod.status.container_statuses or []:
+            terminated = status.state.terminated if status.state else None
+            if status.name != "provision" or not terminated or terminated.exit_code == 0:
+                continue
+            try:
+                result = json.loads(terminated.message)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(result, dict) and result.get("errorCode") == "InventoryConflict":
+                return True
+    return False
+
+
+def job_finished(job: client.V1Job) -> bool:
+    """A gap between worker Pods is not completion: pending/backoff Jobs still own publication."""
+    if job.status is None:
+        return False
+    if job.status.active or getattr(job.status, "terminating", None):
+        return False
     return any(
-        item.type == "Failed" and item.status == "True" for item in job.status.conditions or []
+        item.type in {"Complete", "Failed"} and item.status == "True"
+        for item in job.status.conditions or []
     )
 
 
@@ -223,9 +263,9 @@ def cleanup_history(
     mandatory = {current_job_name}
     if status_job_name:
         mandatory.add(status_job_name)
-    unfinished = {job.metadata.name for job in jobs if not _job_finished(job)}
+    unfinished = {job.metadata.name for job in jobs if not job_finished(job)}
     completed = sorted(
-        (job for job in jobs if _job_finished(job)),
+        (job for job in jobs if job_finished(job)),
         key=lambda job: str(getattr(job.metadata, "creation_timestamp", None) or ""),
         reverse=True,
     )
@@ -291,29 +331,56 @@ def job_result(core_api: client.CoreV1Api, namespace: str, job: client.V1Job) ->
             result = json.loads(terminated.message)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValidationError("worker termination result is not valid JSON") from exc
-        path = result.get("inventoryPath") if isinstance(result, dict) else None
-        commit = result.get("inventoryCommit") if isinstance(result, dict) else None
-        if not isinstance(path, str) or not path.startswith("clusters/") or ".." in path.split("/"):
+        if (
+            not isinstance(result, dict) or type(result.get("schemaVersion")) is not int
+            or result["schemaVersion"] != 2
+        ):
+            raise ValidationError("worker result does not prove schema v2 inventory publication")
+        path = result.get("inventoryPath")
+        commit = result.get("inventoryCommit")
+        matched = re.fullmatch(
+            r"clusters/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)/generated/ansible/hosts[.]yml",
+            path,
+        ) if isinstance(path, str) else None
+        if matched is None:
             raise ValidationError("worker termination result has an invalid inventoryPath")
+        policy_path = result.get("policyInventoryPath")
+        if policy_path != f"inventory/clusters/{matched[1]}.yml":
+            raise ValidationError("worker termination result has an invalid policyInventoryPath")
         if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
             raise ValidationError("worker termination result has an invalid inventoryCommit")
+        hashes = []
+        for key in ("inputHash", "inventoryInputHash", "publicationHash"):
+            value = result.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValidationError(f"worker termination result has an invalid {key}")
+            hashes.append(value)
         endpoint_ips = []
         for key in ("apiFloatingIp", "ingressFloatingIp"):
             value = result.get(key) if isinstance(result, dict) else None
             try:
+                if not isinstance(value, str):
+                    raise ValueError()
                 address = ipaddress.ip_address(value)
             except (TypeError, ValueError) as exc:
                 raise ValidationError(f"worker termination result has an invalid {key}") from exc
             if address.version != 4:
                 raise ValidationError(f"worker termination result has an invalid {key}")
             endpoint_ips.append(str(address))
-        results.append((path, commit, *endpoint_ips))
+        results.append((path, policy_path, commit, *hashes, *endpoint_ips))
     if len(set(results)) != 1:
         raise ValidationError("provisioning Job Pods have conflicting successful results")
-    path, commit, api_fip, ingress_fip = results[0]
+    (
+        path, policy_path, commit, input_hash, inventory_hash, publication_hash,
+        api_fip, ingress_fip,
+    ) = results[0]
     return {
         "inventoryPath": path,
         "inventoryCommit": commit,
+        "policyInventoryPath": policy_path,
+        "inputHash": input_hash,
+        "inventoryInputHash": inventory_hash,
+        "publicationHash": publication_hash,
         "apiFloatingIp": api_fip,
         "ingressFloatingIp": ingress_fip,
     }

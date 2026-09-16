@@ -67,7 +67,7 @@ extra_jobs:
     docker_name: platform/customer-cluster-operator
     docker_context_dir: customer-cluster-operator
     docker_tags:
-      - "0.1.5"
+      - "0.1.6"
       - "latest"
 
   # Libvirt with QEMU SPICE support
