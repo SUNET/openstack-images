@@ -62,6 +62,27 @@ def _desired_prices() -> list[dict]:
             "value": "rbd1",
         },
         {
+            "resource_type": "volume.size",
+            "unit_price": Decimal("5.18"),
+            "unit": "GB-month",
+            "field": "volume_type",
+            "value": "fast",
+        },
+        {
+            "resource_type": "volume.size",
+            "unit_price": Decimal("2.33"),
+            "unit": "GB-month",
+            "field": "volume_type",
+            "value": "balanced",
+        },
+        {
+            "resource_type": "volume.size",
+            "unit_price": Decimal("0.36"),
+            "unit": "GB-month",
+            "field": "volume_type",
+            "value": "bulk",
+        },
+        {
             "resource_type": "volume.snapshot.size",
             "unit_price": Decimal("1.73"),
             "unit": "GB-month",
