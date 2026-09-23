@@ -102,7 +102,16 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
         requests.append((args[0], kwargs))
         return next(responses)
 
+    settings = SimpleNamespace(
+        billing_gnocchi_timeout_seconds=123,
+        billing_gnocchi_connect_timeout_seconds=7,
+    )
     monkeypatch.setattr(httpx, "post", respond)
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: settings,
+    )
 
     usage = _query_gnocchi_usage(
         SimpleNamespace(auth_token="test-token"),
@@ -113,7 +122,14 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
         ["volume_type"],
         ["project-1"],
     )
-
+    for _, request in requests:
+        timeout = request["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.connect == 7
+        assert timeout.read == 123
+        assert timeout.write == 123
+        assert timeout.pool == 123
+    requests[1][1].pop("timeout")
     assert usage == []
     assert requests[1][0].endswith("/v1/search/resource/volume")
     assert requests[1][1] == {
@@ -131,7 +147,6 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
             ]
         },
         "headers": {"X-Auth-Token": "test-token"},
-        "timeout": 60,
     }
 
 

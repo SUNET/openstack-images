@@ -151,9 +151,7 @@ def _resolve_cinder_volume_type(value: str, type_names: dict[str, str]) -> str:
         return type_names[value]
     if value in type_names.values():
         return value
-    raise BillingGenerationError(
-        f"Cinder volume type {value} is unknown or no longer active"
-    )
+    raise BillingGenerationError(f"Cinder volume type {value} is unknown or no longer active")
 
 
 def _canonicalize_volume_usage(usage: list[dict], type_names: dict[str, str]) -> list[dict]:
@@ -164,9 +162,7 @@ def _canonicalize_volume_usage(usage: list[dict], type_names: dict[str, str]) ->
         raw_volume_type = metadata.get("volume_type")
         if not isinstance(raw_volume_type, str) or not raw_volume_type:
             raise BillingGenerationError("Volume usage is missing volume_type")
-        metadata["volume_type"] = _resolve_cinder_volume_type(
-            raw_volume_type, type_names
-        )
+        metadata["volume_type"] = _resolve_cinder_volume_type(raw_volume_type, type_names)
 
         key = (
             entry["project_id"],
@@ -194,6 +190,7 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
       {metric_type, resource_type, unit, metadata_fields: [{field, values: []}]}
     """
     import httpx
+
     gnocchi = "http://gnocchi-api.openstack.svc.cluster.local:8041"
 
     try:
@@ -233,10 +230,12 @@ def discover_gnocchi_metrics(cloud_name: str = "openstack") -> list[dict]:
                         "Failed to query Gnocchi for %s metadata", info["resource_type"]
                     )
 
-                entry["metadata_fields"].append({
-                    "field": field,
-                    "values": sorted(values),
-                })
+                entry["metadata_fields"].append(
+                    {
+                        "field": field,
+                        "values": sorted(values),
+                    }
+                )
 
             results.append(entry)
 
@@ -309,11 +308,9 @@ def _get_project_contracts(conn: openstack.connection.Connection) -> dict[str, t
                 f"Project {project.name} has multiple contract tags: {contract_tags}"
             )
         if contract_tags:
-            contract_number = contract_tags[0][len(CONTRACT_TAG_PREFIX):]
+            contract_number = contract_tags[0][len(CONTRACT_TAG_PREFIX) :]
             if not contract_number:
-                raise BillingGenerationError(
-                    f"Project {project.name} has an empty contract tag"
-                )
+                raise BillingGenerationError(f"Project {project.name} has an empty contract tag")
             project_map[project.id] = (project.name, contract_number)
     return project_map
 
@@ -473,9 +470,7 @@ def _emit_synthetic_cluster_lines(
         project_label = f"managed-cluster:{cluster.slug}"
 
         # 1. Package management fee: full month, never prorated.
-        management_fee, management_unit = _cluster_management_fee(
-            prices, cluster.worker_groups
-        )
+        management_fee, management_unit = _cluster_management_fee(prices, cluster.worker_groups)
         unit_price = _price_after_override_and_rebate(
             base_price=management_fee,
             resource_type="cluster_management_fee",
@@ -497,9 +492,7 @@ def _emit_synthetic_cluster_lines(
 
         # 2. Initial setup fee: only in the period the cluster was provisioned.
         if period_start <= cluster.provisioned_at < period_end:
-            ctrl = _find_price(
-                prices, "cluster_setup_fee", {"group_type": "controllers"}
-            )
+            ctrl = _find_price(prices, "cluster_setup_fee", {"group_type": "controllers"})
             if ctrl is not None:
                 unit_price = _price_after_override_and_rebate(
                     base_price=ctrl.unit_price,
@@ -519,9 +512,7 @@ def _emit_synthetic_cluster_lines(
                         round(unit_price),
                     ]
                 )
-            wkr = _find_price(
-                prices, "cluster_setup_fee", {"group_type": "workers"}
-            )
+            wkr = _find_price(prices, "cluster_setup_fee", {"group_type": "workers"})
             if wkr is not None and cluster.initial_worker_groups > 0:
                 qty = Decimal(cluster.initial_worker_groups)
                 unit_price = _price_after_override_and_rebate(
@@ -602,8 +593,7 @@ def _emit_synthetic_cluster_lines(
             .join(TenantCluster, TenantCluster.id == ClusterAddon.cluster_id)
             .where(
                 ClusterAddon.enabled_at < period_end,
-                (ClusterAddon.disabled_at.is_(None))
-                | (ClusterAddon.disabled_at > period_start),
+                (ClusterAddon.disabled_at.is_(None)) | (ClusterAddon.disabled_at > period_start),
             )
         ).all()
     )
@@ -614,9 +604,7 @@ def _emit_synthetic_cluster_lines(
         customer_name = contract_customer_map.get(cn)
         if customer_name is None:
             raise BillingGenerationError(f"No customer found for contract {cn}")
-        price = _find_price(
-            prices, "cluster_addon_fee", {"addon": addon.addon_type}
-        )
+        price = _find_price(prices, "cluster_addon_fee", {"addon": addon.addon_type})
         if price is None:
             continue
         unit_price = _price_after_override_and_rebate(
@@ -653,6 +641,11 @@ def _project_had_gnocchi_resources(
     Search current resources because old revisions can retain a null ended_at
     after the resource's current revision has been closed.
     """
+    settings = get_settings()
+    gnocchi_timeout = httpx.Timeout(
+        settings.billing_gnocchi_timeout_seconds,
+        connect=settings.billing_gnocchi_connect_timeout_seconds,
+    )
     search = {
         "and": [
             {"=": {"project_id": project_id}},
@@ -685,7 +678,7 @@ def _project_had_gnocchi_resources(
             params=params,
             json=search,
             headers={"X-Auth-Token": token},
-            timeout=60,
+            timeout=gnocchi_timeout,
         )
         response_content = getattr(response, "content", b"")
         if len(response_content) > MAX_GNOCCHI_RESPONSE_BYTES:
@@ -773,8 +766,13 @@ def _project_had_gnocchi_resources(
 
 
 def _query_gnocchi_usage(
-    conn, begin: datetime, end: datetime, resource_type: str, metric_name: str,
-    groupby_fields: list[str], project_ids: list[str],
+    conn,
+    begin: datetime,
+    end: datetime,
+    resource_type: str,
+    metric_name: str,
+    groupby_fields: list[str],
+    project_ids: list[str],
 ) -> list[dict]:
     """Query history-aware per-resource usage and roll it up for pricing.
 
@@ -785,12 +783,16 @@ def _query_gnocchi_usage(
 
     token = conn.auth_token
     gnocchi = "http://gnocchi-api.openstack.svc.cluster.local:8041"
+    settings = get_settings()
+    gnocchi_timeout = httpx.Timeout(
+        settings.billing_gnocchi_timeout_seconds,
+        connect=settings.billing_gnocchi_connect_timeout_seconds,
+    )
 
     try:
         if len(project_ids) > MAX_BILLING_PROJECTS:
             raise BillingGenerationError(
-                f"Billing scope has {len(project_ids)} projects; "
-                f"maximum is {MAX_BILLING_PROJECTS}"
+                f"Billing scope has {len(project_ids)} projects; maximum is {MAX_BILLING_PROJECTS}"
             )
 
         results_by_group: dict[tuple, dict] = {}
@@ -829,7 +831,7 @@ def _query_gnocchi_usage(
                     ],
                 },
                 headers={"X-Auth-Token": token},
-                timeout=60,
+                timeout=gnocchi_timeout,
             )
             if resp.status_code == 404:
                 if not _project_had_gnocchi_resources(
@@ -897,8 +899,7 @@ def _query_gnocchi_usage(
                     value = group_info.get(field)
                     if value is None or value == "":
                         raise BillingGenerationError(
-                            f"Gnocchi group for {resource_type}/{metric_name} "
-                            f"is missing {field}"
+                            f"Gnocchi group for {resource_type}/{metric_name} is missing {field}"
                         )
                     metadata[field] = value
 
@@ -926,8 +927,7 @@ def _query_gnocchi_usage(
                     )
                 if len(measures) > MAX_GNOCCHI_MEASURES_PER_GROUP:
                     raise BillingGenerationError(
-                        f"Gnocchi returned too many measures for "
-                        f"{resource_type}/{metric_name}"
+                        f"Gnocchi returned too many measures for {resource_type}/{metric_name}"
                     )
                 if not measures:
                     continue
@@ -946,9 +946,7 @@ def _query_gnocchi_usage(
                             f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
                         )
                     try:
-                        timestamp = datetime.fromisoformat(
-                            timestamp_raw.replace("Z", "+00:00")
-                        )
+                        timestamp = datetime.fromisoformat(timestamp_raw.replace("Z", "+00:00"))
                     except ValueError as exc:
                         raise BillingGenerationError(
                             f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
@@ -1207,7 +1205,7 @@ def resolve_template(template: str, **kwargs: str) -> str:
     for key, value in kwargs.items():
         result = result.replace("{" + key + "}", str(value))
     # Sanitize for filesystem safety
-    result = re.sub(r'[^\w\-.]', '_', result)
+    result = re.sub(r"[^\w\-.]", "_", result)
     return result
 
 
@@ -1229,6 +1227,7 @@ async def deliver_webdav(
     DNS resolution has shifted to internal addresses.
     """
     from app.url_safety import validate_webdav_url
+
     settings = get_settings()
     validate_webdav_url(url, settings.webdav_allowed_hosts)
 
@@ -1248,11 +1247,12 @@ async def deliver_webdav(
             body = resp.text.strip()[:500]
             logger.error(
                 "WebDAV PUT to %s failed: HTTP %d; body: %s",
-                full_url, resp.status_code, body or "(empty body)",
+                full_url,
+                resp.status_code,
+                body or "(empty body)",
             )
             raise RuntimeError(
-                f"WebDAV PUT returned HTTP {resp.status_code}: "
-                f"{body or '(empty body)'}"
+                f"WebDAV PUT returned HTTP {resp.status_code}: {body or '(empty body)'}"
             )
     logger.info("Delivered %s to WebDAV (HTTP %d): %s", filename, resp.status_code, url)
 
@@ -1340,8 +1340,11 @@ async def iter_billing_files(
         for cn in contract_numbers:
             csv_content = await asyncio.to_thread(
                 generate_billing_csv,
-                settings.database_url, settings.openstack_cloud,
-                [cn], period_start, period_end,
+                settings.database_url,
+                settings.openstack_cloud,
+                [cn],
+                period_start,
+                period_end,
             )
             if not csv_content.strip():
                 continue
@@ -1357,8 +1360,11 @@ async def iter_billing_files(
     else:
         csv_content = await asyncio.to_thread(
             generate_billing_csv,
-            settings.database_url, settings.openstack_cloud,
-            contract_numbers, period_start, period_end,
+            settings.database_url,
+            settings.openstack_cloud,
+            contract_numbers,
+            period_start,
+            period_end,
         )
         if not csv_content.strip():
             return

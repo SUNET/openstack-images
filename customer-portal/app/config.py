@@ -213,6 +213,22 @@ class Settings:
     billing_trigger_token: str = field(
         default_factory=lambda: os.environ.get("BILLING_TRIGGER_TOKEN", "")
     )
+    billing_gnocchi_timeout_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get(
+                "BILLING_GNOCCHI_TIMEOUT_SECONDS",
+                "300",
+            )
+        )
+    )
+    billing_gnocchi_connect_timeout_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get(
+                "BILLING_GNOCCHI_CONNECT_TIMEOUT_SECONDS",
+                "10",
+            )
+        )
+    )
     openstack_cloud: str = field(
         default_factory=lambda: os.environ.get("OPENSTACK_CLOUD", "openstack")
     )
