@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app._version import VERSION
 from app.auth import get_current_user, get_user_contracts, init_oauth, oauth
 from app.cluster_client import TenantClusterError
 from app.cluster_git_backend import ClusterGitBackend
@@ -42,6 +41,7 @@ from app.routers import (
     projects,
 )
 from app.schemas import ContractWithCustomerResponse, UserInfo
+from app.version import VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)

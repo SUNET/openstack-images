@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.metadata
 import re
 import runpy
 import shlex
@@ -12,8 +13,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app.version import DISTRIBUTION_NAME, VERSION, get_version
+
 PORTAL_ROOT = Path(__file__).resolve().parents[1]
-RELEASE_VERSION = "0.1.25"
+REPOSITORY_ROOT = PORTAL_ROOT.parent
+PROJECT = tomllib.loads((PORTAL_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+RELEASE_VERSION = PROJECT["project"]["version"]
 KUSTOMIZE_VERSION = "v5.8.0"
 DEPLOYMENT = PORTAL_ROOT.parents[2] / "k8s/platform-manifests/customer-portal/base/deployment.yaml"
 
@@ -30,10 +35,8 @@ def docker_instructions() -> list[tuple[str, str]]:
 
 
 def test_release_metadata_matches_jenkins_image_tag() -> None:
-    project = tomllib.loads((PORTAL_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    jenkins = yaml.safe_load((PORTAL_ROOT.parent / ".jenkins.yaml").read_text(encoding="utf-8"))
+    jenkins = yaml.safe_load((REPOSITORY_ROOT / ".jenkins.yaml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == RELEASE_VERSION
     assert jenkins["environment_variables"]["PORTAL_VERSION"] == RELEASE_VERSION
     jobs = [job for job in jenkins["extra_jobs"] if job["name"] == "customer-portal"]
     assert len(jobs) == 1
@@ -42,20 +45,16 @@ def test_release_metadata_matches_jenkins_image_tag() -> None:
     assert "${PORTAL_VERSION}" in jobs[0]["docker_tags"]
 
 
-def test_app_metadata_uses_release_version_module() -> None:
-    version_module = PORTAL_ROOT / "app/_version.py"
-    if not version_module.is_file():
-        pytest.skip("The separately maintained app/_version.py is not present")
+def test_app_metadata_uses_canonical_project_version() -> None:
+    assert DISTRIBUTION_NAME == PROJECT["project"]["name"]
+    assert VERSION == RELEASE_VERSION
 
-    assert runpy.run_path(str(version_module))["VERSION"] == RELEASE_VERSION
+    def missing_distribution(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    assert get_version(distribution=missing_distribution) == RELEASE_VERSION
+
     main = ast.parse((PORTAL_ROOT / "app/main.py").read_text(encoding="utf-8"))
-    imported_versions = {
-        alias.asname or alias.name
-        for node in ast.walk(main)
-        if isinstance(node, ast.ImportFrom) and node.module in {"app._version", "_version"}
-        for alias in node.names
-        if alias.name == "VERSION"
-    }
     api_versions = [
         keyword.value
         for node in ast.walk(main)
@@ -67,7 +66,47 @@ def test_app_metadata_uses_release_version_module() -> None:
     ]
     assert len(api_versions) == 1
     assert isinstance(api_versions[0], ast.Name)
-    assert api_versions[0].id in imported_versions
+    assert api_versions[0].id == "VERSION"
+
+
+def test_release_helper_updates_package_and_image_versions(tmp_path: Path) -> None:
+    release = runpy.run_path(str(PORTAL_ROOT / "scripts/set_version.py"))
+    pyproject = tmp_path / "pyproject.toml"
+    jenkins = tmp_path / ".jenkins.yaml"
+    pyproject.write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
+    jenkins.write_text(
+        'environment_variables:\n  PORTAL_VERSION: "1.2.3"\n',
+        encoding="utf-8",
+    )
+
+    release["set_release_version"](
+        "1.2.4",
+        pyproject_path=pyproject,
+        jenkins_path=jenkins,
+    )
+
+    assert 'version = "1.2.4"' in pyproject.read_text(encoding="utf-8")
+    assert 'PORTAL_VERSION: "1.2.4"' in jenkins.read_text(encoding="utf-8")
+
+
+def test_release_helper_refuses_existing_version_mismatch(tmp_path: Path) -> None:
+    release = runpy.run_path(str(PORTAL_ROOT / "scripts/set_version.py"))
+    pyproject = tmp_path / "pyproject.toml"
+    jenkins = tmp_path / ".jenkins.yaml"
+    project_content = '[project]\nversion = "1.2.3"\n'
+    jenkins_content = 'environment_variables:\n  PORTAL_VERSION: "1.2.2"\n'
+    pyproject.write_text(project_content, encoding="utf-8")
+    jenkins.write_text(jenkins_content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="out of sync"):
+        release["set_release_version"](
+            "1.2.4",
+            pyproject_path=pyproject,
+            jenkins_path=jenkins,
+        )
+
+    assert pyproject.read_text(encoding="utf-8") == project_content
+    assert jenkins.read_text(encoding="utf-8") == jenkins_content
 
 
 def test_deployment_image_matches_release_when_checkout_is_available() -> None:
@@ -169,9 +208,9 @@ def test_runtime_checks_standalone_kustomize_as_nonroot_user(
     ] in copies
     assert [value for instruction, value in runtime if instruction == "USER"] == ["portal"]
     nonroot_start = runtime.index(("USER", "portal"))
-    copy_step = runtime.index((
-        "COPY", "--from=kustomize-builder /go/bin/kustomize /usr/local/bin/kustomize"
-    ))
+    copy_step = runtime.index(
+        ("COPY", "--from=kustomize-builder /go/bin/kustomize /usr/local/bin/kustomize")
+    )
     permission_step = runtime.index(("RUN", "chmod 0555 /usr/local/bin/kustomize"))
     assert copy_step < permission_step < nonroot_start
     checks = [value for instruction, value in runtime[nonroot_start:] if instruction == "RUN"]

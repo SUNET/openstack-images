@@ -124,3 +124,17 @@ after building/releasing 0.1.25 and syncing the portal Application, click
 **Validate** again in the shared customer repository editor. Upgrading from
 0.1.24 requires no token rotation, database or OpenBao migration, or sync of
 other Applications.
+
+## Releasing
+
+The package version in `pyproject.toml` is the application version source. The
+running application uses installed distribution metadata, with the project
+metadata as its source-checkout fallback. Set a new package version and
+matching immutable Jenkins image tag together from the repository root:
+
+```console
+python3 customer-portal/scripts/set_version.py 0.1.27
+```
+
+The release tests reject a mismatched package and image-tag version. Updating
+the deployment manifest remains a separate, deliberate image-promotion step.
