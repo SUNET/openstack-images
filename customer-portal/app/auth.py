@@ -50,12 +50,19 @@ async def get_user_contracts(
     user_sub: str, session: AsyncSession
 ) -> list[Contract]:
     """Get all contracts a user has access to."""
-    result = await session.execute(
-        select(Contract)
-        .join(ContractAccess)
-        .where(ContractAccess.user_sub == user_sub)
-        .options(selectinload(Contract.customer))
+    settings = get_settings()
+    admin = is_sunet_admin(user_sub, settings)
+    query = select(Contract).options(
+        selectinload(Contract.customer)
     )
+
+    if not admin:
+        query = (
+            query.join(ContractAccess)
+            .where(ContractAccess.user_sub == user_sub)
+        )
+
+    result = await session.execute(query)
     return list(result.scalars().all())
 
 
