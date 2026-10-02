@@ -67,6 +67,36 @@ def test_selector_contracts_use_the_intended_hooks() -> None:
     assert 'app.querySelector(".flash-alert")' in js
 
 
+def test_billing_report_download_uses_durable_polling_workflow() -> None:
+    js = APP_JS.read_text()
+
+    assert 'api("/api/billing/reports"' in js
+    assert "/api/billing/reports/${encodeURIComponent(report.id)}" in js
+    assert "await waitForPoll(routeAbortController.signal, 1500)" in js
+    assert 'role: "status", "aria-live": "polite"' in js
+    assert "Download ${report.result_filename" in js
+
+
+def test_recent_billing_reports_can_be_recovered_after_reload() -> None:
+    js = APP_JS.read_text()
+
+    assert 'api("/api/billing/reports")' in js
+    assert 'h("h2", {}, "Recent reports")' in js
+    assert "/api/billing/reports/${encodeURIComponent(report.id)}/retry" in js
+
+
+def test_external_billing_delivery_is_queued_without_synchronous_download() -> None:
+    js = APP_JS.read_text()
+
+    assert 'api("/api/billing/run-once", { method: "POST"' in js
+    assert "Delivery queued for ${periodLabel}" in js
+    assert "/api/billing/run-once/download" not in js
+    assert "Generate & deliver now" not in js
+    assert js.count('r.status === "running"') >= 2
+    assert js.count("Billing run queued.") == 2
+    assert 'r.status === "error" ? "error" : "success"' in js
+
+
 def test_kubeconfig_uses_a_native_dialog_with_textarea_content() -> None:
     js = APP_JS.read_text()
 

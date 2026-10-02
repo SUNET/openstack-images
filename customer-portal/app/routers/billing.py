@@ -1,38 +1,44 @@
 """Billing job API endpoints."""
 
 import hmac
-import io
 import json
 import logging
-import zipfile
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
+from uuid import uuid4
 
 from croniter import croniter
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.audit import audit_log
 from app.auth import get_current_user
+from app.billing_report_state import requeue_failed_report
 from app.billing_runner import (
-    encode_billing_csv,
     execute_job,
-    generate_and_deliver,
     get_billing_period,
-    iter_billing_files,
     run_due_jobs,
 )
 from app.config import get_settings
 from app.crypto import encrypt_value
 from app.db import get_session
-from app.models import BillingJob, BillingJobContract, BillingJobRun, Contract, ContractAccess
+from app.models import (
+    BillingJob,
+    BillingJobContract,
+    BillingJobRun,
+    BillingReport,
+    Contract,
+    ContractAccess,
+)
 from app.schemas import (
     SENSITIVE_DELIVERY_KEYS,
     BillingJobResponse,
     BillingJobRunResponse,
+    BillingReportResponse,
     CreateBillingJobRequest,
     ManualRunRequest,
     RunOnceBaseRequest,
@@ -56,6 +62,11 @@ def _mask_config(config_json: str) -> dict:
         if key.lower() in SENSITIVE_DELIVERY_KEYS and config[key]:
             config[key] = "********"
     return config
+
+
+def _report_response(report: BillingReport) -> BillingReportResponse:
+    """Return report metadata without exposing artifact bytes or scope data."""
+    return BillingReportResponse.model_validate(report)
 
 
 def _job_to_response(job: BillingJob) -> BillingJobResponse:
@@ -83,7 +94,7 @@ def _encrypt_delivery_config(config: dict) -> str:
     config = dict(config)
     for key in list(config):
         if key.lower() in SENSITIVE_DELIVERY_KEYS and config[key]:
-            config[key] = encrypt_value(config[key])
+            config[key] = f"fernet:v1:{encrypt_value(config[key])}"
     return json.dumps(config)
 
 
@@ -286,7 +297,7 @@ async def update_job(
                 and encrypted[key]
                 and key not in masked_fields
             ):
-                encrypted[key] = encrypt_value(encrypted[key])
+                encrypted[key] = f"fernet:v1:{encrypt_value(encrypted[key])}"
         job.delivery_config = json.dumps(encrypted)
 
     for field in ("name", "all_contracts", "filename_template", "per_contract", "enabled"):
@@ -376,6 +387,41 @@ async def _resolve_run_once_contracts(
     return [r[0] for r in result]
 
 
+async def _enqueue_report(
+    *,
+    req: RunOnceBaseRequest,
+    user_sub: str,
+    contract_numbers: list[str],
+    session: AsyncSession,
+    delivery_method: str | None = None,
+    delivery_config: str | None = None,
+) -> BillingReport:
+    """Persist a report request without performing generation or delivery."""
+    period_start, period_end = get_billing_period(req.year, req.month)
+    completed_at = (
+        datetime.now(UTC).replace(tzinfo=None) if not contract_numbers else None
+    )
+    report = BillingReport(
+        id=str(uuid4()),
+        requested_by_sub=user_sub,
+        status="succeeded" if completed_at is not None else "queued",
+        billing_period_start=period_start,
+        billing_period_end=period_end,
+        contract_numbers_json=json.dumps(sorted(set(contract_numbers))),
+        filename_template=req.filename_template,
+        per_contract=req.per_contract,
+        delivery_method=delivery_method,
+        delivery_config=delivery_config if completed_at is None else None,
+        progress_current=0,
+        progress_total=0,
+        completed_at=completed_at,
+    )
+    session.add(report)
+    await session.commit()
+    await session.refresh(report)
+    return report
+
+
 def _download_headers(filename: str) -> dict[str, str]:
     """Build a safe Content-Disposition header with Unicode filename support."""
     fallback = filename.encode("ascii", "replace").decode("ascii")
@@ -388,111 +434,165 @@ def _download_headers(filename: str) -> dict[str, str]:
     }
 
 
-@router.post("/run-once/download")
-async def download_run_once(
+async def _owned_report(
+    report_id: str,
+    user: dict[str, Any],
+    session: AsyncSession,
+    *,
+    include_content: bool = False,
+) -> BillingReport:
+    options = [] if include_content else [defer(BillingReport.result_content)]
+    report = await session.get(BillingReport, report_id, options=options)
+    settings = get_settings()
+    if report is None or (
+        report.requested_by_sub != user["sub"]
+        and user["sub"] not in settings.admin_users
+    ):
+        raise HTTPException(status_code=404, detail="Billing report not found")
+    if user["sub"] not in settings.admin_users:
+        contract_numbers = set(json.loads(report.contract_numbers_json))
+        accessible = set(
+            (
+                await session.execute(
+                    select(Contract.contract_number)
+                    .join(ContractAccess)
+                    .where(ContractAccess.user_sub == user["sub"])
+                )
+            ).scalars()
+        )
+        if not contract_numbers.issubset(accessible):
+            raise HTTPException(status_code=404, detail="Billing report not found")
+    return report
+
+
+@router.post("/reports", response_model=BillingReportResponse, status_code=202)
+async def create_report(
     req: RunOnceDownloadRequest,
     user: dict[str, Any] = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Generate an ad-hoc billing export and return it as a direct download."""
+    """Enqueue a durable report and return immediately."""
     settings = get_settings()
-    is_admin = user["sub"] in settings.admin_users
     contract_numbers = await _resolve_run_once_contracts(
-        req, user["sub"], is_admin, session
+        req,
+        user["sub"],
+        user["sub"] in settings.admin_users,
+        session,
     )
-    period_start, period_end = get_billing_period(req.year, req.month)
-
     if not contract_numbers:
-        audit_log(
-            user["sub"],
-            "billing.run_once",
-            files=0,
-            period=period_start.strftime("%Y-%m"),
-            status="empty",
-            delivery="download",
-        )
         raise HTTPException(status_code=400, detail="No contracts available to bill")
-
-    response = None
-    files_generated = 0
-    try:
-        if req.per_contract:
-            archive = io.BytesIO()
-            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
-                async for filename, content in iter_billing_files(
-                    settings,
-                    contract_numbers,
-                    req.filename_template,
-                    True,
-                    period_start,
-                    period_end,
-                ):
-                    output.writestr(filename, encode_billing_csv(content))
-                    files_generated += 1
-            if files_generated:
-                filename = f"billing-{period_start:%Y-%m}.zip"
-                response = Response(
-                    content=archive.getvalue(),
-                    media_type="application/zip",
-                    headers=_download_headers(filename),
-                )
-        else:
-            async for filename, content in iter_billing_files(
-                settings,
-                contract_numbers,
-                req.filename_template,
-                False,
-                period_start,
-                period_end,
-            ):
-                response = Response(
-                    content=encode_billing_csv(content),
-                    media_type="text/csv; charset=utf-8",
-                    headers=_download_headers(filename),
-                )
-                files_generated += 1
-    except Exception as exc:
-        logger.exception("Ad-hoc billing download failed for %s", user["sub"])
-        audit_log(
-            user["sub"],
-            "billing.run_once",
-            period=period_start.strftime("%Y-%m"),
-            status="error",
-            delivery="download",
-        )
-        raise HTTPException(
-            status_code=500, detail="Billing report generation failed"
-        ) from exc
-
-    if response is None:
-        audit_log(
-            user["sub"],
-            "billing.run_once",
-            files=0,
-            period=period_start.strftime("%Y-%m"),
-            status="empty",
-            delivery="download",
-        )
-        raise HTTPException(status_code=404, detail="Billing report is empty")
-
+    report = await _enqueue_report(
+        req=req,
+        user_sub=user["sub"],
+        contract_numbers=contract_numbers,
+        session=session,
+    )
     audit_log(
         user["sub"],
-        "billing.run_once",
-        files=files_generated,
-        period=period_start.strftime("%Y-%m"),
-        status="success",
-        delivery="download",
+        "billing.report.enqueue",
+        report_id=report.id,
+        period=report.billing_period_start.strftime("%Y-%m"),
     )
-    return response
+    return _report_response(report)
 
 
-@router.post("/run-once", response_model=RunOnceResponse)
+@router.get("/reports", response_model=list[BillingReportResponse])
+async def list_reports(
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """List the owner's recent durable reports without loading artifacts."""
+    reports = list(
+        (
+            await session.execute(
+                select(BillingReport)
+                .options(defer(BillingReport.result_content))
+                .where(BillingReport.requested_by_sub == user["sub"])
+                .order_by(BillingReport.created_at.desc(), BillingReport.id.desc())
+                .limit(20)
+            )
+        ).scalars()
+    )
+    settings = get_settings()
+    if user["sub"] in settings.admin_users:
+        return [_report_response(report) for report in reports]
+    accessible = set(
+        (
+            await session.execute(
+                select(Contract.contract_number)
+                .join(ContractAccess)
+                .where(ContractAccess.user_sub == user["sub"])
+            )
+        ).scalars()
+    )
+    return [
+        _report_response(report)
+        for report in reports
+        if set(json.loads(report.contract_numbers_json)).issubset(accessible)
+    ]
+
+
+@router.get("/reports/{report_id}", response_model=BillingReportResponse)
+async def get_report(
+    report_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return durable report progress without artifact content."""
+    return _report_response(await _owned_report(report_id, user, session))
+
+
+@router.post(
+    "/reports/{report_id}/retry",
+    response_model=BillingReportResponse,
+    status_code=202,
+)
+async def retry_report(
+    report_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Retry a failed report without repeating completed external deliveries."""
+    report = await _owned_report(report_id, user, session)
+    if report.status != "failed":
+        raise HTTPException(status_code=409, detail="Billing report is not failed")
+    await requeue_failed_report(session, report)
+    await session.commit()
+    await session.refresh(report)
+    audit_log(user["sub"], "billing.report.retry", report_id=report.id)
+    return _report_response(report)
+
+
+@router.get("/reports/{report_id}/download")
+async def download_report(
+    report_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    """Download a completed, unexpired report artifact."""
+    report = await _owned_report(report_id, user, session, include_content=True)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if report.expires_at is not None and report.expires_at <= now:
+        raise HTTPException(status_code=410, detail="Billing report has expired")
+    if report.status != "succeeded" or report.result_content is None:
+        raise HTTPException(status_code=409, detail="Billing report is not ready")
+    headers = _download_headers(report.result_filename or "billing.csv")
+    headers["Cache-Control"] = "private, no-store"
+    audit_log(user["sub"], "billing.report.download", report_id=report.id)
+    return Response(
+        content=report.result_content,
+        media_type=report.result_media_type or "application/octet-stream",
+        headers=headers,
+    )
+
+
+@router.post("/run-once", response_model=RunOnceResponse, status_code=202)
 async def run_once(
     req: RunOnceRequest,
     user: dict[str, Any] = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    """Generate and deliver a billing export once, without saving a job."""
+    """Validate and enqueue an externally delivered ad-hoc billing report."""
     settings = get_settings()
     is_admin = user["sub"] in settings.admin_users
 
@@ -501,54 +601,26 @@ async def run_once(
         req, user["sub"], is_admin, session
     )
 
-    period_start, period_end = get_billing_period(req.year, req.month)
-
-    if not contract_numbers:
-        audit_log(
-            user["sub"], "billing.run_once",
-            files=0, period=period_start.strftime("%Y-%m"), status="empty",
-        )
-        return RunOnceResponse(
-            status="success",
-            files_delivered=0,
-            billing_period_start=period_start,
-            billing_period_end=period_end,
-        )
-
-    try:
-        files = await generate_and_deliver(
-            settings,
-            contract_numbers,
-            req.delivery_method,
-            normalized_config,
-            req.filename_template,
-            req.per_contract,
-            period_start,
-            period_end,
-        )
-    except Exception as e:
-        logger.exception("Ad-hoc billing run failed for %s", user["sub"])
-        audit_log(
-            user["sub"], "billing.run_once",
-            period=period_start.strftime("%Y-%m"), status="error",
-        )
-        return RunOnceResponse(
-            status="error",
-            files_delivered=0,
-            billing_period_start=period_start,
-            billing_period_end=period_end,
-            error_message=str(e)[:500],
-        )
+    report = await _enqueue_report(
+        req=req,
+        user_sub=user["sub"],
+        contract_numbers=contract_numbers,
+        session=session,
+        delivery_method=req.delivery_method,
+        delivery_config=_encrypt_delivery_config(normalized_config),
+    )
 
     audit_log(
         user["sub"], "billing.run_once",
-        files=files, period=period_start.strftime("%Y-%m"), status="success",
+        report_id=report.id,
+        period=report.billing_period_start.strftime("%Y-%m"),
+        status=report.status,
     )
     return RunOnceResponse(
-        status="success",
-        files_delivered=files,
-        billing_period_start=period_start,
-        billing_period_end=period_end,
+        report_id=report.id,
+        status=report.status,
+        billing_period_start=report.billing_period_start,
+        billing_period_end=report.billing_period_end,
     )
 
 

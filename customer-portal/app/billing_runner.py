@@ -12,6 +12,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
+from typing import Any
+from uuid import uuid4
 
 import httpx
 import openstack
@@ -22,12 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.orm import sessionmaker
 
+from app.billing_report_state import requeue_failed_report
 from app.config import get_settings
 from app.crypto import decrypt_value
 from app.models import (
     BillingJob,
     BillingJobContract,
     BillingJobRun,
+    BillingReport,
     ClusterAddon,
     ClusterRequest,
     Contract,
@@ -43,7 +47,6 @@ logger = logging.getLogger(__name__)
 
 CONTRACT_TAG_PREFIX = "contract:"
 BILLING_GRANULARITY_SECONDS = 3600
-MAX_BILLING_PROJECTS = 1000
 MAX_GNOCCHI_GROUPS_PER_PROJECT = 10000
 MAX_GNOCCHI_MEASURES_PER_GROUP = 20000
 MAX_GNOCCHI_RESPONSE_BYTES = 10 * 1024 * 1024
@@ -60,6 +63,18 @@ BILLING_CSV_HEADER = [
     "Cost",
 ]
 UTF8_BOM = "\ufeff"
+BILLING_INPUT_SNAPSHOT_VERSION = 1
+SYNTHETIC_RESOURCE_TYPES = {
+    "cluster_management_fee",
+    "cluster_management_fee_increment",
+    "cluster_setup_fee",
+    "cluster_addon_fee",
+}
+
+
+def _utc_now() -> datetime:
+    """Return naive UTC for the existing timestamp-without-time-zone schema."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 # The `instance` product is billed from CPU sample presence because Ceilometer
 # does not emit a continuously sampled metric named `instance`.
@@ -122,6 +137,14 @@ CINDER_METRIC_FAMILY_MARKERS = {
 
 class BillingGenerationError(RuntimeError):
     """Raised when a billing report cannot be generated completely."""
+
+
+class GnocchiShardTooLarge(BillingGenerationError):
+    """Raised when a bounded query must be divided into smaller windows."""
+
+
+class GnocchiQueryTimeout(BillingGenerationError):
+    """Raised when a bounded query must be divided or retried."""
 
 
 def _get_cinder_volume_type_names(conn) -> dict[str, str]:
@@ -327,6 +350,8 @@ def _load_prices(sync_session: SyncSession) -> list[ResourcePrice]:
         select(ResourcePrice).order_by(
             ResourcePrice.resource_type,
             ResourcePrice.metadata_field.desc(),  # non-null first
+            ResourcePrice.metadata_value,
+            ResourcePrice.id,
         )
     )
     return list(result.scalars())
@@ -378,6 +403,304 @@ def _load_contract_customers(sync_session: SyncSession) -> dict[str, str]:
         )
     )
     return dict(result.all())
+
+
+def _snapshot_datetime(value: datetime) -> str:
+    """Serialize a database timestamp with an explicit UTC offset."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def serialize_billing_input_snapshot(snapshot: dict[str, Any]) -> str:
+    """Return canonical JSON for an immutable billing input snapshot."""
+
+    def encode(value):
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, datetime):
+            return _snapshot_datetime(value)
+        raise TypeError(f"Unsupported billing snapshot value: {type(value).__name__}")
+
+    return json.dumps(
+        snapshot,
+        default=encode,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def load_billing_input_snapshot(snapshot_json: str) -> dict[str, Any]:
+    """Load and reject snapshot formats this worker cannot interpret."""
+    try:
+        snapshot = json.loads(snapshot_json)
+    except (TypeError, ValueError) as exc:
+        raise BillingGenerationError("Invalid billing input snapshot") from exc
+    if not isinstance(snapshot, dict) or snapshot.get("version") != BILLING_INPUT_SNAPSHOT_VERSION:
+        raise BillingGenerationError("Unsupported billing input snapshot version")
+    return snapshot
+
+
+def _capture_synthetic_facts(
+    sync_session: SyncSession,
+    period_start: datetime,
+    period_end: datetime,
+    contract_id_to_number: dict[int, str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Capture all cluster facts that can produce lines in this period."""
+    clusters = list(
+        sync_session.execute(
+            select(TenantCluster).where(
+                TenantCluster.provisioned_at.is_not(None),
+                TenantCluster.provisioned_at < period_end,
+                TenantCluster.contract_id.in_(contract_id_to_number),
+            )
+        ).scalars()
+    )
+    resize_facts = []
+    future_resize_deltas: dict[int, int] = {}
+    resize_rows = sync_session.execute(
+        select(ClusterRequest, TenantCluster)
+        .join(TenantCluster, TenantCluster.id == ClusterRequest.cluster_id)
+        .where(
+            ClusterRequest.request_type == "resize",
+            ClusterRequest.status == "applied",
+            ClusterRequest.applied_at.is_not(None),
+            ClusterRequest.applied_at >= period_start,
+            TenantCluster.contract_id.in_(contract_id_to_number),
+        )
+    ).all()
+    for request, cluster in sorted(resize_rows, key=lambda item: item[0].id):
+        try:
+            payload = json.loads(request.payload)
+        except (TypeError, ValueError):
+            if request.applied_at >= period_end:
+                raise BillingGenerationError(
+                    f"Cannot reconstruct period-end worker groups for cluster {cluster.slug}"
+                )
+            continue
+        before = payload.get("before_worker_groups")
+        target = payload.get("target_worker_groups")
+        invalid = (
+            isinstance(before, bool)
+            or isinstance(target, bool)
+            or not isinstance(before, int)
+            or not isinstance(target, int)
+            or target <= before
+        )
+        if invalid and request.applied_at >= period_end:
+            raise BillingGenerationError(
+                f"Cannot reconstruct period-end worker groups for cluster {cluster.slug}"
+            )
+        if invalid:
+            continue
+        delta = target - before
+        if request.applied_at >= period_end:
+            future_resize_deltas[cluster.id] = (
+                future_resize_deltas.get(cluster.id, 0) + delta
+            )
+            continue
+        resize_facts.append(
+            {
+                "applied_at": _snapshot_datetime(request.applied_at),
+                "contract_number": contract_id_to_number[cluster.contract_id],
+                "delta_worker_groups": delta,
+                "slug": cluster.slug,
+            }
+        )
+
+    cluster_facts = []
+    for cluster in sorted(clusters, key=lambda item: item.id):
+        period_worker_groups = cluster.worker_groups - future_resize_deltas.get(
+            cluster.id, 0
+        )
+        if period_worker_groups <= 0:
+            raise BillingGenerationError(
+                f"Invalid reconstructed worker groups for cluster {cluster.slug}"
+            )
+        cluster_facts.append(
+            {
+                "contract_number": contract_id_to_number[cluster.contract_id],
+                "initial_worker_groups": cluster.initial_worker_groups,
+                "provisioned_at": _snapshot_datetime(cluster.provisioned_at),
+                "slug": cluster.slug,
+                "worker_groups": period_worker_groups,
+            }
+        )
+
+    addon_rows = sync_session.execute(
+        select(ClusterAddon, TenantCluster)
+        .join(TenantCluster, TenantCluster.id == ClusterAddon.cluster_id)
+        .where(
+            ClusterAddon.enabled_at < period_end,
+            (ClusterAddon.disabled_at.is_(None))
+            | (ClusterAddon.disabled_at > period_start),
+            TenantCluster.contract_id.in_(contract_id_to_number),
+        )
+    ).all()
+    addon_facts = [
+        {
+            "addon_type": addon.addon_type,
+            "contract_number": contract_id_to_number[cluster.contract_id],
+            "disabled_at": (
+                _snapshot_datetime(addon.disabled_at)
+                if addon.disabled_at is not None
+                else None
+            ),
+            "enabled_at": _snapshot_datetime(addon.enabled_at),
+            "slug": cluster.slug,
+        }
+        for addon, cluster in sorted(addon_rows, key=lambda item: item[0].id)
+    ]
+    return {"addons": addon_facts, "clusters": cluster_facts, "resizes": resize_facts}
+
+
+def capture_billing_input_snapshot(
+    sync_session: SyncSession,
+    conn,
+    contract_numbers: list[str],
+    period_start: datetime,
+    period_end: datetime,
+    *,
+    filename_template: str = "billing-{year}-{month}.csv",
+    per_contract: bool = False,
+) -> dict[str, Any]:
+    """Capture every mutable input needed to query and render a report."""
+    captured_at = datetime.now(UTC)
+    selected_numbers = sorted(set(contract_numbers))
+    contract_ids = _load_contract_ids(sync_session)
+    contract_customers = _load_contract_customers(sync_session)
+    missing = [
+        number
+        for number in selected_numbers
+        if number not in contract_ids or number not in contract_customers
+    ]
+    if missing:
+        raise BillingGenerationError(f"Unknown billing contracts: {', '.join(missing)}")
+
+    contracts = [
+        {
+            "customer_name": contract_customers[number],
+            "id": contract_ids[number],
+            "number": number,
+        }
+        for number in selected_numbers
+    ]
+    selected_ids = {contract["id"] for contract in contracts}
+    contract_id_to_number = {contract["id"]: contract["number"] for contract in contracts}
+
+    prices = _load_prices(sync_session)
+    price_facts = [
+        {
+            "metadata_field": price.metadata_field,
+            "metadata_value": price.metadata_value,
+            "resource_type": price.resource_type,
+            "unit": price.unit,
+            "unit_price": str(price.unit_price),
+        }
+        for price in prices
+    ]
+    all_overrides = _load_contract_overrides(sync_session)
+    override_facts = [
+        {
+            "contract_number": contract_id_to_number[contract_id],
+            "resource_type": resource_type,
+            "unit_price": str(unit_price),
+        }
+        for contract_id in sorted(selected_ids)
+        for resource_type, unit_price in sorted(all_overrides.get(contract_id, {}).items())
+    ]
+    all_rebates = _load_rebates(sync_session)
+    rebate_facts = [
+        {
+            "contract_number": contract_id_to_number[contract_id],
+            "rebate_percent": str(all_rebates[contract_id]),
+        }
+        for contract_id in sorted(selected_ids)
+        if contract_id in all_rebates
+    ]
+
+    metric_fields: dict[str, set[str]] = {}
+    for price in price_facts:
+        metric_fields.setdefault(price["resource_type"], set())
+        if price["metadata_field"]:
+            metric_fields[price["resource_type"]].add(price["metadata_field"])
+    for override in override_facts:
+        metric_fields.setdefault(override["resource_type"], set())
+
+    query_plan = []
+    for metric in metric_fields:
+        if metric in SYNTHETIC_RESOURCE_TYPES:
+            continue
+        product = GNOCCHI_PRODUCT_REGISTRY.get(metric)
+        if product is None:
+            raise BillingGenerationError(
+                f"Unsupported metered billing resource type: {metric}"
+            )
+        query_plan.append(
+            {
+                "aggregation": product["aggregation"],
+                "metadata_fields": sorted(
+                    metric_fields[metric] | set(product["metadata_fields"])
+                ),
+                "metric": metric,
+                "resource_type": product["resource_type"],
+                "size_gb_scale": (
+                    str(product["size_gb_scale"])
+                    if product["size_gb_scale"] is not None
+                    else None
+                ),
+                "source_metric": product["source_metric"],
+                "unit": product["unit"],
+            }
+        )
+
+    project_contracts = _get_project_contracts(conn)
+    projects = sorted(
+        (
+            {"contract_number": contract, "id": project_id, "name": name}
+            for project_id, (name, contract) in project_contracts.items()
+            if contract in set(selected_numbers)
+        ),
+        key=lambda item: item["id"],
+    )
+    cinder_volume_types = (
+        dict(sorted(_get_cinder_volume_type_names(conn).items()))
+        if any(plan["metric"] == "volume.size" for plan in query_plan)
+        else {}
+    )
+    synthetic_facts = _capture_synthetic_facts(
+        sync_session,
+        period_start,
+        period_end,
+        contract_id_to_number,
+    )
+    return {
+        "artifact": {
+            "filename_template": filename_template,
+            "per_contract": per_contract,
+        },
+        "cinder_volume_types": cinder_volume_types,
+        "contracts": contracts,
+        "filename_variables": {
+            "date": captured_at.strftime("%Y-%m-%d"),
+            "day": f"{captured_at.day:02d}",
+            "month": f"{period_start.month:02d}",
+            "year": f"{period_start.year:04d}",
+        },
+        "period": {
+            "end": _snapshot_datetime(period_end),
+            "start": _snapshot_datetime(period_start),
+        },
+        "prices": price_facts,
+        "projects": projects,
+        "query_plan": query_plan,
+        "rebates": rebate_facts,
+        "synthetic": synthetic_facts,
+        "overrides": override_facts,
+        "version": BILLING_INPUT_SNAPSHOT_VERSION,
+    }
 
 
 def _price_after_override_and_rebate(
@@ -780,6 +1103,7 @@ def _query_gnocchi_usage(
     groupby_fields: list[str],
     project_ids: list[str],
     aggregate_across_resources: bool = False,
+    normalization_period_seconds: Decimal | None = None,
 ) -> list[dict]:
     """Query history-aware usage and roll it up for pricing.
 
@@ -799,17 +1123,15 @@ def _query_gnocchi_usage(
 
     requested_project_id: str | None = None
     try:
-        if len(project_ids) > MAX_BILLING_PROJECTS:
-            raise BillingGenerationError(
-                f"Billing scope has {len(project_ids)} projects; maximum is {MAX_BILLING_PROJECTS}"
-            )
-
         results_by_group: dict[tuple, dict] = {}
         begin_utc = begin.replace(tzinfo=UTC) if begin.tzinfo is None else begin.astimezone(UTC)
         end_utc = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
-        period_seconds = Decimal(str((end_utc - begin_utc).total_seconds()))
-        if period_seconds <= 0:
+        query_period_seconds = Decimal(str((end_utc - begin_utc).total_seconds()))
+        if query_period_seconds <= 0:
             raise BillingGenerationError("Billing period must have positive duration")
+        period_seconds = normalization_period_seconds or query_period_seconds
+        if period_seconds <= 0:
+            raise BillingGenerationError("Billing normalization period must be positive")
 
         metadata_fields = [
             field
@@ -870,7 +1192,7 @@ def _query_gnocchi_usage(
 
             response_content = getattr(resp, "content", b"")
             if len(response_content) > MAX_GNOCCHI_RESPONSE_BYTES:
-                raise BillingGenerationError(
+                raise GnocchiShardTooLarge(
                     f"Gnocchi response for {resource_type}/{metric_name} exceeds "
                     f"{MAX_GNOCCHI_RESPONSE_BYTES} bytes"
                 )
@@ -940,7 +1262,7 @@ def _query_gnocchi_usage(
                         f"Invalid Gnocchi measures for {resource_type}/{metric_name}"
                     )
                 if len(measures) > MAX_GNOCCHI_MEASURES_PER_GROUP:
-                    raise BillingGenerationError(
+                    raise GnocchiShardTooLarge(
                         f"Gnocchi returned too many measures for {resource_type}/{metric_name}"
                     )
                 if not measures:
@@ -1053,7 +1375,7 @@ def _query_gnocchi_usage(
             metric_name,
             project_context,
         )
-        raise BillingGenerationError(
+        raise GnocchiQueryTimeout(
             f"Timed out querying Gnocchi for {resource_type}/{metric_name}{project_context}"
         ) from exc
     except Exception as exc:
@@ -1063,6 +1385,318 @@ def _query_gnocchi_usage(
         ) from exc
 
 
+def _snapshot_price(
+    prices: list[dict[str, Any]], metric: str, metadata: dict[str, str]
+) -> dict[str, Any] | None:
+    base_match = None
+    for price in prices:
+        if price["resource_type"] != metric:
+            continue
+        field = price["metadata_field"]
+        value = price["metadata_value"]
+        if field and value:
+            if metadata.get(field) == value:
+                return price
+        elif not field:
+            base_match = price
+    return base_match
+
+
+def _snapshot_unit_price(
+    snapshot: dict[str, Any],
+    contract_number: str,
+    resource_type: str,
+    base_price: Decimal,
+) -> Decimal:
+    unit_price = base_price
+    for override in snapshot["overrides"]:
+        if (
+            override["contract_number"] == contract_number
+            and override["resource_type"] == resource_type
+        ):
+            unit_price = Decimal(override["unit_price"])
+            break
+    for rebate in snapshot["rebates"]:
+        if rebate["contract_number"] == contract_number:
+            unit_price *= 1 - Decimal(rebate["rebate_percent"]) / 100
+            break
+    return unit_price
+
+
+def _snapshot_management_fee(
+    prices: list[dict[str, Any]], worker_groups: int
+) -> tuple[Decimal, str]:
+    package_prices = sorted(
+        (
+            (int(price["metadata_value"]), price)
+            for price in prices
+            if price["resource_type"] == "cluster_management_fee"
+            and price["metadata_field"] == "worker_groups"
+            and price["metadata_value"] is not None
+            and price["metadata_value"].isdecimal()
+        ),
+        key=lambda item: item[0],
+    )
+    if not package_prices:
+        raise BillingGenerationError("No managed-cluster package prices configured")
+    for package_worker_groups, price in package_prices:
+        if worker_groups == package_worker_groups:
+            return Decimal(price["unit_price"]), price["unit"]
+    largest_worker_groups, largest_package = package_prices[-1]
+    if worker_groups < package_prices[0][0]:
+        raise BillingGenerationError(
+            f"No managed-cluster package price for {worker_groups} worker groups"
+        )
+    increment = _snapshot_price(prices, "cluster_management_fee_increment", {})
+    if increment is None:
+        raise BillingGenerationError("No managed-cluster package increment configured")
+    return (
+        Decimal(largest_package["unit_price"])
+        + (worker_groups - largest_worker_groups) * Decimal(increment["unit_price"]),
+        largest_package["unit"],
+    )
+
+
+def _render_snapshot_synthetic_lines(
+    snapshot: dict[str, Any], contract_set: set[str], writer
+) -> None:
+    contracts = {item["number"]: item for item in snapshot["contracts"]}
+    prices = snapshot["prices"]
+    period_start = datetime.fromisoformat(snapshot["period"]["start"])
+    period_end = datetime.fromisoformat(snapshot["period"]["end"])
+
+    for cluster in snapshot["synthetic"]["clusters"]:
+        contract_number = cluster["contract_number"]
+        if contract_number not in contract_set:
+            continue
+        customer_name = contracts[contract_number]["customer_name"]
+        project_label = f"managed-cluster:{cluster['slug']}"
+        management_fee, management_unit = _snapshot_management_fee(
+            prices, cluster["worker_groups"]
+        )
+        unit_price = _snapshot_unit_price(
+            snapshot,
+            contract_number,
+            "cluster_management_fee",
+            management_fee,
+        )
+        writer.writerow(
+            [
+                customer_name,
+                contract_number,
+                project_label,
+                "Cluster management fee",
+                "1",
+                management_unit,
+                round(unit_price),
+            ]
+        )
+
+        provisioned_at = datetime.fromisoformat(cluster["provisioned_at"])
+        if period_start <= provisioned_at < period_end:
+            controller = _snapshot_price(
+                prices, "cluster_setup_fee", {"group_type": "controllers"}
+            )
+            if controller is not None:
+                unit_price = _snapshot_unit_price(
+                    snapshot,
+                    contract_number,
+                    "cluster_setup_fee",
+                    Decimal(controller["unit_price"]),
+                )
+                writer.writerow(
+                    [
+                        customer_name,
+                        contract_number,
+                        project_label,
+                        "Controller setup fee",
+                        "1",
+                        controller["unit"],
+                        round(unit_price),
+                    ]
+                )
+            workers = _snapshot_price(
+                prices, "cluster_setup_fee", {"group_type": "workers"}
+            )
+            initial_groups = cluster["initial_worker_groups"]
+            if workers is not None and initial_groups > 0:
+                quantity = Decimal(initial_groups)
+                unit_price = _snapshot_unit_price(
+                    snapshot,
+                    contract_number,
+                    "cluster_setup_fee",
+                    Decimal(workers["unit_price"]),
+                )
+                writer.writerow(
+                    [
+                        customer_name,
+                        contract_number,
+                        project_label,
+                        f"Worker setup fee (initial, {initial_groups} groups)",
+                        f"{quantity:.0f}",
+                        workers["unit"],
+                        round(quantity * unit_price),
+                    ]
+                )
+
+    workers = _snapshot_price(
+        prices, "cluster_setup_fee", {"group_type": "workers"}
+    )
+    if workers is not None:
+        for resize in snapshot["synthetic"]["resizes"]:
+            contract_number = resize["contract_number"]
+            if contract_number not in contract_set:
+                continue
+            quantity = Decimal(resize["delta_worker_groups"])
+            unit_price = _snapshot_unit_price(
+                snapshot,
+                contract_number,
+                "cluster_setup_fee",
+                Decimal(workers["unit_price"]),
+            )
+            writer.writerow(
+                [
+                    contracts[contract_number]["customer_name"],
+                    contract_number,
+                    f"managed-cluster:{resize['slug']}",
+                    f"Worker setup fee (expansion, +{int(quantity)} groups)",
+                    f"{quantity:.0f}",
+                    workers["unit"],
+                    round(quantity * unit_price),
+                ]
+            )
+
+    for addon in snapshot["synthetic"]["addons"]:
+        contract_number = addon["contract_number"]
+        if contract_number not in contract_set:
+            continue
+        price = _snapshot_price(
+            prices, "cluster_addon_fee", {"addon": addon["addon_type"]}
+        )
+        if price is None:
+            continue
+        unit_price = _snapshot_unit_price(
+            snapshot,
+            contract_number,
+            "cluster_addon_fee",
+            Decimal(price["unit_price"]),
+        )
+        writer.writerow(
+            [
+                contracts[contract_number]["customer_name"],
+                contract_number,
+                f"managed-cluster:{addon['slug']}",
+                f"Addon: {addon['addon_type']}",
+                "1",
+                price["unit"],
+                round(unit_price),
+            ]
+        )
+
+
+def render_billing_csv(
+    snapshot: dict[str, Any],
+    usage_by_metric: dict[str, list[dict]],
+    contract_numbers: list[str] | None = None,
+    delimiter: str = ";",
+) -> str:
+    """Render CSV using only immutable inputs and precomputed usage."""
+    if snapshot.get("version") != BILLING_INPUT_SNAPSHOT_VERSION:
+        raise BillingGenerationError("Unsupported billing input snapshot version")
+    available_contracts = {item["number"]: item for item in snapshot["contracts"]}
+    contract_set = (
+        set(available_contracts)
+        if contract_numbers is None
+        else set(contract_numbers)
+    )
+    if not contract_set.issubset(available_contracts):
+        raise BillingGenerationError("Rendered contracts are not present in snapshot")
+    projects = {item["id"]: item for item in snapshot["projects"]}
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    for product in snapshot["query_plan"]:
+        metric = product["metric"]
+        usage = usage_by_metric.get(metric, [])
+        if metric == "volume.size" and usage:
+            usage = _canonicalize_volume_usage(
+                usage, snapshot["cinder_volume_types"]
+            )
+        for entry in usage:
+            project = projects.get(entry["project_id"])
+            if project is None or project["contract_number"] not in contract_set:
+                continue
+            contract_number = project["contract_number"]
+            metadata = dict(entry.get("metadata", {}))
+            price = _snapshot_price(snapshot["prices"], metric, metadata)
+            if price is None:
+                raise BillingGenerationError(
+                    f"No price for project {project['name']}, product {metric}, "
+                    f"metadata {metadata}"
+                )
+            if product["size_gb_scale"] is not None:
+                quantity = Decimal(str(entry["size_months"])) * Decimal(
+                    product["size_gb_scale"]
+                )
+            else:
+                quantity = Decimal(str(entry["hours"]))
+            unit_price = _snapshot_unit_price(
+                snapshot,
+                contract_number,
+                metric,
+                Decimal(price["unit_price"]),
+            )
+            label = metric
+            if metadata:
+                label = f"{metric} ({', '.join(str(value) for value in metadata.values())})"
+            writer.writerow(
+                [
+                    available_contracts[contract_number]["customer_name"],
+                    contract_number,
+                    project["name"],
+                    label,
+                    f"{quantity:.2f}",
+                    price["unit"],
+                    round(quantity * unit_price),
+                ]
+            )
+
+    _render_snapshot_synthetic_lines(snapshot, contract_set, writer)
+    data_rows = output.getvalue()
+    if not data_rows:
+        return ""
+    report = io.StringIO()
+    report_writer = csv.writer(report, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+    report_writer.writerow(BILLING_CSV_HEADER)
+    report.write(data_rows)
+    return UTF8_BOM + report.getvalue()
+
+
+def query_billing_snapshot_usage(
+    conn,
+    snapshot: dict[str, Any],
+) -> dict[str, list[dict]]:
+    """Execute the frozen query plan for the frozen project scope."""
+    begin = datetime.fromisoformat(snapshot["period"]["start"])
+    end = datetime.fromisoformat(snapshot["period"]["end"])
+    project_ids = [project["id"] for project in snapshot["projects"]]
+    return {
+        product["metric"]: _query_gnocchi_usage(
+            conn,
+            begin,
+            end,
+            product["resource_type"],
+            product["source_metric"],
+            product["metadata_fields"],
+            project_ids,
+            aggregate_across_resources=(
+                product["aggregation"] == "additive_size"
+            ),
+        )
+        for product in snapshot["query_plan"]
+    }
+
+
 def generate_billing_csv(
     db_url: str,
     cloud_name: str,
@@ -1070,8 +1704,9 @@ def generate_billing_csv(
     period_start: datetime,
     period_end: datetime,
     delimiter: str = ";",
+    precomputed_usage: dict[str, list[dict]] | None = None,
 ) -> str:
-    """Generate billing CSV for the given contracts and period. Runs synchronously."""
+    """Capture live inputs, query usage, and render a billing CSV synchronously."""
     sync_url = db_url.replace("+asyncpg", "")
     if sync_url.startswith("postgresql://"):
         sync_url = sync_url.replace("postgresql://", "postgresql+psycopg2://", 1)
@@ -1081,157 +1716,20 @@ def generate_billing_csv(
     db = session_factory()
 
     try:
-        # Load prices from DB
-        prices = _load_prices(db)
-        contract_overrides = _load_contract_overrides(db)
-        rebates = _load_rebates(db)
-        contract_id_map = _load_contract_ids(db)
-        contract_customer_map = _load_contract_customers(db)
-
-        # Determine which metric types to query, and their metadata fields
-        # Group prices by resource_type to find which metadata fields are used
-        metric_metadata_fields: dict[str, set[str]] = {}
-        for p in prices:
-            if p.resource_type not in metric_metadata_fields:
-                metric_metadata_fields[p.resource_type] = set()
-            if p.metadata_field:
-                metric_metadata_fields[p.resource_type].add(p.metadata_field)
-
-        # Also include metrics from contract overrides
-        for overrides in contract_overrides.values():
-            for rt in overrides:
-                if rt not in metric_metadata_fields:
-                    metric_metadata_fields[rt] = set()
-
         conn = openstack.connect(cloud=cloud_name)
-        project_contracts = _get_project_contracts(conn)
-        contract_set = set(contract_numbers)
-        project_ids = [
-            project_id
-            for project_id, (_, contract_number) in project_contracts.items()
-            if contract_number in contract_set
-        ]
-
-        # These are computed from the DB by _emit_synthetic_cluster_lines,
-        # not metered by Gnocchi; querying them only yields 404s.
-        SYNTHETIC_RESOURCE_TYPES = {
-            "cluster_management_fee",
-            "cluster_management_fee_increment",
-            "cluster_setup_fee",
-            "cluster_addon_fee",
-        }
-
-        output = io.StringIO()
-        writer = csv.writer(output, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
-        volume_type_names = None
-
-        for metric, meta_fields in metric_metadata_fields.items():
-            if metric in SYNTHETIC_RESOURCE_TYPES:
-                continue
-            product = GNOCCHI_PRODUCT_REGISTRY.get(metric)
-            if product is None:
-                raise BillingGenerationError(
-                    f"Unsupported metered billing resource type: {metric}"
-                )
-            resource_type = product["resource_type"]
-            source_metric = product["source_metric"]
-            groupby = sorted(set(meta_fields) | set(product["metadata_fields"]))
-
-            usage = _query_gnocchi_usage(
-                conn,
-                period_start,
-                period_end,
-                resource_type,
-                source_metric,
-                groupby,
-                project_ids,
-                aggregate_across_resources=product["aggregation"] == "additive_size",
-            )
-            if metric == "volume.size" and usage and volume_type_names is None:
-                volume_type_names = _get_cinder_volume_type_names(conn)
-            if metric == "volume.size" and usage:
-                usage = _canonicalize_volume_usage(usage, volume_type_names)
-
-            for entry in usage:
-                pid = entry["project_id"]
-                if pid not in project_contracts:
-                    continue
-                project_name, cn = project_contracts[pid]
-                if cn not in contract_set:
-                    continue
-                customer_name = contract_customer_map.get(cn)
-                if customer_name is None:
-                    raise BillingGenerationError(f"No customer found for contract {cn}")
-
-                metadata = dict(entry.get("metadata", {}))
-
-                # Find the best matching price (specific metadata > base)
-                price = _find_price(prices, metric, metadata)
-                if not price:
-                    raise BillingGenerationError(
-                        f"No price for project {project_name}, product {metric}, "
-                        f"metadata {metadata}"
-                    )
-
-                unit = price.unit
-                if product["size_gb_scale"] is not None:
-                    quantity = Decimal(str(entry["size_months"])) * product["size_gb_scale"]
-                else:
-                    quantity = Decimal(str(entry["hours"]))
-
-                # Determine unit_price: contract override > global
-                contract_id = contract_id_map.get(cn)
-                unit_price = price.unit_price
-                if contract_id and contract_id in contract_overrides:
-                    override_price = contract_overrides[contract_id].get(metric, None)
-                    if override_price is not None:
-                        unit_price = override_price
-
-                cost = quantity * unit_price
-                if contract_id and contract_id in rebates:
-                    cost = cost * (1 - rebates[contract_id] / 100)
-
-                # Label includes metadata if present (e.g. "instance (b2.c4r8)")
-                label = metric
-                if metadata:
-                    meta_str = ", ".join(f"{v}" for v in metadata.values())
-                    label = f"{metric} ({meta_str})"
-
-                writer.writerow(
-                    [
-                        customer_name,
-                        cn,
-                        project_name,
-                        label,
-                        f"{quantity:.2f}",
-                        unit,
-                        round(cost),
-                    ]
-                )
-
-        # Synthetic cluster billing lines (management fee, setup fees, addons).
-        _emit_synthetic_cluster_lines(
+        snapshot = capture_billing_input_snapshot(
             db,
+            conn,
+            contract_numbers,
             period_start,
             period_end,
-            contract_set,
-            prices,
-            contract_overrides,
-            rebates,
-            contract_id_map,
-            contract_customer_map,
-            writer,
         )
-
-        data_rows = output.getvalue()
-        if not data_rows:
-            return ""
-
-        report = io.StringIO()
-        report_writer = csv.writer(report, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
-        report_writer.writerow(BILLING_CSV_HEADER)
-        report.write(data_rows)
-        return UTF8_BOM + report.getvalue()
+        usage = (
+            query_billing_snapshot_usage(conn, snapshot)
+            if precomputed_usage is None
+            else precomputed_usage
+        )
+        return render_billing_csv(snapshot, usage, contract_numbers, delimiter)
     finally:
         db.close()
         engine.dispose()
@@ -1262,6 +1760,9 @@ async def deliver_webdav(
     url: str, username: str, password: str, filename: str, content: str
 ) -> None:
     """Upload a file to a WebDAV endpoint.
+
+    Durable retries PUT the same filename, so retrying replaces the same remote
+    resource rather than creating another delivery.
 
     Re-runs the SSRF allowlist check at delivery time as defence-in-depth
     against jobs whose stored URL pre-dates a tightened allowlist or whose
@@ -1299,7 +1800,11 @@ async def deliver_webdav(
 
 
 async def deliver_email(recipient: str, subject: str, filename: str, content: str) -> None:
-    """Send a billing CSV as an email attachment."""
+    """Send a billing CSV as an at-least-once email attachment.
+
+    SMTP acceptance and the caller's durable sent checkpoint cannot be one
+    transaction. A crash between them can therefore cause a duplicate send.
+    """
     settings = get_settings()
     if not settings.smtp_host:
         raise RuntimeError("SMTP not configured")
@@ -1342,13 +1847,21 @@ async def deliver_email(recipient: str, subject: str, filename: str, content: st
 
 
 def _decrypt_config(delivery_config_json: str) -> dict:
-    """Parse delivery config JSON and decrypt any encrypted password."""
+    """Parse delivery config JSON and fail closed for invalid ciphertext."""
     config = json.loads(delivery_config_json)
     if "password" in config and config["password"]:
+        password = config["password"]
+        encrypted = password.startswith("fernet:v1:") or password.startswith("gAAAA")
+        if not encrypted:
+            logger.warning("Using legacy plaintext billing delivery password")
+            return config
+        ciphertext = password.removeprefix("fernet:v1:")
         try:
-            config["password"] = decrypt_value(config["password"])
-        except Exception:
-            logger.warning("Failed to decrypt password, using as-is")
+            config["password"] = decrypt_value(ciphertext)
+        except Exception as exc:
+            raise BillingGenerationError(
+                "Unable to decrypt billing delivery credentials"
+            ) from exc
     return config
 
 
@@ -1471,10 +1984,38 @@ async def execute_job(
     year: int | None = None,
     month: int | None = None,
 ) -> BillingJobRun:
-    """Execute a billing job: generate CSV(s) and deliver."""
+    """Create an active run and enqueue its frozen durable report."""
     settings = get_settings()
     period_start, period_end = get_billing_period(year, month)
     job_id = job.id
+
+    failed_run = (
+        await session.execute(
+            select(BillingJobRun)
+            .where(
+                BillingJobRun.billing_job_id == job_id,
+                BillingJobRun.billing_period_start == period_start,
+                BillingJobRun.billing_period_end == period_end,
+                BillingJobRun.status == "error",
+            )
+            .order_by(BillingJobRun.started_at.desc(), BillingJobRun.id.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if failed_run is not None:
+        failed_report = (
+            await session.execute(
+                select(BillingReport).where(
+                    BillingReport.billing_job_run_id == failed_run.id,
+                    BillingReport.status == "failed",
+                )
+            )
+        ).scalars().first()
+        if failed_report is not None:
+            await requeue_failed_report(session, failed_report)
+            await session.commit()
+            await session.refresh(failed_run)
+            return failed_run
 
     run = BillingJobRun(
         billing_job_id=job_id,
@@ -1484,7 +2025,7 @@ async def execute_job(
     )
     session.add(run)
     try:
-        await session.commit()
+        await session.flush()
     except IntegrityError:
         await session.rollback()
         existing = await session.execute(
@@ -1506,55 +2047,80 @@ async def execute_job(
             period_end,
         )
         return active_run
-    await session.refresh(run)
 
-    try:
-        # Resolve contracts (sync query in thread)
-        sync_url = settings.database_url.replace("+asyncpg", "")
-        if sync_url.startswith("postgresql://"):
-            sync_url = sync_url.replace("postgresql://", "postgresql+psycopg2://", 1)
-        engine = create_engine(sync_url)
-        sf = sessionmaker(bind=engine)
-
-        def _resolve():
-            db = sf()
-            try:
-                return resolve_contract_numbers(db, job, settings.admin_users)
-            finally:
-                db.close()
-
-        contract_numbers = await asyncio.to_thread(_resolve)
-        engine.dispose()
-
-        if not contract_numbers:
-            run.status = "success"
-            run.completed_at = datetime.utcnow()
-            run.files_delivered = 0
-            await session.commit()
-            return run
-
-        config = _decrypt_config(job.delivery_config)
-        files_delivered = await generate_and_deliver(
-            settings,
-            contract_numbers,
-            job.delivery_method,
-            config,
-            job.filename_template,
-            job.per_contract,
-            period_start,
-            period_end,
+    if job.all_contracts:
+        if job.owner_sub in settings.admin_users:
+            contract_numbers = list(
+                (await session.execute(select(Contract.contract_number))).scalars()
+            )
+        else:
+            contract_numbers = list(
+                (
+                    await session.execute(
+                        select(Contract.contract_number)
+                        .join(ContractAccess)
+                        .where(ContractAccess.user_sub == job.owner_sub)
+                    )
+                ).scalars()
+            )
+    else:
+        selected_contracts = select(Contract.contract_number).join(
+            BillingJobContract,
+            BillingJobContract.contract_id == Contract.id,
+        )
+        if job.owner_sub not in settings.admin_users:
+            selected_contracts = selected_contracts.join(ContractAccess).where(
+                ContractAccess.user_sub == job.owner_sub
+            )
+        contract_numbers = list(
+            (
+                await session.execute(
+                    selected_contracts.where(
+                        BillingJobContract.billing_job_id == job_id
+                    )
+                )
+            ).scalars()
         )
 
+    completed_at = _utc_now() if not contract_numbers else None
+    if completed_at is not None:
         run.status = "success"
-        run.files_delivered = files_delivered
-
-    except Exception as e:
-        logger.exception("Billing job %d failed", job_id)
-        run.status = "error"
-        run.error_message = str(e)[:500]
-
-    run.completed_at = datetime.utcnow()
-    await session.commit()
+        run.completed_at = completed_at
+        run.files_delivered = 0
+    report = BillingReport(
+        id=str(uuid4()),
+        billing_job_run_id=run.id,
+        requested_by_sub=job.owner_sub,
+        status="succeeded" if completed_at is not None else "queued",
+        billing_period_start=period_start,
+        billing_period_end=period_end,
+        contract_numbers_json=json.dumps(sorted(set(contract_numbers))),
+        filename_template=job.filename_template,
+        per_contract=job.per_contract,
+        delivery_method=job.delivery_method,
+        delivery_config=job.delivery_config if completed_at is None else None,
+        progress_current=0,
+        progress_total=0,
+        completed_at=completed_at,
+    )
+    session.add(report)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = await session.execute(
+            select(BillingJobRun).where(
+                BillingJobRun.billing_job_id == job_id,
+                BillingJobRun.billing_period_start == period_start,
+                BillingJobRun.billing_period_end == period_end,
+                BillingJobRun.status == "running",
+            )
+        )
+        active_run = existing.scalars().first()
+        if active_run is None:
+            raise
+        return active_run
+    await session.refresh(run)
     return run
 
 
@@ -1587,8 +2153,8 @@ def should_run_now(schedule: str, now: datetime, window_minutes: int = 15) -> bo
 
 
 async def run_due_jobs(session: AsyncSession) -> list[BillingJobRun]:
-    """Find and execute all billing jobs that are due now."""
-    now = datetime.utcnow()
+    """Find due billing jobs and enqueue their durable reports."""
+    now = _utc_now()
     result = await session.execute(
         select(BillingJob).where(BillingJob.enabled == True)  # noqa: E712
     )
@@ -1613,7 +2179,7 @@ async def run_due_jobs(session: AsyncSession) -> list[BillingJobRun]:
         if existing.scalars().first() is not None:
             continue
 
-        logger.info("Executing due billing job %d: %s", job.id, job.name)
+        logger.info("Enqueueing due billing job %d: %s", job.id, job.name)
         run = await execute_job(session, job)
         runs.append(run)
 

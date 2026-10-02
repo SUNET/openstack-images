@@ -399,3 +399,67 @@ def test_new_tables_have_model_compatible_columns_defaults_keys_and_queue_index(
                     if column["name"] == "baseline")["default"] == "'{}'::text"
     finally:
         engine.dispose()
+
+
+def test_upgrade_016_to_017_creates_durable_billing_report_queue(
+    gitops_database: GitOpsDatabase,
+) -> None:
+    gitops_database.migrate("016")
+    gitops_database.migrate("017")
+    engine = create_engine(gitops_database.sync_url)
+    try:
+        inspector = inspect(engine)
+        assert "billing_report" in inspector.get_table_names()
+        assert "billing_report_shard" in inspector.get_table_names()
+        assert {column["name"] for column in inspector.get_columns("billing_report")} >= {
+            "contract_numbers_json",
+            "input_snapshot_json",
+            "progress_current",
+            "result_content",
+            "result_sha256",
+            "expires_at",
+        }
+        index_names = {
+            index["name"] for index in inspector.get_indexes("billing_report_shard")
+        }
+        assert "ix_billing_report_shard_pending" in index_names
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO billing_report (
+                        id, requested_by_sub, status, billing_period_start,
+                        billing_period_end, contract_numbers_json,
+                        filename_template, per_contract,
+                        progress_current, progress_total
+                    ) VALUES (
+                        'report-1', 'admin@test', 'queued',
+                        '2026-09-01', '2026-10-01', '[\"CO-001\"]',
+                        'billing.csv', false, 0, 1
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO billing_report_shard (
+                        report_id, metric, project_id, window_start,
+                        window_end, status
+                    ) VALUES (
+                        'report-1', 'volume.size', 'project-1',
+                        '2026-09-01', '2026-09-08', 'pending'
+                    )
+                    """
+                )
+            )
+            connection.execute(text("DELETE FROM billing_report WHERE id = 'report-1'"))
+            remaining = connection.scalar(
+                text(
+                    "SELECT count(*) FROM billing_report_shard "
+                    "WHERE report_id = 'report-1'"
+                )
+            )
+            assert remaining == 0
+    finally:
+        engine.dispose()

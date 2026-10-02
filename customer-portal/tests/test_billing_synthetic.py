@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.billing_runner import (
+    _capture_synthetic_facts,
     _cluster_management_fee,
     _emit_synthetic_cluster_lines,
     _load_prices,
@@ -439,3 +440,45 @@ def test_unprovisioned_cluster_not_billed(sync_session):
 
     lines = _emit(s, datetime(2026, 4, 1), datetime(2026, 5, 1), {"CO-001"})
     assert lines == []
+
+
+def test_snapshot_reconstructs_worker_groups_at_period_end(sync_session):
+    _, contract = _seed_customer_contract(sync_session)
+    cluster = TenantCluster(
+        contract_id=contract.id,
+        name="Acme prod",
+        slug="acme-prod",
+        api_url="https://x",
+        ca_bundle="dummy",
+        openbao_mount="kubernetes/tenant-acme-prod",
+        worker_groups=4,
+        initial_worker_groups=2,
+        provisioned_at=datetime(2026, 1, 5),
+        created_by_sub="admin@test",
+    )
+    sync_session.add(cluster)
+    sync_session.flush()
+    sync_session.add(
+        ClusterRequest(
+            cluster_id=cluster.id,
+            request_type="resize",
+            payload=json.dumps(
+                {"target_worker_groups": 4, "before_worker_groups": 2}
+            ),
+            status="applied",
+            requested_by_sub="admin@test",
+            applied_by_sub="admin@test",
+            applied_at=datetime(2026, 6, 12),
+        )
+    )
+    sync_session.commit()
+
+    facts = _capture_synthetic_facts(
+        sync_session,
+        datetime(2026, 4, 1),
+        datetime(2026, 5, 1),
+        {contract.id: contract.contract_number},
+    )
+
+    assert facts["clusters"][0]["worker_groups"] == 2
+    assert facts["resizes"] == []

@@ -4,10 +4,13 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -197,6 +200,135 @@ class BillingJobRun(Base):
     files_delivered: Mapped[int] = mapped_column(default=0)
 
     billing_job: Mapped["BillingJob"] = relationship(back_populates="runs")
+    report: Mapped["BillingReport | None"] = relationship(
+        back_populates="billing_job_run", uselist=False, passive_deletes=True
+    )
+
+
+class BillingReport(Base):
+    """Durable asynchronous billing report and downloadable artifact."""
+
+    __tablename__ = "billing_report"
+    __table_args__ = (
+        Index("ix_billing_report_queue", "status", "created_at"),
+        Index("ix_billing_report_owner", "requested_by_sub", "created_at"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'expired')",
+            name="ck_billing_report_status",
+        ),
+        CheckConstraint(
+            "(delivery_method IS NULL AND delivery_config IS NULL) OR "
+            "(delivery_method IN ('webdav', 'email') AND "
+            "(delivery_config IS NOT NULL OR status IN ('succeeded', 'expired')))",
+            name="ck_billing_report_delivery",
+        ),
+        UniqueConstraint("billing_job_run_id", name="uq_billing_report_job_run"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    billing_job_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("billing_job_run.id", ondelete="CASCADE")
+    )
+    requested_by_sub: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    billing_period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    billing_period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    contract_numbers_json: Mapped[str] = mapped_column(Text, nullable=False)
+    input_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    filename_template: Mapped[str] = mapped_column(String(255), nullable=False)
+    per_contract: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    delivery_method: Mapped[str | None] = mapped_column(String(50))
+    delivery_config: Mapped[str | None] = mapped_column(Text)
+    progress_current: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_filename: Mapped[str | None] = mapped_column(String(255))
+    result_media_type: Mapped[str | None] = mapped_column(String(128))
+    result_content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    result_sha256: Mapped[str | None] = mapped_column(String(64))
+    result_size: Mapped[int | None] = mapped_column(Integer)
+    error_message: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    billing_job_run: Mapped["BillingJobRun | None"] = relationship(
+        back_populates="report"
+    )
+    shards: Mapped[list["BillingReportShard"]] = relationship(
+        back_populates="report", cascade="all, delete-orphan"
+    )
+    outputs: Mapped[list["BillingReportOutput"]] = relationship(
+        back_populates="report", cascade="all, delete-orphan"
+    )
+
+
+class BillingReportShard(Base):
+    """Checkpoint for one bounded product/project/time-window query."""
+
+    __tablename__ = "billing_report_shard"
+    __table_args__ = (
+        UniqueConstraint(
+            "report_id",
+            "metric",
+            "project_id",
+            "window_start",
+            "window_end",
+            name="uq_billing_report_shard_window",
+        ),
+        Index("ix_billing_report_shard_pending", "report_id", "status", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_id: Mapped[str] = mapped_column(
+        ForeignKey("billing_report.id", ondelete="CASCADE"), nullable=False
+    )
+    metric: Mapped[str] = mapped_column(String(128), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    usage_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(String(512))
+
+    report: Mapped["BillingReport"] = relationship(back_populates="shards")
+
+
+class BillingReportOutput(Base):
+    """Immutable report file with a durable external-delivery checkpoint."""
+
+    __tablename__ = "billing_report_output"
+    __table_args__ = (
+        UniqueConstraint(
+            "report_id", "filename", name="uq_billing_report_output_filename"
+        ),
+        Index("ix_billing_report_output_pending", "report_id", "status", "id"),
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'sent')",
+            name="ck_billing_report_output_status",
+        ),
+        CheckConstraint("size >= 0", name="ck_billing_report_output_size"),
+        CheckConstraint(
+            "(status = 'sent' AND delivered_at IS NOT NULL) OR "
+            "(status IN ('pending', 'ready') AND delivered_at IS NULL)",
+            name="ck_billing_report_output_delivery",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_id: Mapped[str] = mapped_column(
+        ForeignKey("billing_report.id", ondelete="CASCADE"), nullable=False
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_message: Mapped[str | None] = mapped_column(String(512))
+
+    report: Mapped["BillingReport"] = relationship(back_populates="outputs")
 
 
 class TenantCluster(Base):

@@ -30,6 +30,7 @@ from app.billing_runner import (
     get_billing_period,
     run_due_jobs,
 )
+from app.models import BillingJobRun, BillingReport
 
 
 def _response(groups: list[dict], status_code: int = 200) -> SimpleNamespace:
@@ -737,8 +738,8 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
-        "_emit_synthetic_cluster_lines",
-        lambda *args, **kwargs: None,
+        "_capture_synthetic_facts",
+        lambda *args, **kwargs: {"addons": [], "clusters": [], "resizes": []},
     )
 
     def query_usage(
@@ -829,8 +830,8 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
-        "_emit_synthetic_cluster_lines",
-        lambda *args, **kwargs: None,
+        "_capture_synthetic_facts",
+        lambda *args, **kwargs: {"addons": [], "clusters": [], "resizes": []},
     )
     monkeypatch.setattr(
         billing_runner,
@@ -905,8 +906,8 @@ def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
-        "_emit_synthetic_cluster_lines",
-        lambda *args, **kwargs: None,
+        "_capture_synthetic_facts",
+        lambda *args, **kwargs: {"addons": [], "clusters": [], "resizes": []},
     )
 
     def query_usage(
@@ -984,6 +985,11 @@ def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
+        "_capture_synthetic_facts",
+        lambda *args, **kwargs: {"addons": [], "clusters": [], "resizes": []},
+    )
+    monkeypatch.setattr(
+        billing_runner,
         "_query_gnocchi_usage",
         lambda *args, **kwargs: [
             {
@@ -1023,8 +1029,8 @@ def test_generate_billing_csv_does_not_return_header_without_data(monkeypatch) -
     monkeypatch.setattr(billing_runner.openstack, "connect", lambda **kwargs: connection)
     monkeypatch.setattr(
         billing_runner,
-        "_emit_synthetic_cluster_lines",
-        lambda *args, **kwargs: None,
+        "_capture_synthetic_facts",
+        lambda *args, **kwargs: {"addons": [], "clusters": [], "resizes": []},
     )
 
     report = generate_billing_csv(
@@ -1170,23 +1176,239 @@ async def test_email_delivery_declares_utf8_csv(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_execute_job_returns_concurrent_active_run() -> None:
     active_run = SimpleNamespace(id=42)
-    result = SimpleNamespace(
+    no_failed_run = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: None),
+    )
+    active_result = SimpleNamespace(
         scalars=lambda: SimpleNamespace(first=lambda: active_run),
     )
     session = SimpleNamespace(
         add=Mock(),
-        commit=AsyncMock(
+        flush=AsyncMock(
             side_effect=IntegrityError("INSERT billing_job_run", {}, RuntimeError("duplicate"))
         ),
+        commit=AsyncMock(),
         rollback=AsyncMock(),
-        execute=AsyncMock(return_value=result),
+        execute=AsyncMock(side_effect=[no_failed_run, active_result]),
     )
 
     returned = await execute_job(session, SimpleNamespace(id=7))
 
     assert returned is active_run
     session.rollback.assert_awaited_once()
-    session.execute.assert_awaited_once()
+    assert session.execute.await_count == 2
+
+
+def test_delivery_config_decryption_is_versioned_and_fails_closed(monkeypatch) -> None:
+    decrypt = Mock(return_value="cleartext")
+    monkeypatch.setattr(billing_runner, "decrypt_value", decrypt)
+
+    config = billing_runner._decrypt_config(
+        '{"url":"https://dav.example","password":"fernet:v1:gAAAA-token"}'
+    )
+
+    assert config["password"] == "cleartext"
+    decrypt.assert_called_once_with("gAAAA-token")
+
+    decrypt.side_effect = ValueError("wrong key")
+    with pytest.raises(BillingGenerationError, match="Unable to decrypt"):
+        billing_runner._decrypt_config('{"password":"fernet:v1:gAAAA-token"}')
+
+
+@pytest.mark.asyncio
+async def test_execute_job_enqueues_without_generating(monkeypatch) -> None:
+    added = []
+
+    def add(value):
+        added.append(value)
+        if isinstance(value, BillingJobRun):
+            value.id = 42
+
+    session = SimpleNamespace(
+        add=Mock(side_effect=add),
+        flush=AsyncMock(),
+        execute=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(first=lambda: None)
+                ),
+                SimpleNamespace(scalars=lambda: ["CO-001"]),
+            ]
+        ),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(admin_users=["admin@test"]),
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "generate_and_deliver",
+        AsyncMock(side_effect=AssertionError("generation ran during enqueue")),
+    )
+    job = SimpleNamespace(
+        id=7,
+        owner_sub="admin@test",
+        all_contracts=True,
+        delivery_method="email",
+        delivery_config='{"recipient":"billing@example.test"}',
+        filename_template="billing.csv",
+        per_contract=False,
+    )
+
+    run = await execute_job(session, job, year=2026, month=7)
+
+    report = next(value for value in added if isinstance(value, BillingReport))
+    assert run.status == "running"
+    assert report.billing_job_run_id == 42
+    assert report.status == "queued"
+    assert report.contract_numbers_json == '["CO-001"]'
+    assert report.delivery_config == job.delivery_config
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_job_empty_scope_completes_run_and_report(monkeypatch) -> None:
+    added = []
+
+    def add(value):
+        added.append(value)
+        if isinstance(value, BillingJobRun):
+            value.id = 43
+
+    session = SimpleNamespace(
+        add=Mock(side_effect=add),
+        flush=AsyncMock(),
+        execute=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(first=lambda: None)
+                ),
+                SimpleNamespace(scalars=lambda: []),
+            ]
+        ),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(admin_users=["admin@test"]),
+    )
+    job = SimpleNamespace(
+        id=8,
+        owner_sub="admin@test",
+        all_contracts=True,
+        delivery_method="email",
+        delivery_config='{"recipient":"billing@example.test"}',
+        filename_template="billing.csv",
+        per_contract=False,
+    )
+
+    run = await execute_job(session, job, year=2026, month=7)
+
+    report = next(value for value in added if isinstance(value, BillingReport))
+    assert run.status == "success"
+    assert run.files_delivered == 0
+    assert run.completed_at is not None
+    assert report.status == "succeeded"
+    assert report.completed_at == run.completed_at
+    assert report.delivery_config is None
+
+
+@pytest.mark.asyncio
+async def test_execute_job_requeues_failed_report_for_same_period(monkeypatch) -> None:
+    failed_run = SimpleNamespace(
+        id=44,
+        status="error",
+        error_message="failed",
+        completed_at=datetime(2026, 7, 2),
+    )
+    failed_report = SimpleNamespace(
+        id="report-44",
+        status="failed",
+        billing_job_run_id=44,
+        error_message="failed",
+        started_at=datetime(2026, 7, 1),
+        completed_at=datetime(2026, 7, 2),
+        expires_at=None,
+    )
+    first = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: failed_run)
+    )
+    second = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: failed_report)
+    )
+    session = SimpleNamespace(
+        execute=AsyncMock(side_effect=[first, second, SimpleNamespace()]),
+        get=AsyncMock(return_value=failed_run),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(admin_users=["admin@test"]),
+    )
+
+    returned = await execute_job(
+        session,
+        SimpleNamespace(id=7),
+        year=2026,
+        month=7,
+    )
+
+    assert returned is failed_run
+    assert failed_report.status == "queued"
+    assert failed_run.status == "running"
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_selected_contract_job_rechecks_current_owner_access(monkeypatch) -> None:
+    added = []
+
+    def add(value):
+        added.append(value)
+        if isinstance(value, BillingJobRun):
+            value.id = 45
+
+    no_failed_run = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: None)
+    )
+    revoked_scope = SimpleNamespace(scalars=lambda: [])
+    session = SimpleNamespace(
+        add=Mock(side_effect=add),
+        flush=AsyncMock(),
+        execute=AsyncMock(side_effect=[no_failed_run, revoked_scope]),
+        commit=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        billing_runner,
+        "get_settings",
+        lambda: SimpleNamespace(admin_users=[]),
+    )
+    job = SimpleNamespace(
+        id=9,
+        owner_sub="former-user@test",
+        all_contracts=False,
+        delivery_method="email",
+        delivery_config='{"recipient":"billing@example.test"}',
+        filename_template="billing.csv",
+        per_contract=False,
+    )
+
+    run = await execute_job(session, job, year=2026, month=7)
+
+    selected_statement = session.execute.await_args_list[1].args[0]
+    assert "contract_access" in str(selected_statement)
+    assert run.status == "success"
+    report = next(value for value in added if isinstance(value, BillingReport))
+    assert report.contract_numbers_json == "[]"
+    assert report.delivery_config is None
 
 
 @pytest.mark.asyncio

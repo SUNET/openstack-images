@@ -411,12 +411,30 @@ class RunOnceDownloadRequest(RunOnceBaseRequest):
     """Ad-hoc billing run returned as a direct download."""
 
 
-class RunOnceResponse(BaseModel):
+class BillingReportResponse(BaseModel):
+    id: str
     status: str
-    files_delivered: int
+    delivery_method: str | None = None
     billing_period_start: datetime
     billing_period_end: datetime
+    progress_current: int
+    progress_total: int
+    result_filename: str | None = None
+    result_size: int | None = None
     error_message: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class RunOnceResponse(BaseModel):
+    report_id: str
+    status: str
+    billing_period_start: datetime
+    billing_period_end: datetime
 
 
 class BillingJobResponse(BaseModel):

@@ -253,9 +253,9 @@ async function downloadApi(path, body) {
     let resp;
     try {
         resp = await fetch(path, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
+            method: body === undefined ? "GET" : "POST",
+            headers: body === undefined ? {} : { "Content-Type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
             signal,
         });
     } catch (error) {
@@ -966,7 +966,10 @@ async function renderBillingJobDetail(jobId) {
                 h("button", { className: "btn ghost sm", onclick: async () => {
                     try {
                         const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({}) });
-                        showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
+                        const message = r.status === "running"
+                            ? "Billing run queued."
+                            : `Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`;
+                        showAlert(message, r.status === "error" ? "error" : "success");
                         route();
                     } catch (err) { showAlert(err.message); }
                 }}, "Run now"),
@@ -1003,7 +1006,10 @@ async function renderBillingJobDetail(jobId) {
             app.appendChild(emptyState("No executions yet."));
         } else {
             for (const r of runs) {
-                const period = `${r.billing_period_start.substring(0, 7)} · ${r.files_delivered || 0} files delivered`;
+                const delivery = r.status === "running"
+                    ? "delivery pending"
+                    : `${r.files_delivered || 0} files delivered`;
+                const period = `${r.billing_period_start.substring(0, 7)} · ${delivery}`;
                 const row = h("div", { className: "run-row" },
                     h("div", { className: "when" }, fmtDay(r.started_at)),
                     h("div", { className: "det" }, period),
@@ -1025,7 +1031,10 @@ async function renderBillingJobDetail(jobId) {
             const m = parseInt(manualForm.querySelector('[name="month"]').value, 10);
             try {
                 const r = await api(`/api/billing/jobs/${jobId}/run`, { method: "POST", body: JSON.stringify({ year: y, month: m }) });
-                showAlert(`Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`, r.status === "success" ? "success" : "error");
+                const message = r.status === "running"
+                    ? "Billing run queued."
+                    : `Run completed: ${r.status}${r.files_delivered ? " · " + r.files_delivered + " files" : ""}`;
+                showAlert(message, r.status === "error" ? "error" : "success");
                 route();
             } catch (err) { showAlert(err.message); }
         }},
@@ -1297,8 +1306,8 @@ function renderRunOnce() {
         webdavWrap.hidden = e.target.value !== "webdav";
         emailWrap.hidden = e.target.value !== "email";
         submitBtn.textContent = e.target.value === "download"
-            ? "Generate & download now"
-            : "Generate & deliver now";
+            ? "Queue report"
+            : "Queue delivery";
     }},
         h("option", { value: "download" }, "Download"),
         h("option", { value: "webdav" }, "WebDAV"),
@@ -1323,9 +1332,57 @@ function renderRunOnce() {
     );
 
     const result = h("div", {});
+    const recentReports = h("div", {});
+
+    async function loadRecentReports() {
+        clear(recentReports);
+        const reports = await api("/api/billing/reports");
+        if (!reports.length) {
+            recentReports.appendChild(h("p", { className: "hint" }, "No recent reports."));
+            return;
+        }
+        for (const report of reports) {
+            const periodLabel = report.billing_period_start.substring(0, 7);
+            const summary = h("p", {}, `${periodLabel}: ${report.status}`);
+            const card = h("div", { className: "card" }, summary);
+            if (report.status === "succeeded" && report.result_filename) {
+                card.appendChild(h("button", {
+                    type: "button",
+                    className: "btn ghost",
+                    onclick: async () => {
+                        try {
+                            await downloadApi(`/api/billing/reports/${encodeURIComponent(report.id)}/download`);
+                        } catch (err) { showAlert(err.message); }
+                    },
+                }, `Download ${report.result_filename || "billing report"}`));
+            } else if (report.error_message) {
+                card.appendChild(h("p", { className: "err" }, report.error_message));
+                if (report.status === "failed") {
+                    card.appendChild(h("button", {
+                        type: "button",
+                        className: "btn ghost",
+                        onclick: async () => {
+                            try {
+                                await api(`/api/billing/reports/${encodeURIComponent(report.id)}/retry`, {
+                                    method: "POST",
+                                });
+                                await loadRecentReports();
+                            } catch (err) { showAlert(err.message); }
+                        },
+                    }, "Retry"));
+                }
+            } else if (["queued", "running"].includes(report.status)) {
+                const progress = report.progress_total
+                    ? ` (${report.progress_current}/${report.progress_total} shards)`
+                    : "";
+                summary.textContent = `${periodLabel}: ${report.status}${progress}`;
+            }
+            recentReports.appendChild(card);
+        }
+    }
 
     const submitBtn = h("button", { type: "submit", className: "btn primary" },
-        "Generate & download now");
+        "Queue report");
     const cancel = h("a", { className: "btn ghost", href: "#/billing" }, "Cancel");
 
     const workflow = h("form", { onsubmit: async (e) => {
@@ -1362,19 +1419,45 @@ function renderRunOnce() {
         clear(result);
         try {
             if (deliveryMethod === "download") {
-                const filename = await downloadApi("/api/billing/run-once/download", body);
-                if (filename) {
-                    result.appendChild(h("p", { className: "ok" }, `Downloaded ${filename}.`));
+                let report = await api("/api/billing/reports", {
+                    method: "POST",
+                    body: JSON.stringify(body),
+                });
+                const status = h("p", { className: "hint", role: "status", "aria-live": "polite" });
+                result.appendChild(status);
+                while (["queued", "running"].includes(report.status)) {
+                    const progress = report.progress_total
+                        ? ` (${report.progress_current}/${report.progress_total} shards)`
+                        : "";
+                    status.textContent = `${report.status === "queued" ? "Queued" : "Generating"}${progress}…`;
+                    if (!await waitForPoll(routeAbortController.signal, 1500)) return;
+                    report = await api(`/api/billing/reports/${encodeURIComponent(report.id)}`);
                 }
+                if (report.status === "succeeded") {
+                    status.className = "ok";
+                    status.textContent = `Report ready (${report.result_size || 0} bytes).`;
+                    const download = h("button", {
+                        type: "button",
+                        className: "btn primary",
+                        onclick: async () => {
+                            try {
+                                await downloadApi(`/api/billing/reports/${encodeURIComponent(report.id)}/download`);
+                            } catch (err) { showAlert(err.message); }
+                        },
+                    }, `Download ${report.result_filename || "billing report"}`);
+                    result.appendChild(download);
+                } else {
+                    status.className = "err";
+                    status.textContent = report.error_message || "Billing report generation failed.";
+                }
+                await loadRecentReports();
                 return;
             }
             const r = await api("/api/billing/run-once", { method: "POST", body: JSON.stringify(body) });
             const periodLabel = r.billing_period_start.substring(0, 7);
-            if (r.status === "success") {
-                result.appendChild(h("p", { className: "ok" }, `Delivered ${r.files_delivered} file(s) for ${periodLabel}.`));
-            } else {
-                result.appendChild(h("p", { className: "err" }, `Run failed: ${r.error_message || "unknown error"}`));
-            }
+            result.appendChild(h("p", { className: "ok" },
+                `Delivery queued for ${periodLabel} (report ${r.report_id}).`));
+            await loadRecentReports();
         } catch (err) { showAlert(err.message); }
         finally { submitBtn.disabled = false; }
     }}, scope, period, delivery,
@@ -1382,6 +1465,18 @@ function renderRunOnce() {
 
     app.appendChild(workflow);
     app.appendChild(result);
+    app.appendChild(h("div", { className: "section-head" },
+        h("h2", {}, "Recent reports"),
+        h("button", {
+            type: "button",
+            className: "btn ghost",
+            onclick: async () => {
+                try { await loadRecentReports(); }
+                catch (err) { showAlert(err.message); }
+            },
+        }, "Refresh")));
+    app.appendChild(recentReports);
+    loadRecentReports().catch(err => showAlert(err.message));
 }
 
 // ---------- Admin: customers ----------
