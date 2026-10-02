@@ -3,10 +3,11 @@
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app import billing_runner
 from app.billing_runner import (
@@ -22,10 +23,12 @@ from app.billing_runner import (
     deliver_email,
     deliver_webdav,
     encode_billing_csv,
+    execute_job,
     generate_and_deliver,
     generate_billing_csv,
     generate_billing_files,
     get_billing_period,
+    run_due_jobs,
 )
 
 
@@ -349,6 +352,27 @@ def test_gnocchi_exception_fails_billing(monkeypatch) -> None:
         )
 
 
+def test_gnocchi_timeout_identifies_project(monkeypatch) -> None:
+    def fail(*args, **kwargs):
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "post", fail)
+
+    with pytest.raises(
+        BillingGenerationError,
+        match=r"Timed out querying Gnocchi for volume/volume\.size in project project-1",
+    ):
+        _query_gnocchi_usage(
+            SimpleNamespace(auth_token="test-token"),
+            datetime(2026, 7, 1),
+            datetime(2026, 8, 1),
+            "volume",
+            "volume.size",
+            ["volume_type"],
+            ["project-1"],
+        )
+
+
 def test_gnocchi_product_mappings_and_storage_scaling() -> None:
     assert GNOCCHI_METRIC_SOURCES["instance"] == ("instance", "cpu")
     assert GNOCCHI_METRIC_SOURCES["volume.snapshot.size"] == (
@@ -369,6 +393,8 @@ def test_gnocchi_product_mappings_and_storage_scaling() -> None:
     assert GNOCCHI_PRODUCT_REGISTRY["radosgw.objects.size"]["size_gb_scale"] == Decimal(
         1
     ) / Decimal(10**9)
+    assert GNOCCHI_PRODUCT_REGISTRY["instance"]["aggregation"] == "resource_hours"
+    assert GNOCCHI_PRODUCT_REGISTRY["volume.size"]["aggregation"] == "additive_size"
 
 
 def test_cinder_volume_type_resolution_accepts_id_or_name_and_rejects_unknown() -> None:
@@ -545,19 +571,21 @@ def test_gnocchi_usage_attributes_resize_hour_to_each_flavor(monkeypatch) -> Non
 
 
 def test_gnocchi_usage_sums_size_across_resources(monkeypatch) -> None:
+    request = {}
     groups = [
-        _group(
-            "volume-1",
-            {"volume_type": "fast"},
-            [["2026-07-01T00:00:00+00:00", 3600, 10]],
-        ),
-        _group(
-            "volume-2",
-            {"volume_type": "fast"},
-            [["2026-07-01T00:00:00+00:00", 3600, 20]],
-        ),
+        {
+            "group": {"project_id": "project-1", "volume_type": "fast"},
+            "measures": {
+                "measures": {"aggregated": [["2026-07-01T00:00:00+00:00", 3600, 30]]}
+            },
+        }
     ]
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response(groups))
+
+    def record_post(*args, **kwargs):
+        request.update(kwargs)
+        return _response(groups)
+
+    monkeypatch.setattr(httpx, "post", record_post)
 
     usage = _query_gnocchi_usage(
         SimpleNamespace(auth_token="test-token"),
@@ -567,12 +595,17 @@ def test_gnocchi_usage_sums_size_across_resources(monkeypatch) -> None:
         "volume.size",
         ["volume_type"],
         ["project-1"],
+        aggregate_across_resources=True,
     )
 
     assert len(usage) == 1
     assert usage[0]["project_id"] == "project-1"
     assert usage[0]["metadata"] == {"volume_type": "fast"}
     assert usage[0]["size_months"] == Decimal(15)
+    assert ("groupby", "project_id") in request["params"]
+    assert ("groupby", "volume_type") in request["params"]
+    assert ("groupby", "id") not in request["params"]
+    assert ("groupby", "original_resource_id") not in request["params"]
 
 
 def test_gnocchi_usage_omits_empty_groups(monkeypatch) -> None:
@@ -655,12 +688,22 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
         lambda *args, **kwargs: None,
     )
 
-    def query_usage(conn, begin, end, resource_type, metric_name, groupby_fields, project_ids):
+    def query_usage(
+        conn,
+        begin,
+        end,
+        resource_type,
+        metric_name,
+        groupby_fields,
+        project_ids,
+        **kwargs,
+    ):
         request.update(
             resource_type=resource_type,
             metric_name=metric_name,
             groupby_fields=groupby_fields,
             project_ids=project_ids,
+            **kwargs,
         )
         return [
             {
@@ -687,6 +730,7 @@ def test_generate_billing_csv_prices_cpu_buckets_as_instance_hours(monkeypatch) 
         "metric_name": "cpu",
         "groupby_fields": ["flavor_name"],
         "project_ids": ["project-1"],
+        "aggregate_across_resources": False,
     }
     assert report == (
         "\ufeff# Customer;ContractNumber;Project;ResourceType;Quantity;Unit;Cost\r\n"
@@ -738,7 +782,7 @@ def test_generate_billing_csv_rolls_up_canonical_volume_type_before_pricing(monk
     monkeypatch.setattr(
         billing_runner,
         "_query_gnocchi_usage",
-        lambda *args: [
+        lambda *args, **kwargs: [
             {
                 "project_id": "project-1",
                 "metric": "volume.size",
@@ -812,7 +856,17 @@ def test_generate_billing_csv_prices_snapshot_and_backup_as_logical_gb_months(
         lambda *args, **kwargs: None,
     )
 
-    def query_usage(conn, begin, end, resource_type, metric_name, groupby_fields, project_ids):
+    def query_usage(
+        conn,
+        begin,
+        end,
+        resource_type,
+        metric_name,
+        groupby_fields,
+        project_ids,
+        **kwargs,
+    ):
+        assert kwargs == {"aggregate_across_resources": True}
         quantity = {
             "volume.snapshot.size": Decimal(10),
             "volume.backup.size": Decimal(20),
@@ -878,7 +932,7 @@ def test_generate_billing_csv_fails_for_unpriced_flavor(monkeypatch) -> None:
     monkeypatch.setattr(
         billing_runner,
         "_query_gnocchi_usage",
-        lambda *args: [
+        lambda *args, **kwargs: [
             {
                 "project_id": "project-1",
                 "metric": "cpu",
@@ -1058,3 +1112,42 @@ async def test_email_delivery_declares_utf8_csv(monkeypatch) -> None:
     assert attachment.get_content_type() == "text/csv"
     assert attachment.get_content_charset() == "utf-8"
     assert attachment.get_payload(decode=True) == b"\xef\xbb\xbfDatatj\xc3\xa4nst"
+
+
+@pytest.mark.asyncio
+async def test_execute_job_returns_concurrent_active_run() -> None:
+    active_run = SimpleNamespace(id=42)
+    result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: active_run),
+    )
+    session = SimpleNamespace(
+        add=Mock(),
+        commit=AsyncMock(
+            side_effect=IntegrityError("INSERT billing_job_run", {}, RuntimeError("duplicate"))
+        ),
+        rollback=AsyncMock(),
+        execute=AsyncMock(return_value=result),
+    )
+
+    returned = await execute_job(session, SimpleNamespace(id=7))
+
+    assert returned is active_run
+    session.rollback.assert_awaited_once()
+    session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_due_jobs_tolerates_duplicate_existing_runs(monkeypatch) -> None:
+    job = SimpleNamespace(id=7, name="Monthly", schedule="* * * * *")
+    jobs = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(all=lambda: [job]),
+    )
+    existing = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(first=lambda: SimpleNamespace(id=1)),
+    )
+    session = SimpleNamespace(execute=AsyncMock(side_effect=[jobs, existing]))
+    execute = AsyncMock()
+    monkeypatch.setattr(billing_runner, "execute_job", execute)
+
+    assert await run_due_jobs(session) == []
+    execute.assert_not_awaited()

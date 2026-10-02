@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -171,6 +172,17 @@ class BillingJobRun(Base):
     """Execution history for billing jobs."""
 
     __tablename__ = "billing_job_run"
+    __table_args__ = (
+        Index(
+            "uq_billing_job_run_active_period",
+            "billing_job_id",
+            "billing_period_start",
+            "billing_period_end",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+            sqlite_where=text("status = 'running'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     billing_job_id: Mapped[int] = mapped_column(

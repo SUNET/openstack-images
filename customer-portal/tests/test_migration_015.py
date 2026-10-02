@@ -199,6 +199,92 @@ def test_upgrade_014_to_015_preserves_all_existing_rows_and_metadata(
     assert legacy_rows(engine, metadata) == before
 
 
+def test_upgrade_015_to_016_enforces_single_active_billing_run(
+    gitops_database: GitOpsDatabase,
+) -> None:
+    gitops_database.migrate("015")
+    engine = create_engine(gitops_database.sync_url)
+    period_start = datetime(2026, 9, 1)
+    period_end = datetime(2026, 10, 1)
+    try:
+        metadata = MetaData()
+        metadata.reflect(engine, only=["billing_job", "billing_job_run"])
+        jobs = metadata.tables["billing_job"]
+        runs = metadata.tables["billing_job_run"]
+        with engine.begin() as connection:
+            connection.execute(
+                jobs.insert().values(
+                    id=1,
+                    name="Monthly export",
+                    owner_sub="billing@test",
+                    all_contracts=True,
+                    schedule="0 4 1 * *",
+                    delivery_method="email",
+                    delivery_config="{}",
+                )
+            )
+            connection.execute(
+                runs.insert(),
+                [
+                    {
+                        "id": 1,
+                        "billing_job_id": 1,
+                        "billing_period_start": period_start,
+                        "billing_period_end": period_end,
+                        "status": "running",
+                    },
+                    {
+                        "id": 2,
+                        "billing_job_id": 1,
+                        "billing_period_start": period_start,
+                        "billing_period_end": period_end,
+                        "status": "running",
+                    },
+                    {
+                        "id": 3,
+                        "billing_job_id": 1,
+                        "billing_period_start": period_start,
+                        "billing_period_end": period_end,
+                        "status": "success",
+                    },
+                ],
+            )
+
+        gitops_database.migrate("016")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                select(runs.c.id, runs.c.status).order_by(runs.c.id)
+            ).all() == [(1, "error"), (2, "running"), (3, "success")]
+            assert connection.scalar(
+                select(runs.c.error_message).where(runs.c.id == 1)
+            ) == "Superseded duplicate active run during migration 016"
+
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                runs.insert().values(
+                    id=4,
+                    billing_job_id=1,
+                    billing_period_start=period_start,
+                    billing_period_end=period_end,
+                    status="running",
+                )
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                runs.insert().values(
+                    id=5,
+                    billing_job_id=1,
+                    billing_period_start=period_start,
+                    billing_period_end=period_end,
+                    status="success",
+                )
+            )
+    finally:
+        engine.dispose()
+
+
 def test_migrated_models_round_trip_baseline_credentials_and_durable_operation(
     gitops_database: GitOpsDatabase, populated_014: tuple[Engine, MetaData],
 ) -> None:

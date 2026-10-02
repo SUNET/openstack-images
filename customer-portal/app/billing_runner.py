@@ -17,6 +17,7 @@ import httpx
 import openstack
 from croniter import croniter
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.orm import sessionmaker
@@ -67,6 +68,7 @@ GNOCCHI_PRODUCT_REGISTRY = {
         "resource_type": "instance",
         "source_metric": "cpu",
         "metadata_fields": {"flavor_name"},
+        "aggregation": "resource_hours",
         "unit": "hour",
         "size_gb_scale": None,
     },
@@ -74,6 +76,7 @@ GNOCCHI_PRODUCT_REGISTRY = {
         "resource_type": "volume",
         "source_metric": "volume.size",
         "metadata_fields": {"volume_type"},
+        "aggregation": "additive_size",
         "unit": "GB-month",
         "size_gb_scale": Decimal(1),
     },
@@ -81,6 +84,7 @@ GNOCCHI_PRODUCT_REGISTRY = {
         "resource_type": "volume",
         "source_metric": "volume.snapshot.size",
         "metadata_fields": set(),
+        "aggregation": "additive_size",
         "unit": "GB-month",
         "size_gb_scale": Decimal(1),
     },
@@ -88,6 +92,7 @@ GNOCCHI_PRODUCT_REGISTRY = {
         "resource_type": "volume",
         "source_metric": "volume.backup.size",
         "metadata_fields": set(),
+        "aggregation": "additive_size",
         "unit": "GB-month",
         "size_gb_scale": Decimal(1),
     },
@@ -95,6 +100,7 @@ GNOCCHI_PRODUCT_REGISTRY = {
         "resource_type": "ceph_account",
         "source_metric": "radosgw.objects.size",
         "metadata_fields": set(),
+        "aggregation": "additive_size",
         "unit": "GB-month",
         "size_gb_scale": Decimal(1) / Decimal(10**9),
     },
@@ -773,11 +779,13 @@ def _query_gnocchi_usage(
     metric_name: str,
     groupby_fields: list[str],
     project_ids: list[str],
+    aggregate_across_resources: bool = False,
 ) -> list[dict]:
-    """Query history-aware per-resource usage and roll it up for pricing.
+    """Query history-aware usage and roll it up for pricing.
 
-    Each non-empty hourly series point represents one started resource-hour. Size
-    metrics additionally use the point value to calculate period-normalized size.
+    Presence products retain per-resource groups so each non-empty hourly point
+    represents one started resource-hour. Additive size products are summed by
+    Gnocchi within each pricing metadata bucket before period normalization.
     """
     import httpx
 
@@ -789,6 +797,7 @@ def _query_gnocchi_usage(
         connect=settings.billing_gnocchi_connect_timeout_seconds,
     )
 
+    requested_project_id: str | None = None
     try:
         if len(project_ids) > MAX_BILLING_PROJECTS:
             raise BillingGenerationError(
@@ -807,7 +816,9 @@ def _query_gnocchi_usage(
             for field in groupby_fields
             if field not in {"project_id", "id", "original_resource_id"}
         ]
-        groupby = ["project_id", "id", "original_resource_id", *metadata_fields]
+        groupby = ["project_id", *metadata_fields]
+        if not aggregate_across_resources:
+            groupby[1:1] = ["id", "original_resource_id"]
 
         for requested_project_id in sorted(set(project_ids)):
             params = [
@@ -875,7 +886,7 @@ def _query_gnocchi_usage(
                     f"{MAX_GNOCCHI_GROUPS_PER_PROJECT}"
                 )
 
-            seen_resource_groups: set[tuple] = set()
+            seen_source_groups: set[tuple] = set()
             for group in groups:
                 if not isinstance(group, dict) or not isinstance(group.get("group"), dict):
                     raise BillingGenerationError(
@@ -885,10 +896,9 @@ def _query_gnocchi_usage(
                 project_id = group_info.get("project_id")
                 resource_id = group_info.get("id")
                 original_resource_id = group_info.get("original_resource_id")
-                if (
-                    project_id != requested_project_id
-                    or not resource_id
-                    or not original_resource_id
+                if project_id != requested_project_id or (
+                    not aggregate_across_resources
+                    and (not resource_id or not original_resource_id)
                 ):
                     raise BillingGenerationError(
                         f"Incomplete Gnocchi group for {resource_type}/{metric_name}"
@@ -903,17 +913,21 @@ def _query_gnocchi_usage(
                         )
                     metadata[field] = value
 
-                resource_group_key = (
-                    project_id,
-                    resource_id,
-                    original_resource_id,
-                    tuple((field, metadata[field]) for field in sorted(metadata)),
-                )
-                if resource_group_key in seen_resource_groups:
+                metadata_key = tuple((field, metadata[field]) for field in sorted(metadata))
+                if aggregate_across_resources:
+                    source_group_key = (project_id, metadata_key)
+                else:
+                    source_group_key = (
+                        project_id,
+                        resource_id,
+                        original_resource_id,
+                        metadata_key,
+                    )
+                if source_group_key in seen_source_groups:
                     raise BillingGenerationError(
                         f"Duplicate Gnocchi group for {resource_type}/{metric_name}"
                     )
-                seen_resource_groups.add(resource_group_key)
+                seen_source_groups.add(source_group_key)
 
                 try:
                     measures = group["measures"]["measures"]["aggregated"]
@@ -1016,6 +1030,19 @@ def _query_gnocchi_usage(
         return list(results_by_group.values())
     except BillingGenerationError:
         raise
+    except httpx.TimeoutException as exc:
+        project_context = (
+            f" in project {requested_project_id}" if requested_project_id is not None else ""
+        )
+        logger.exception(
+            "Timed out querying Gnocchi for %s/%s%s",
+            resource_type,
+            metric_name,
+            project_context,
+        )
+        raise BillingGenerationError(
+            f"Timed out querying Gnocchi for {resource_type}/{metric_name}{project_context}"
+        ) from exc
     except Exception as exc:
         logger.exception("Failed to query Gnocchi for %s/%s", resource_type, metric_name)
         raise BillingGenerationError(
@@ -1105,6 +1132,7 @@ def generate_billing_csv(
                 source_metric,
                 groupby,
                 project_ids,
+                aggregate_across_resources=product["aggregation"] == "additive_size",
             )
             if metric == "volume.size" and usage and volume_type_names is None:
                 volume_type_names = _get_cinder_volume_type_names(conn)
@@ -1433,15 +1461,38 @@ async def execute_job(
     """Execute a billing job: generate CSV(s) and deliver."""
     settings = get_settings()
     period_start, period_end = get_billing_period(year, month)
+    job_id = job.id
 
     run = BillingJobRun(
-        billing_job_id=job.id,
+        billing_job_id=job_id,
         billing_period_start=period_start,
         billing_period_end=period_end,
         status="running",
     )
     session.add(run)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = await session.execute(
+            select(BillingJobRun).where(
+                BillingJobRun.billing_job_id == job_id,
+                BillingJobRun.billing_period_start == period_start,
+                BillingJobRun.billing_period_end == period_end,
+                BillingJobRun.status == "running",
+            )
+        )
+        active_run = existing.scalars().first()
+        if active_run is None:
+            raise
+        logger.info(
+            "Billing job %d already has active run %d for %s to %s",
+            job_id,
+            active_run.id,
+            period_start,
+            period_end,
+        )
+        return active_run
     await session.refresh(run)
 
     try:
@@ -1485,7 +1536,7 @@ async def execute_job(
         run.files_delivered = files_delivered
 
     except Exception as e:
-        logger.exception("Billing job %d failed", job.id)
+        logger.exception("Billing job %d failed", job_id)
         run.status = "error"
         run.error_message = str(e)[:500]
 
@@ -1546,7 +1597,7 @@ async def run_due_jobs(session: AsyncSession) -> list[BillingJobRun]:
                 BillingJobRun.status.in_(["running", "success"]),
             )
         )
-        if existing.scalar_one_or_none():
+        if existing.scalars().first() is not None:
             continue
 
         logger.info("Executing due billing job %d: %s", job.id, job.name)
