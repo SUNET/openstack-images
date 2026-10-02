@@ -58,13 +58,6 @@ def _group(
     }
 
 
-def _resource(resource_id: str, *metric_names: str) -> dict:
-    return {
-        "id": resource_id,
-        "metrics": {name: f"metric-{resource_id}-{name}" for name in metric_names},
-    }
-
-
 def test_default_billing_period_is_previous_calendar_month(monkeypatch) -> None:
     class FixedDateTime(datetime):
         @classmethod
@@ -98,13 +91,21 @@ def test_gnocchi_http_error_fails_billing(monkeypatch) -> None:
         )
 
 
-def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
-    responses = iter([_response([], status_code=404), _response([])])
+@pytest.mark.parametrize(
+    ("resource_type", "metric_name", "groupby"),
+    [
+        ("instance", "cpu", ["flavor_name"]),
+        ("volume", "volume.size", ["volume_type"]),
+    ],
+)
+def test_gnocchi_404_means_window_has_no_usage(
+    monkeypatch, resource_type, metric_name, groupby
+) -> None:
     requests = []
 
     def respond(*args, **kwargs):
         requests.append((args[0], kwargs))
-        return next(responses)
+        return _response([], status_code=404)
 
     settings = SimpleNamespace(
         billing_gnocchi_timeout_seconds=123,
@@ -121,218 +122,20 @@ def test_gnocchi_404_means_project_has_no_usage(monkeypatch) -> None:
         SimpleNamespace(auth_token="test-token"),
         datetime(2026, 7, 1),
         datetime(2026, 8, 1),
-        "volume",
-        "volume.size",
-        ["volume_type"],
-        ["project-1"],
-    )
-    for _, request in requests:
-        timeout = request["timeout"]
-        assert isinstance(timeout, httpx.Timeout)
-        assert timeout.connect == 7
-        assert timeout.read == 123
-        assert timeout.write == 123
-        assert timeout.pool == 123
-    requests[1][1].pop("timeout")
-    assert usage == []
-    assert requests[1][0].endswith("/v1/search/resource/volume")
-    assert requests[1][1] == {
-        "params": [("limit", "100"), ("sort", "id:asc")],
-        "json": {
-            "and": [
-                {"=": {"project_id": "project-1"}},
-                {"<": {"started_at": "2026-08-01T00:00:00+00:00"}},
-                {
-                    "or": [
-                        {">": {"ended_at": "2026-07-01T00:00:00+00:00"}},
-                        {"=": {"ended_at": None}},
-                    ]
-                },
-            ]
-        },
-        "headers": {"X-Auth-Token": "test-token"},
-    }
-
-
-def test_gnocchi_404_with_expected_family_resource_fails_billing(monkeypatch) -> None:
-    responses = iter(
-        [
-            _response([], status_code=404),
-            _response([_resource("volume-1", "volume")]),
-        ]
-    )
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
-
-    with pytest.raises(BillingGenerationError, match="returned HTTP 404"):
-        _query_gnocchi_usage(
-            SimpleNamespace(auth_token="test-token"),
-            datetime(2026, 7, 1),
-            datetime(2026, 8, 1),
-            "volume",
-            "volume.size",
-            ["volume_type"],
-            ["project-1"],
-        )
-
-
-def test_volume_404_ignores_snapshot_and_backup_resources(monkeypatch) -> None:
-    responses = iter(
-        [
-            _response([], status_code=404),
-            _response(
-                [
-                    _resource("backup-1", "backup.size"),
-                    _resource("snapshot-1", "volume.snapshot.size"),
-                ]
-            ),
-        ]
-    )
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
-
-    usage = _query_gnocchi_usage(
-        SimpleNamespace(auth_token="test-token"),
-        datetime(2026, 7, 1),
-        datetime(2026, 8, 1),
-        "volume",
-        "volume.size",
-        ["volume_type"],
-        ["project-1"],
-    )
-
-    assert usage == []
-
-
-@pytest.mark.parametrize(
-    ("metric_name", "other_metrics"),
-    [
-        ("volume.snapshot.size", ("volume", "backup.size")),
-        ("volume.backup.size", ("volume.size", "snapshot.size")),
-    ],
-)
-def test_snapshot_and_backup_404s_ignore_other_volume_families(
-    monkeypatch, metric_name, other_metrics
-) -> None:
-    responses = iter(
-        [
-            _response([], status_code=404),
-            _response(
-                [
-                    _resource("resource-1", other_metrics[0]),
-                    _resource("resource-2", other_metrics[1]),
-                ]
-            ),
-        ]
-    )
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
-
-    usage = _query_gnocchi_usage(
-        SimpleNamespace(auth_token="test-token"),
-        datetime(2026, 7, 1),
-        datetime(2026, 8, 1),
-        "volume",
+        resource_type,
         metric_name,
-        [],
+        groupby,
         ["project-1"],
     )
 
     assert usage == []
-
-
-def test_non_cinder_404_with_any_resource_fails_billing(monkeypatch) -> None:
-    responses = iter(
-        [
-            _response([], status_code=404),
-            _response([_resource("instance-1", "unrelated")]),
-        ]
-    )
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
-
-    with pytest.raises(BillingGenerationError, match="returned HTTP 404"):
-        _query_gnocchi_usage(
-            SimpleNamespace(auth_token="test-token"),
-            datetime(2026, 7, 1),
-            datetime(2026, 8, 1),
-            "instance",
-            "cpu",
-            ["flavor_name"],
-            ["project-1"],
-        )
-
-
-def test_gnocchi_404_finds_expected_family_on_later_resource_page(monkeypatch) -> None:
-    monkeypatch.setattr(billing_runner, "GNOCCHI_RESOURCE_PAGE_SIZE", 2)
-    responses = iter(
-        [
-            _response([], status_code=404),
-            _response(
-                [
-                    _resource("resource-a", "volume"),
-                    _resource("resource-b", "backup.size"),
-                ]
-            ),
-            _response([_resource("resource-c", "snapshot.size")]),
-        ]
-    )
-    requests = []
-
-    def respond(*args, **kwargs):
-        requests.append((args[0], kwargs))
-        return next(responses)
-
-    monkeypatch.setattr(httpx, "post", respond)
-
-    with pytest.raises(BillingGenerationError, match="returned HTTP 404"):
-        _query_gnocchi_usage(
-            SimpleNamespace(auth_token="test-token"),
-            datetime(2026, 7, 1),
-            datetime(2026, 8, 1),
-            "volume",
-            "volume.snapshot.size",
-            [],
-            ["project-1"],
-        )
-
-    assert requests[2][1]["params"] == [
-        ("limit", "2"),
-        ("sort", "id:asc"),
-        ("marker", "resource-b"),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("search_pages", "message"),
-    [
-        ([_response([{"id": "resource-a"}])], "Invalid Gnocchi resource"),
-        (
-            [
-                _response(
-                    [
-                        _resource("resource-a", "volume"),
-                        _resource("resource-b", "volume"),
-                    ]
-                ),
-                _response([_resource("resource-b", "volume")]),
-            ],
-            "Non-advancing Gnocchi resource marker",
-        ),
-    ],
-    ids=["malformed", "non-advancing"],
-)
-def test_gnocchi_404_resource_pagination_fails_closed(monkeypatch, search_pages, message) -> None:
-    monkeypatch.setattr(billing_runner, "GNOCCHI_RESOURCE_PAGE_SIZE", 2)
-    responses = iter([_response([], status_code=404), *search_pages])
-    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: next(responses))
-
-    with pytest.raises(BillingGenerationError, match=message):
-        _query_gnocchi_usage(
-            SimpleNamespace(auth_token="test-token"),
-            datetime(2026, 7, 1),
-            datetime(2026, 8, 1),
-            "volume",
-            "volume.snapshot.size",
-            [],
-            ["project-1"],
-        )
+    assert len(requests) == 1
+    timeout = requests[0][1]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 7
+    assert timeout.read == 123
+    assert timeout.write == 123
+    assert timeout.pool == 123
 
 
 def test_gnocchi_exception_fails_billing(monkeypatch) -> None:

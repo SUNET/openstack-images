@@ -324,8 +324,18 @@ def test_process_report_plans_and_queries_only_from_persisted_snapshot(
     calls = []
 
     def query(conn, begin, end, resource_type, source_metric, fields, projects, **kwargs):
-        calls.append((resource_type, source_metric, fields, projects))
-        return []
+        calls.append((begin, resource_type, source_metric, fields, projects))
+        if begin.day in {1, 15, 29}:
+            return []
+        return [
+            {
+                "project_id": "frozen-project",
+                "metric": "frozen.metric",
+                "metadata": {"volume_type": "frozen-type-id"},
+                "hours": Decimal(0),
+                "size_months": Decimal("1.2"),
+            }
+        ]
 
     monkeypatch.setattr(billing_reports, "_query_gnocchi_usage", query)
     monkeypatch.setattr(
@@ -372,7 +382,7 @@ def test_process_report_plans_and_queries_only_from_persisted_snapshot(
     }
     assert calls
     assert all(
-        call
+        call[1:]
         == (
             "frozen-volume",
             "frozen.metric",
@@ -382,6 +392,9 @@ def test_process_report_plans_and_queries_only_from_persisted_snapshot(
         for call in calls
     )
     assert stored is not None and stored.status == "succeeded"
+    assert b"Frozen project;volume.size (frozen-fast);2.40;GB-month;6" in (
+        stored.result_content or b""
+    )
     assert b"Frozen customer;CO-001;managed-cluster:frozen-cluster" in (
         stored.result_content or b""
     )

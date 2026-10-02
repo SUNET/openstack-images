@@ -50,9 +50,6 @@ BILLING_GRANULARITY_SECONDS = 3600
 MAX_GNOCCHI_GROUPS_PER_PROJECT = 10000
 MAX_GNOCCHI_MEASURES_PER_GROUP = 20000
 MAX_GNOCCHI_RESPONSE_BYTES = 10 * 1024 * 1024
-GNOCCHI_RESOURCE_PAGE_SIZE = 100
-MAX_GNOCCHI_RESOURCE_PAGES = 100
-MAX_GNOCCHI_RESOURCES_PER_SEARCH = 10000
 BILLING_CSV_HEADER = [
     "# Customer",
     "ContractNumber",
@@ -127,13 +124,6 @@ GNOCCHI_METRIC_SOURCES = {
 GNOCCHI_METRIC_METADATA_FIELDS = {
     product: set(config["metadata_fields"]) for product, config in GNOCCHI_PRODUCT_REGISTRY.items()
 }
-
-CINDER_METRIC_FAMILY_MARKERS = {
-    "volume.size": {"volume", "volume.size"},
-    "volume.snapshot.size": {"snapshot.size", "volume.snapshot.size"},
-    "volume.backup.size": {"backup.size", "volume.backup.size"},
-}
-
 
 class BillingGenerationError(RuntimeError):
     """Raised when a billing report cannot be generated completely."""
@@ -956,144 +946,6 @@ def _emit_synthetic_cluster_lines(
         )
 
 
-def _project_had_gnocchi_resources(
-    token: str,
-    gnocchi: str,
-    resource_type: str,
-    metric_name: str,
-    project_id: str,
-    begin: datetime,
-    end: datetime,
-) -> bool:
-    """Return whether a project had resources expected to emit this metric.
-
-    Search current resources because old revisions can retain a null ended_at
-    after the resource's current revision has been closed.
-    """
-    settings = get_settings()
-    gnocchi_timeout = httpx.Timeout(
-        settings.billing_gnocchi_timeout_seconds,
-        connect=settings.billing_gnocchi_connect_timeout_seconds,
-    )
-    search = {
-        "and": [
-            {"=": {"project_id": project_id}},
-            {"<": {"started_at": end.isoformat()}},
-            {
-                "or": [
-                    {">": {"ended_at": begin.isoformat()}},
-                    {"=": {"ended_at": None}},
-                ]
-            },
-        ]
-    }
-    family_markers = (
-        CINDER_METRIC_FAMILY_MARKERS.get(metric_name) if resource_type == "volume" else None
-    )
-    marker = None
-    previous_id = None
-    resource_count = 0
-
-    for page_number in range(1, MAX_GNOCCHI_RESOURCE_PAGES + 1):
-        params = [
-            ("limit", str(GNOCCHI_RESOURCE_PAGE_SIZE)),
-            ("sort", "id:asc"),
-        ]
-        if marker is not None:
-            params.append(("marker", marker))
-
-        response = httpx.post(
-            f"{gnocchi}/v1/search/resource/{resource_type}",
-            params=params,
-            json=search,
-            headers={"X-Auth-Token": token},
-            timeout=gnocchi_timeout,
-        )
-        response_content = getattr(response, "content", b"")
-        if len(response_content) > MAX_GNOCCHI_RESPONSE_BYTES:
-            raise BillingGenerationError(
-                f"Gnocchi resource search response for {resource_type}/{metric_name} "
-                f"exceeds {MAX_GNOCCHI_RESPONSE_BYTES} bytes"
-            )
-        if response.status_code != 200:
-            raise BillingGenerationError(
-                f"Unable to classify empty Gnocchi result for "
-                f"{resource_type}/{metric_name}: HTTP {response.status_code}"
-            )
-        try:
-            resources = response.json()
-        except (TypeError, ValueError) as exc:
-            raise BillingGenerationError(
-                f"Invalid Gnocchi resource search response for {resource_type}/{metric_name}"
-            ) from exc
-        if not isinstance(resources, list) or len(resources) > GNOCCHI_RESOURCE_PAGE_SIZE:
-            raise BillingGenerationError(
-                f"Invalid Gnocchi resource search response for {resource_type}/{metric_name}"
-            )
-        if not resources:
-            return False
-
-        expected_family_found = False
-        for resource in resources:
-            if not isinstance(resource, dict):
-                raise BillingGenerationError(
-                    f"Invalid Gnocchi resource for {resource_type}/{metric_name}"
-                )
-            resource_id = resource.get("id")
-            metrics = resource.get("metrics")
-            if (
-                not isinstance(resource_id, str)
-                or not resource_id.strip()
-                or not isinstance(metrics, dict)
-                or any(
-                    not isinstance(name, str)
-                    or not name.strip()
-                    or not isinstance(metric_id, str)
-                    or not metric_id.strip()
-                    for name, metric_id in metrics.items()
-                )
-            ):
-                raise BillingGenerationError(
-                    f"Invalid Gnocchi resource for {resource_type}/{metric_name}"
-                )
-            if previous_id is not None and resource_id <= previous_id:
-                raise BillingGenerationError(
-                    f"Non-advancing Gnocchi resource marker for {resource_type}/{metric_name}"
-                )
-            previous_id = resource_id
-            resource_count += 1
-            if resource_count > MAX_GNOCCHI_RESOURCES_PER_SEARCH:
-                raise BillingGenerationError(
-                    f"Gnocchi resource search for {resource_type}/{metric_name} "
-                    f"exceeds {MAX_GNOCCHI_RESOURCES_PER_SEARCH} resources"
-                )
-            if family_markers is None or family_markers.intersection(metrics):
-                expected_family_found = True
-
-        if expected_family_found:
-            return True
-        if len(resources) < GNOCCHI_RESOURCE_PAGE_SIZE:
-            return False
-        if (
-            page_number == MAX_GNOCCHI_RESOURCE_PAGES
-            or resource_count == MAX_GNOCCHI_RESOURCES_PER_SEARCH
-        ):
-            raise BillingGenerationError(
-                f"Gnocchi resource search for {resource_type}/{metric_name} "
-                "exceeded pagination limits"
-            )
-        next_marker = resources[-1]["id"]
-        if next_marker == marker:
-            raise BillingGenerationError(
-                f"Non-advancing Gnocchi resource marker for {resource_type}/{metric_name}"
-            )
-        marker = next_marker
-
-    raise BillingGenerationError(
-        f"Gnocchi resource search for {resource_type}/{metric_name} exceeded pagination limits"
-    )
-
-
 def _query_gnocchi_usage(
     conn,
     begin: datetime,
@@ -1167,21 +1019,15 @@ def _query_gnocchi_usage(
                 timeout=gnocchi_timeout,
             )
             if resp.status_code == 404:
-                if not _project_had_gnocchi_resources(
-                    token,
-                    gnocchi,
+                logger.debug(
+                    "No Gnocchi %s/%s measurements in project %s between %s and %s",
                     resource_type,
                     metric_name,
                     requested_project_id,
-                    begin_utc,
-                    end_utc,
-                ):
-                    logger.debug(
-                        "No Gnocchi %s resources in project %s",
-                        resource_type,
-                        requested_project_id,
-                    )
-                    continue
+                    begin_utc.isoformat(),
+                    end_utc.isoformat(),
+                )
+                continue
             if resp.status_code != 200:
                 message = (
                     f"Gnocchi aggregation for {resource_type}/{metric_name} "
