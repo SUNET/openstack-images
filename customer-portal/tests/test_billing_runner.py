@@ -608,6 +608,59 @@ def test_gnocchi_usage_sums_size_across_resources(monkeypatch) -> None:
     assert ("groupby", "original_resource_id") not in request["params"]
 
 
+def test_gnocchi_usage_sums_duplicate_additive_timestamps(monkeypatch) -> None:
+    groups = [
+        {
+            "group": {"project_id": "project-1", "volume_type": "fast"},
+            "measures": {
+                "measures": {
+                    "aggregated": [
+                        ["2026-07-01T00:00:00+00:00", 3600, 10],
+                        ["2026-07-01T00:00:00+00:00", 3600, 20],
+                    ]
+                }
+            },
+        }
+    ]
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response(groups))
+
+    usage = _query_gnocchi_usage(
+        SimpleNamespace(auth_token="test-token"),
+        datetime(2026, 7, 1),
+        datetime(2026, 7, 1, 2),
+        "volume",
+        "volume.size",
+        ["volume_type"],
+        ["project-1"],
+        aggregate_across_resources=True,
+    )
+
+    assert usage[0]["size_months"] == Decimal(15)
+
+
+def test_gnocchi_usage_rejects_duplicate_presence_timestamps(monkeypatch) -> None:
+    timestamp = "2026-07-01T00:00:00+00:00"
+    groups = [
+        _group(
+            "instance-1",
+            {"flavor_name": "b2.c1r2"},
+            [[timestamp, 3600, 10], [timestamp, 3600, 20]],
+        )
+    ]
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response(groups))
+
+    with pytest.raises(BillingGenerationError, match="Duplicate Gnocchi timestamp"):
+        _query_gnocchi_usage(
+            SimpleNamespace(auth_token="test-token"),
+            datetime(2026, 7, 1),
+            datetime(2026, 7, 1, 2),
+            "instance",
+            "cpu",
+            ["flavor_name"],
+            ["project-1"],
+        )
+
+
 def test_gnocchi_usage_omits_empty_groups(monkeypatch) -> None:
     groups = [_group("instance-1", {"flavor_name": "b2.c1r2"}, [])]
     monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response(groups))
@@ -638,7 +691,7 @@ def test_gnocchi_usage_rejects_invalid_measure(monkeypatch, measure) -> None:
     groups = [_group("instance-1", {"flavor_name": "b2.c1r2"}, [measure])]
     monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: _response(groups))
 
-    with pytest.raises(BillingGenerationError, match="Invalid Gnocchi"):
+    with pytest.raises(BillingGenerationError, match="Gnocchi"):
         _query_gnocchi_usage(
             SimpleNamespace(auth_token="test-token"),
             datetime(2026, 7, 1),

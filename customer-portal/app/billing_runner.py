@@ -970,16 +970,29 @@ def _query_gnocchi_usage(
                             f"Naive Gnocchi timestamp for {resource_type}/{metric_name}"
                         )
                     timestamp = timestamp.astimezone(UTC)
+                    if timestamp < begin_utc or timestamp >= end_utc:
+                        raise BillingGenerationError(
+                            f"Out-of-range Gnocchi timestamp for "
+                            f"{resource_type}/{metric_name}: {timestamp_raw}"
+                        )
                     if (
-                        timestamp < begin_utc
-                        or timestamp >= end_utc
-                        or timestamp.minute != 0
+                        timestamp.minute != 0
                         or timestamp.second != 0
                         or timestamp.microsecond != 0
-                        or timestamp in seen_timestamps
                     ):
                         raise BillingGenerationError(
-                            f"Invalid Gnocchi timestamp for {resource_type}/{metric_name}"
+                            f"Unaligned Gnocchi timestamp for "
+                            f"{resource_type}/{metric_name}: {timestamp_raw}"
+                        )
+                    # History grouping emits one sequence per resource, so
+                    # additive groups legitimately repeat buckets to be summed.
+                    if (
+                        timestamp in seen_timestamps
+                        and not aggregate_across_resources
+                    ):
+                        raise BillingGenerationError(
+                            f"Duplicate Gnocchi timestamp for "
+                            f"{resource_type}/{metric_name}: {timestamp_raw}"
                         )
                     seen_timestamps.add(timestamp)
 
