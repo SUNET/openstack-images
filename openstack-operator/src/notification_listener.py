@@ -41,7 +41,7 @@ async def start_notification_listener(
                 queue = await channel.declare_queue(
                     "openstack-operator-notifications",
                     durable=True,
-                    arguments={"x-message-ttl": 300000},  # 5 min TTL
+                    arguments={"x-queue-type": "quorum", "x-message-ttl": 300000},  # 5 min TTL
                 )
 
                 # oslo.messaging uses exchange = control_exchange (default "openstack")
