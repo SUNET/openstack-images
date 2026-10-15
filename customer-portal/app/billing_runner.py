@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import os
 import re
 import smtplib
 from collections.abc import AsyncIterator
@@ -137,8 +138,40 @@ class GnocchiQueryTimeout(BillingGenerationError):
     """Raised when a bounded query must be divided or retried."""
 
 
+RETIRED_VOLUME_TYPES_ENV = "BILLING_RETIRED_VOLUME_TYPES"
+
+
+def _retired_volume_types() -> dict[str, str]:
+    """Parse ``BILLING_RETIRED_VOLUME_TYPES`` (``<type-id>=<name>,...``).
+
+    Deleted Cinder volume types keep their ID in Gnocchi history. Naming a
+    retired ID here lets reports for periods that still contain that usage
+    resolve it; any other unknown ID still fails the report.
+    """
+    retired: dict[str, str] = {}
+    for item in os.environ.get(RETIRED_VOLUME_TYPES_ENV, "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        type_id, sep, name = (part.strip() for part in item.partition("="))
+        if not sep or not type_id or not name:
+            raise BillingGenerationError(
+                f"Invalid {RETIRED_VOLUME_TYPES_ENV} entry {item!r}; expected <type-id>=<name>"
+            )
+        if retired.get(type_id, name) != name:
+            raise BillingGenerationError(
+                f"{RETIRED_VOLUME_TYPES_ENV} names retired volume type {type_id} twice"
+            )
+        retired[type_id] = name
+    return retired
+
+
 def _get_cinder_volume_type_names(conn) -> dict[str, str]:
-    """Return active Cinder volume type IDs mapped to their canonical names."""
+    """Return Cinder volume type IDs mapped to their canonical names.
+
+    Active types come from Cinder; retired types named in
+    ``BILLING_RETIRED_VOLUME_TYPES`` are added so historical usage resolves.
+    """
     try:
         result: dict[str, str] = {}
         for volume_type in conn.block_storage.types():
@@ -157,6 +190,13 @@ def _get_cinder_volume_type_names(conn) -> dict[str, str]:
             result[type_id] = name
         if not result:
             raise BillingGenerationError("Cinder returned no active volume types")
+        for type_id, name in _retired_volume_types().items():
+            if type_id in result and result[type_id] != name:
+                raise BillingGenerationError(
+                    f"{RETIRED_VOLUME_TYPES_ENV} entry {type_id} conflicts with active type "
+                    f"{result[type_id]}"
+                )
+            result[type_id] = name
         return result
     except BillingGenerationError:
         raise
