@@ -498,9 +498,11 @@ def test_process_report_plans_and_queries_only_from_persisted_snapshot(
     assert (stored.result_content or b"").endswith(b"Addon: notebook;1;month;27\r\n")
 
 
+@pytest.mark.parametrize("volume_plan", [False, True])
 def test_delivery_resume_skips_sent_output_and_completes_linked_run(
     gitops_database: GitOpsDatabase,
     monkeypatch,
+    volume_plan: bool,
 ) -> None:
     from sqlalchemy import create_engine, select
     from sqlalchemy.orm import Session
@@ -515,7 +517,18 @@ def test_delivery_resume_skips_sent_output_and_completes_linked_run(
     gitops_database.migrate("017")
     engine = create_engine(gitops_database.sync_url)
     snapshot = _snapshot()
-    snapshot["query_plan"] = []
+    if volume_plan:
+        # Saved outputs need no type resolution: a malformed retired-type setting
+        # must not block delivering them.
+        monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "malformed")
+        monkeypatch.setattr(billing_reports, "_query_gnocchi_usage", lambda *a, **k: [])
+        monkeypatch.setattr(
+            billing_reports.openstack,
+            "connect",
+            lambda **kwargs: SimpleNamespace(auth_token="token"),
+        )
+    else:
+        snapshot["query_plan"] = []
     delivered_at = datetime(2026, 10, 1)
     with Session(engine) as session:
         job = BillingJob(
