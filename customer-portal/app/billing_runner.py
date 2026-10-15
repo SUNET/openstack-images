@@ -166,14 +166,23 @@ def _retired_volume_types() -> dict[str, str]:
     return retired
 
 
-def _with_retired_volume_types(type_names: dict[str, str]) -> dict[str, str]:
-    """Fill gaps in a stored snapshot's type catalog from the retired-type setting.
+def supplement_snapshot_volume_types(snapshot: dict[str, Any]) -> bool:
+    """Add retired volume types missing from a stored snapshot; True if it changed.
 
-    A report keeps the catalog captured when it was first generated, so reports
-    that failed before a retired type was configured would stay stuck on retry.
-    Only IDs missing from the snapshot are added; the snapshot always wins.
+    A report keeps the type catalog captured when it was first generated, so a
+    report that failed before a retired type was configured would stay stuck on
+    retry. The caller must persist the snapshot when this returns True, so later
+    attempts reuse the saved names even if the setting changes. Names already in
+    the snapshot always win, and snapshots without volume usage are untouched.
     """
-    return {**_retired_volume_types(), **type_names}
+    if not any(product["metric"] == "volume.size" for product in snapshot["query_plan"]):
+        return False
+    types = snapshot["cinder_volume_types"]
+    merged = {**_retired_volume_types(), **types}
+    if merged == types:
+        return False
+    snapshot["cinder_volume_types"] = dict(sorted(merged.items()))
+    return True
 
 
 def _get_cinder_volume_type_names(conn) -> dict[str, str]:
@@ -1516,7 +1525,7 @@ def render_billing_csv(
         usage = usage_by_metric.get(metric, [])
         if metric == "volume.size" and usage:
             usage = _canonicalize_volume_usage(
-                usage, _with_retired_volume_types(snapshot["cinder_volume_types"])
+                usage, snapshot["cinder_volume_types"]
             )
         for entry in usage:
             project = projects.get(entry["project_id"])

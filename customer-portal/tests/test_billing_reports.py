@@ -290,42 +290,101 @@ def test_snapshot_rendering_uses_frozen_inputs_without_live_readers(monkeypatch)
     assert rendered.endswith("Addon: notebook;1;month;27\r\n")
 
 
-def _volume_usage(type_id: str) -> dict:
-    return {
+def test_supplement_adds_only_missing_retired_types(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast,frozen-type-id=other-name"
+    )
+    snapshot = _snapshot()
+
+    assert billing_runner.supplement_snapshot_volume_types(snapshot) is True
+    assert snapshot["cinder_volume_types"] == {
+        "frozen-type-id": "frozen-fast",
+        "retired-id": "frozen-fast",
+    }
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=changed-later")
+    assert billing_runner.supplement_snapshot_volume_types(snapshot) is False
+    assert snapshot["cinder_volume_types"]["retired-id"] == "frozen-fast"
+
+
+def test_supplement_ignores_snapshots_without_volume_usage(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
+    snapshot = _snapshot()
+    snapshot["query_plan"] = [p for p in snapshot["query_plan"] if p["metric"] != "volume.size"]
+
+    assert billing_runner.supplement_snapshot_volume_types(snapshot) is False
+    assert snapshot["cinder_volume_types"] == {"frozen-type-id": "frozen-fast"}
+
+
+def test_render_does_not_read_retired_setting(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
+    usage = {
         "volume.size": [
             {
                 "project_id": "frozen-project",
                 "metric": "frozen.metric",
-                "metadata": {"volume_type": type_id},
+                "metadata": {"volume_type": "retired-id"},
                 "hours": Decimal(0),
                 "size_months": Decimal(10),
             }
         ]
     }
 
-
-def test_render_resolves_retired_type_missing_from_old_snapshot(monkeypatch) -> None:
-    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
-
-    rendered = render_billing_csv(_snapshot(), _volume_usage("retired-id"))
-
-    assert "volume.size (frozen-fast);10.00;GB-month;27" in rendered
-
-
-def test_render_snapshot_type_wins_over_retired_setting(monkeypatch) -> None:
-    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "frozen-type-id=other-name")
-
-    rendered = render_billing_csv(_snapshot(), _volume_usage("frozen-type-id"))
-
-    assert "volume.size (frozen-fast);10.00;GB-month;27" in rendered
-    assert "other-name" not in rendered
-
-
-def test_render_still_fails_for_unlisted_retired_type(monkeypatch) -> None:
-    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
-
     with pytest.raises(billing_runner.BillingGenerationError, match="unknown or no longer"):
-        render_billing_csv(_snapshot(), _volume_usage("some-other-id"))
+        render_billing_csv(_snapshot(), usage)
+
+
+def test_process_report_persists_retired_types_before_use(
+    gitops_database: GitOpsDatabase,
+    monkeypatch,
+) -> None:
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+
+    from app.billing_runner import load_billing_input_snapshot, serialize_billing_input_snapshot
+    from app.models import BillingReport
+
+    gitops_database.migrate("017")
+    engine = create_engine(gitops_database.sync_url)
+    report = BillingReport(
+        id="retired-report",
+        requested_by_sub="admin@test",
+        status="running",
+        billing_period_start=datetime(2026, 9, 1),
+        billing_period_end=datetime(2026, 10, 1),
+        contract_numbers_json='["CO-001"]',
+        input_snapshot_json=serialize_billing_input_snapshot(_snapshot()),
+        filename_template="billing.csv",
+        per_contract=False,
+        progress_current=0,
+        progress_total=0,
+    )
+    with Session(engine) as session:
+        session.add(report)
+        session.commit()
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
+    monkeypatch.setattr(billing_reports, "_query_gnocchi_usage", lambda *a, **k: [])
+    monkeypatch.setattr(
+        billing_reports.openstack, "connect", lambda **kwargs: SimpleNamespace(auth_token="token")
+    )
+
+    try:
+        billing_reports.process_report(
+            gitops_database.sync_url.render_as_string(hide_password=False),
+            "test",
+            "retired-report",
+        )
+        # Changing the setting afterwards must not change the saved mapping.
+        monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=changed-later")
+        with Session(engine) as session:
+            stored = session.scalar(
+                select(BillingReport).where(BillingReport.id == "retired-report")
+            )
+            types = load_billing_input_snapshot(stored.input_snapshot_json)["cinder_volume_types"]
+    finally:
+        engine.dispose()
+
+    assert types["retired-id"] == "frozen-fast"
+    assert types["frozen-type-id"] == "frozen-fast"
 
 
 def test_process_report_plans_and_queries_only_from_persisted_snapshot(
