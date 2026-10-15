@@ -25,6 +25,7 @@ from app.billing_runner import (
     render_billing_csv,
     resolve_template,
     serialize_billing_input_snapshot,
+    supplement_snapshot_volume_types,
 )
 from app.models import (
     BillingJobRun,
@@ -269,6 +270,19 @@ def process_report(database_url: str, cloud_name: str, report_id: str) -> bool:
                 db.commit()
             else:
                 snapshot = load_billing_input_snapshot(report.input_snapshot_json)
+                # Saved outputs need no type resolution; a bad retired-type setting
+                # must not block delivering them.
+                has_outputs = (
+                    db.scalar(
+                        select(BillingReportOutput.id)
+                        .where(BillingReportOutput.report_id == report.id)
+                        .limit(1)
+                    )
+                    is not None
+                )
+                if not has_outputs and supplement_snapshot_volume_types(snapshot):
+                    report.input_snapshot_json = serialize_billing_input_snapshot(snapshot)
+                    db.commit()
 
             if not report.shards:
                 snapshot_start = datetime.fromisoformat(

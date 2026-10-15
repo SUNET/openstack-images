@@ -166,6 +166,25 @@ def _retired_volume_types() -> dict[str, str]:
     return retired
 
 
+def supplement_snapshot_volume_types(snapshot: dict[str, Any]) -> bool:
+    """Add retired volume types missing from a stored snapshot; True if it changed.
+
+    A report keeps the type catalog captured when it was first generated, so a
+    report that failed before a retired type was configured would stay stuck on
+    retry. The caller must persist the snapshot when this returns True, so later
+    attempts reuse the saved names even if the setting changes. Names already in
+    the snapshot always win, and snapshots without volume usage are untouched.
+    """
+    if not any(product["metric"] == "volume.size" for product in snapshot["query_plan"]):
+        return False
+    types = snapshot["cinder_volume_types"]
+    merged = {**_retired_volume_types(), **types}
+    if merged == types:
+        return False
+    snapshot["cinder_volume_types"] = dict(sorted(merged.items()))
+    return True
+
+
 def _get_cinder_volume_type_names(conn) -> dict[str, str]:
     """Return Cinder volume type IDs mapped to their canonical names.
 
