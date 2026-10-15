@@ -224,6 +224,47 @@ def test_cinder_volume_type_catalog_fails_closed(volume_types, message) -> None:
         _get_cinder_volume_type_names(connection)
 
 
+def _connection_with_active_type() -> SimpleNamespace:
+    active = [SimpleNamespace(id="new-uuid", name="balanced")]
+    return SimpleNamespace(block_storage=SimpleNamespace(types=lambda: active))
+
+
+def test_retired_volume_types_resolve_historical_usage(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "old-uuid=rbd1, other-uuid = bulk")
+
+    type_names = _get_cinder_volume_type_names(_connection_with_active_type())
+
+    assert type_names == {"new-uuid": "balanced", "old-uuid": "rbd1", "other-uuid": "bulk"}
+    assert _resolve_cinder_volume_type("old-uuid", type_names) == "rbd1"
+    with pytest.raises(BillingGenerationError, match="unknown or no longer active"):
+        _resolve_cinder_volume_type("unlisted-uuid", type_names)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("old-uuid", "expected <type-id>=<name>"),
+        ("=rbd1", "expected <type-id>=<name>"),
+        ("old-uuid=", "expected <type-id>=<name>"),
+        ("old-uuid=rbd1,old-uuid=bulk", "twice"),
+        ("new-uuid=bulk", "conflicts with active type"),
+    ],
+)
+def test_retired_volume_types_fail_closed(monkeypatch, value, message) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", value)
+
+    with pytest.raises(BillingGenerationError, match=message):
+        _get_cinder_volume_type_names(_connection_with_active_type())
+
+
+def test_retired_volume_types_do_not_satisfy_empty_catalog(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "old-uuid=rbd1")
+    connection = SimpleNamespace(block_storage=SimpleNamespace(types=lambda: []))
+
+    with pytest.raises(BillingGenerationError, match="no active volume types"):
+        _get_cinder_volume_type_names(connection)
+
+
 def test_unsupported_metered_product_fails_closed(monkeypatch) -> None:
     price = SimpleNamespace(
         resource_type="image.size",
