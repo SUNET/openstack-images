@@ -290,6 +290,44 @@ def test_snapshot_rendering_uses_frozen_inputs_without_live_readers(monkeypatch)
     assert rendered.endswith("Addon: notebook;1;month;27\r\n")
 
 
+def _volume_usage(type_id: str) -> dict:
+    return {
+        "volume.size": [
+            {
+                "project_id": "frozen-project",
+                "metric": "frozen.metric",
+                "metadata": {"volume_type": type_id},
+                "hours": Decimal(0),
+                "size_months": Decimal(10),
+            }
+        ]
+    }
+
+
+def test_render_resolves_retired_type_missing_from_old_snapshot(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
+
+    rendered = render_billing_csv(_snapshot(), _volume_usage("retired-id"))
+
+    assert "volume.size (frozen-fast);10.00;GB-month;27" in rendered
+
+
+def test_render_snapshot_type_wins_over_retired_setting(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "frozen-type-id=other-name")
+
+    rendered = render_billing_csv(_snapshot(), _volume_usage("frozen-type-id"))
+
+    assert "volume.size (frozen-fast);10.00;GB-month;27" in rendered
+    assert "other-name" not in rendered
+
+
+def test_render_still_fails_for_unlisted_retired_type(monkeypatch) -> None:
+    monkeypatch.setenv("BILLING_RETIRED_VOLUME_TYPES", "retired-id=frozen-fast")
+
+    with pytest.raises(billing_runner.BillingGenerationError, match="unknown or no longer"):
+        render_billing_csv(_snapshot(), _volume_usage("some-other-id"))
+
+
 def test_process_report_plans_and_queries_only_from_persisted_snapshot(
     gitops_database: GitOpsDatabase,
     monkeypatch,

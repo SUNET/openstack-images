@@ -166,6 +166,16 @@ def _retired_volume_types() -> dict[str, str]:
     return retired
 
 
+def _with_retired_volume_types(type_names: dict[str, str]) -> dict[str, str]:
+    """Fill gaps in a stored snapshot's type catalog from the retired-type setting.
+
+    A report keeps the catalog captured when it was first generated, so reports
+    that failed before a retired type was configured would stay stuck on retry.
+    Only IDs missing from the snapshot are added; the snapshot always wins.
+    """
+    return {**_retired_volume_types(), **type_names}
+
+
 def _get_cinder_volume_type_names(conn) -> dict[str, str]:
     """Return Cinder volume type IDs mapped to their canonical names.
 
@@ -1506,7 +1516,7 @@ def render_billing_csv(
         usage = usage_by_metric.get(metric, [])
         if metric == "volume.size" and usage:
             usage = _canonicalize_volume_usage(
-                usage, snapshot["cinder_volume_types"]
+                usage, _with_retired_volume_types(snapshot["cinder_volume_types"])
             )
         for entry in usage:
             project = projects.get(entry["project_id"])
