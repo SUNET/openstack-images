@@ -29,6 +29,15 @@ extra_jobs:
     docker_tags:
       - "2025.2-ubuntu_noble-2"
 
+  # Keystone with OIDC support, OpenStack 2026.1
+  - name: openstack-keystone-2026.1
+    builders:
+      - docker
+    docker_name: platform/openstack-keystone
+    docker_context_dir: keystone-2026.1
+    docker_tags:
+      - "2026.1-ubuntu_noble-1"
+
   # Libvirt with QEMU SPICE support, OpenStack 2025.2
   - name: openstack-libvirt-2025.2
     builders:
@@ -37,6 +46,15 @@ extra_jobs:
     docker_context_dir: libvirt-2025.2
     docker_tags:
       - "2025.2-ubuntu_noble-1"
+
+  # Libvirt with QEMU SPICE support, OpenStack 2026.1
+  - name: openstack-libvirt-2026.1
+    builders:
+      - docker
+    docker_name: platform/openstack-libvirt
+    docker_context_dir: libvirt-2026.1
+    docker_tags:
+      - "2026.1-ubuntu_noble-1"
 
   # OpenStack Operator (Kopf-based K8s operator)
   - name: openstack-operator
