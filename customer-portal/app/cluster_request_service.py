@@ -4,7 +4,7 @@ Each request lives as a row in `cluster_request` until a SUNET admin applies
 or denies it. Application is dispatched by request type:
 
   addon enable/disable  -> insert/stamp ClusterAddon row
-  resize                -> bump TenantCluster.worker_groups, record `before` in payload
+  resize                -> expand project quota and cluster desired state, then portal state
   backup enable         -> write managed OpenstackProject CR, link from cluster
   backup disable        -> delete the CR, unlink
 
@@ -26,6 +26,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.cluster_git_backend import ClusterGitBackend
+from app.cluster_quotas import managed_cluster_quotas
 from app.config import get_settings
 from app.git_backend import GitBackend
 from app.models import ClusterAddon, ClusterRequest, Contract, TenantCluster
@@ -184,7 +186,12 @@ async def _apply_addon(
 
 
 async def _apply_resize(
-    cluster: TenantCluster, request: ClusterRequest, payload: dict, session: AsyncSession
+    cluster: TenantCluster,
+    request: ClusterRequest,
+    payload: dict,
+    session: AsyncSession,
+    git_backend: GitBackend,
+    cluster_git_backend: ClusterGitBackend | None,
 ) -> None:
     target = payload["target_worker_groups"]
     if target <= cluster.worker_groups:
@@ -192,6 +199,25 @@ async def _apply_resize(
             status_code=400,
             detail=f"target_worker_groups must be > current ({cluster.worker_groups})",
         )
+    if not cluster.management_project_resource_name:
+        raise HTTPException(status_code=409, detail="Cluster has no managed project")
+    if cluster_git_backend is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Cluster manifest repository is not configured",
+        )
+
+    # Grant quota before asking the cluster operator to add nodes. Publishing
+    # excess quota is safe if the second repository update fails, and both
+    # backend operations are idempotent so the pending request can be retried.
+    quotas = managed_cluster_quotas(target)
+    await asyncio.to_thread(
+        git_backend.update_project,
+        resource_name=cluster.management_project_resource_name,
+        quotas=quotas,
+    )
+    await asyncio.to_thread(cluster_git_backend.update_worker_groups, cluster.slug, target)
+
     # Stamp the before-count into the payload so the billing engine can
     # compute the expansion-fee delta from this row alone.
     payload["before_worker_groups"] = cluster.worker_groups
@@ -246,6 +272,7 @@ async def apply_request(
     note: str | None,
     session: AsyncSession,
     git_backend: GitBackend,
+    cluster_git_backend: ClusterGitBackend | None,
 ) -> None:
     if request.status != "pending":
         raise HTTPException(status_code=409, detail=f"Request already {request.status}")
@@ -261,7 +288,14 @@ async def apply_request(
     if request.request_type == "addon":
         await _apply_addon(cluster, payload, by_sub, session)
     elif request.request_type == "resize":
-        await _apply_resize(cluster, request, payload, session)
+        await _apply_resize(
+            cluster,
+            request,
+            payload,
+            session,
+            git_backend,
+            cluster_git_backend,
+        )
     elif request.request_type == "backup":
         await _apply_backup(cluster, payload, by_sub, session, git_backend)
     else:

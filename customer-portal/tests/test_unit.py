@@ -454,9 +454,9 @@ def test_cluster_patch_rejects_advanced_role_and_namespace_edits(field: str) -> 
 @pytest.mark.parametrize(
     ("worker_groups", "expected"),
     [
-        (1, (7, 19, 62 * 1024, 7, 620)),
-        (2, (10, 31, 110 * 1024, 10, 920)),
-        (3, (13, 43, 158 * 1024, 13, 1220)),
+        (1, (11, 33, 114 * 1024, 11, 1024)),
+        (2, (14, 45, 162 * 1024, 14, 1320)),
+        (3, (17, 57, 210 * 1024, 17, 1620)),
     ],
 )
 def test_managed_cluster_quotas(worker_groups: int, expected: tuple[int, ...]) -> None:

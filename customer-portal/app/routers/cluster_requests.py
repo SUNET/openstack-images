@@ -152,6 +152,7 @@ async def admin_apply_request(
         note=body.note,
         session=session,
         git_backend=request.app.state.git_backend,
+        cluster_git_backend=getattr(request.app.state, "cluster_git_backend", None),
     )
     await session.commit()
     audit_log(

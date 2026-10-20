@@ -386,7 +386,7 @@ class GitBackend:
                 spec["description"] = description
                 changed.append("description")
 
-            if quotas is not None:
+            if quotas is not None and spec.get("quotas") != quotas:
                 spec["quotas"] = quotas
                 changed.append("quotas")
 
@@ -405,6 +405,9 @@ class GitBackend:
                         }
                     ]
                 changed.append("users")
+
+            if not changed:
+                return _parse_project(doc)
 
             self._write_yaml(file_path, doc)
             self._commit_and_push(

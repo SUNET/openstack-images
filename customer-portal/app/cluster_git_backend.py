@@ -301,6 +301,44 @@ class ClusterGitBackend:
                     logger.exception("Failed to restore cluster repository clone")
                 raise
 
+    def update_worker_groups(self, slug: str, worker_groups: int) -> None:
+        """Update cluster capacity without replacing other desired state."""
+        if worker_groups < 1:
+            raise ValueError("worker_groups must be at least 1")
+
+        with self._lock:
+            self._pull()
+            path = self._manifest_path(slug)
+            if not path.exists():
+                raise ValueError(f"Cluster manifest '{slug}' not found")
+
+            document = yaml.safe_load(path.read_text())
+            metadata = document.get("metadata") if isinstance(document, dict) else None
+            spec = document.get("spec") if isinstance(document, dict) else None
+            if (
+                not isinstance(document, dict)
+                or document.get("kind") != "ManagedCluster"
+                or not isinstance(metadata, dict)
+                or metadata.get("name") != slug
+                or not isinstance(spec, dict)
+                or not isinstance(spec.get("workerGroups"), int)
+            ):
+                raise ValueError(f"Cluster manifest '{slug}' has an unexpected structure")
+
+            if spec["workerGroups"] == worker_groups:
+                return
+            spec["workerGroups"] = worker_groups
+
+            try:
+                path.write_text("---\n" + dump_yaml(document, sort_keys=False))
+                self._commit_and_push(f"Resize customer cluster {slug} to {worker_groups} groups")
+            except Exception:
+                try:
+                    self._restore_origin()
+                except Exception:
+                    logger.exception("Failed to restore cluster repository clone")
+                raise
+
     def delete_cluster(self, slug: str) -> None:
         """Refuse portal deletion of any published cluster manifest."""
         with self._lock:

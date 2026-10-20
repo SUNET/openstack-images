@@ -244,6 +244,29 @@ def test_write_cluster_renders_environment_specific_manifest(
     }
 
 
+def test_update_worker_groups_preserves_other_desired_state(
+    backend: ClusterGitBackend,
+) -> None:
+    path = backend.write_cluster(
+        slug="umu-one",
+        display_name="UMU cluster one",
+        contract_number="CO-001",
+        customer_domain="umu.se",
+        worker_groups=1,
+        project_name="umu-one.umu.se",
+        project_resource_name="umu-one-umu-se",
+        argocd_alias="argocd.umu.example.org",
+    )
+    before = yaml.safe_load((backend.work_dir / path).read_text())
+
+    backend.update_worker_groups("umu-one", 3)
+
+    after = yaml.safe_load((backend.work_dir / path).read_text())
+    assert after["spec"]["workerGroups"] == 3
+    before["spec"]["workerGroups"] = 3
+    assert after == before
+
+
 def test_unsupported_profile_name_is_rejected(monkeypatch) -> None:
     monkeypatch.setenv("CLUSTER_PROFILE_NAME", "gpu-v2")
 

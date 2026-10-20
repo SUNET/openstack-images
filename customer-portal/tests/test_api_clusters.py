@@ -105,12 +105,23 @@ class StubGitBackend:
             out = [p for p in out if p["contract_number"] == contract_number]
         return out
 
-    def update_project(self, *, resource_name, description=None, users=None, role_bindings=None):
+    def update_project(
+        self,
+        *,
+        resource_name,
+        description=None,
+        users=None,
+        role_bindings=None,
+        quotas=None,
+    ):
         p = self.projects.get(resource_name)
         if not p:
             raise ValueError(f"Project '{resource_name}' not found")
         if description is not None:
             p["description"] = description
+        if quotas is not None:
+            p["quotas"] = quotas
+            self.publication_order.append("project-quota")
         if role_bindings is not None:
             p["role_bindings"] = role_bindings
             extracted: list[str] = []
@@ -160,6 +171,12 @@ class StubClusterGitBackend:
             self.clusters[slug].pop("argocd_alias", None)
         else:
             self.clusters[slug]["argocd_alias"] = argocd_alias
+
+    def update_worker_groups(self, slug, worker_groups):
+        if slug not in self.clusters:
+            raise ValueError(f"Cluster manifest '{slug}' not found")
+        self.clusters[slug]["worker_groups"] = worker_groups
+        self.publication_order.append("cluster-resize")
 
     def delete_cluster(self, slug):
         if slug not in self.clusters:
@@ -1254,7 +1271,9 @@ async def test_addon_request_apply_and_disable_ui_state(client, session):
     assert "jupyterhub" in r.json()["active_addons"]
 
 
-async def test_resize_apply_records_before_count(client, session):
+async def test_resize_apply_updates_quota_and_desired_capacity(
+    client, session, git_backend, cluster_git_backend, publication_order
+):
     _, contract = await seed_customer_contract(session)
     _login_as("admin@test")
     _require_admin_for({"admin@test"})
@@ -1296,6 +1315,9 @@ async def test_resize_apply_records_before_count(client, session):
     payload = r.json()["payload"]
     assert payload["before_worker_groups"] == 1
     assert payload["target_worker_groups"] == 3
+    assert git_backend.projects["c1-acme"]["quotas"] == managed_cluster_quotas(3)
+    assert cluster_git_backend.clusters["c1"]["worker_groups"] == 3
+    assert publication_order[-2:] == ["project-quota", "cluster-resize"]
 
     r = await client.get("/api/admin/clusters/c1")
     assert r.json()["worker_groups"] == 3
