@@ -117,6 +117,8 @@ async def require_cluster_access(
     ).scalar_one_or_none()
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
+    if cluster.decommissioned_at is not None:
+        raise HTTPException(status_code=410, detail="Cluster has been decommissioned")
 
     if is_sunet_admin(user_sub, settings):
         return cluster, None

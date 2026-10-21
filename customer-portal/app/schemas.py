@@ -579,6 +579,14 @@ class UpdateArgocdAliasRequest(BaseModel):
         return _validate_argocd_alias(value) if value is not None else None
 
 
+class DecommissionClusterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: str = Field(min_length=1, max_length=64)
+    infrastructure_removed: Literal[True]
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class ClusterResponse(BaseModel):
     id: int
     customer_id: int
@@ -593,6 +601,9 @@ class ClusterResponse(BaseModel):
     size_label: str
     total_servers: int  # Kubernetes nodes; excludes one jump host.
     provisioned_at: datetime | None = None
+    decommissioned_at: datetime | None = None
+    decommissioned_by_sub: str | None = None
+    decommission_note: str | None = None
     management_project_resource_name: str | None = None
     backup_project_resource_name: str | None = None
     argocd_namespace: str

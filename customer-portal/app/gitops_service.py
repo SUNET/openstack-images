@@ -34,6 +34,8 @@ async def cluster_by_slug(slug: str, session: AsyncSession) -> TenantCluster:
     )
     if cluster is None:
         raise HTTPException(404, "Cluster not found")
+    if cluster.decommissioned_at is not None:
+        raise HTTPException(410, "Cluster has been decommissioned")
     return cluster
 
 

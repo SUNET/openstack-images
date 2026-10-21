@@ -6,10 +6,11 @@
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -27,7 +28,12 @@ from app.cluster_quotas import managed_cluster_quotas
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.git_backend import GitBackend, _sanitize_name, managed_role_bindings
-from app.k8s import find_project_cr_by_spec_name
+from app.k8s import (
+    ManagedClusterLookupError,
+    find_project_cr_by_spec_name,
+    get_managed_cluster,
+    project_cr_exists,
+)
 from app.models import (
     ClusterAccess,
     ClusterAddon,
@@ -44,6 +50,7 @@ from app.schemas import (
     ClusterAccessResponse,
     ClusterResponse,
     CreateClusterRequest,
+    DecommissionClusterRequest,
     UpdateArgocdAliasRequest,
     UpdateClusterRequest,
     _size_label,
@@ -164,6 +171,9 @@ async def _to_response(
         size_label=_size_label(cluster.worker_groups),
         total_servers=3 + 3 * cluster.worker_groups,
         provisioned_at=cluster.provisioned_at,
+        decommissioned_at=cluster.decommissioned_at,
+        decommissioned_by_sub=cluster.decommissioned_by_sub,
+        decommission_note=cluster.decommission_note,
         management_project_resource_name=cluster.management_project_resource_name,
         backup_project_resource_name=cluster.backup_project_resource_name,
         argocd_namespace=cluster.argocd_namespace,
@@ -397,18 +407,14 @@ async def admin_bootstrap_gitops(
 
 @admin_router.get("", response_model=list[ClusterResponse])
 async def admin_list_clusters(
+    include_decommissioned: bool = False,
     _user=Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ):
-    rows = (
-        (
-            await session.execute(
-                select(TenantCluster).options(selectinload(TenantCluster.contract))
-            )
-        )
-        .scalars()
-        .all()
-    )
+    statement = select(TenantCluster).options(selectinload(TenantCluster.contract))
+    if not include_decommissioned:
+        statement = statement.where(TenantCluster.decommissioned_at.is_(None))
+    rows = (await session.execute(statement)).scalars().all()
     return [await _to_response(c, caller_role="sunet_admin", session=session) for c in rows]
 
 
@@ -543,6 +549,122 @@ async def admin_delete_cluster(
     audit_log(user["sub"], "cluster.delete", slug=slug)
 
 
+@admin_router.post("/{slug}/decommission", response_model=ClusterResponse)
+async def admin_decommission_cluster(
+    slug: str,
+    body: DecommissionClusterRequest,
+    request: Request,
+    user=Depends(require_admin),
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_session),
+):
+    """Finalize verified external cleanup while preserving lifecycle history."""
+    cluster = await locked_cluster(slug, session, allow_decommissioned=True)
+    if cluster.decommissioned_at is not None:
+        raise HTTPException(409, "Cluster is already decommissioned")
+    if body.confirmation != cluster.slug:
+        raise HTTPException(422, "Confirmation must exactly match the cluster slug")
+
+    active_operation = await session.scalar(
+        select(GitOpsOperation.id)
+        .where(
+            GitOpsOperation.cluster_id == cluster.id,
+            GitOpsOperation.status.in_(("queued", "running")),
+        )
+        .limit(1)
+    )
+    if active_operation is not None:
+        raise HTTPException(409, "Cluster has an active GitOps operation")
+
+    cluster_git_backend = getattr(request.app.state, "cluster_git_backend", None)
+    if cluster_git_backend is None:
+        raise HTTPException(503, "Cluster manifest repository is not configured")
+    if await asyncio.to_thread(cluster_git_backend.exists, cluster.slug):
+        raise HTTPException(409, "Cluster manifest still exists in desired state")
+    try:
+        await asyncio.to_thread(
+            get_managed_cluster,
+            cluster.slug,
+            settings.managed_cluster_namespace,
+        )
+    except ManagedClusterLookupError as exc:
+        if exc.code != "missing":
+            raise HTTPException(503, f"Cannot verify ManagedCluster removal: {exc}") from exc
+    else:
+        raise HTTPException(409, "ManagedCluster still exists in the management cluster")
+
+    git_backend: GitBackend = request.app.state.git_backend
+    for resource_name in (
+        cluster.management_project_resource_name,
+        cluster.backup_project_resource_name,
+    ):
+        if resource_name and await asyncio.to_thread(git_backend.get_project, resource_name):
+            raise HTTPException(
+                409,
+                f"Managed project '{resource_name}' still exists in desired state",
+            )
+        try:
+            exists = resource_name and await asyncio.to_thread(
+                project_cr_exists,
+                resource_name,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(503, f"Cannot verify managed project removal: {exc}") from exc
+        if exists:
+            raise HTTPException(409, f"Managed project '{resource_name}' still exists")
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    await session.execute(
+        update(KubeconfigIssuance)
+        .where(
+            KubeconfigIssuance.cluster_id == cluster.id,
+            KubeconfigIssuance.revoked_at.is_(None),
+        )
+        .values(revoked_at=now, revoked_by_sub=user["sub"])
+    )
+    await session.execute(
+        update(ClusterAddon)
+        .where(
+            ClusterAddon.cluster_id == cluster.id,
+            ClusterAddon.disabled_at.is_(None),
+        )
+        .values(disabled_at=now, disabled_by_sub=user["sub"])
+    )
+    await session.execute(
+        update(ClusterRequest)
+        .where(
+            ClusterRequest.cluster_id == cluster.id,
+            ClusterRequest.status == "pending",
+        )
+        .values(
+            status="denied",
+            applied_at=now,
+            applied_by_sub=user["sub"],
+            note=f"Cluster decommissioned: {body.note}",
+        )
+    )
+    await session.execute(
+        update(GitOpsOperation)
+        .where(
+            GitOpsOperation.cluster_id == cluster.id,
+            GitOpsOperation.status == "preview_ready",
+        )
+        .values(status="superseded", finished_at=now)
+    )
+    cluster.decommissioned_at = now
+    cluster.decommissioned_by_sub = user["sub"]
+    cluster.decommission_note = body.note
+    cluster.config_version += 1
+    await session.commit()
+    audit_log(user["sub"], "cluster.decommission", slug=slug, note=body.note)
+    return await _to_response(
+        cluster,
+        caller_role="sunet_admin",
+        session=session,
+        settings=settings,
+    )
+
+
 # --- Member-facing list/get + access mgmt ---
 
 
@@ -556,7 +678,9 @@ async def list_clusters(
         rows = (
             (
                 await session.execute(
-                    select(TenantCluster).options(selectinload(TenantCluster.contract))
+                    select(TenantCluster)
+                    .options(selectinload(TenantCluster.contract))
+                    .where(TenantCluster.decommissioned_at.is_(None))
                 )
             )
             .scalars()
@@ -568,7 +692,10 @@ async def list_clusters(
         await session.execute(
             select(TenantCluster, ClusterAccess.role)
             .join(ClusterAccess, ClusterAccess.cluster_id == TenantCluster.id)
-            .where(ClusterAccess.user_sub == user["sub"])
+            .where(
+                ClusterAccess.user_sub == user["sub"],
+                TenantCluster.decommissioned_at.is_(None),
+            )
             .options(selectinload(TenantCluster.contract))
         )
     ).all()

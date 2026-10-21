@@ -574,6 +574,7 @@ async def repository_response(
             ClusterGitOps.repository_id == repository.id,
             ClusterGitOps.environment == environment,
             Contract.customer_id == customer_id,
+            TenantCluster.decommissioned_at.is_(None),
         )
         .order_by(TenantCluster.slug)
     )

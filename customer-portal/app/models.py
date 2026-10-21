@@ -366,6 +366,9 @@ class TenantCluster(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     created_by_sub: Mapped[str] = mapped_column(String(255), nullable=False)
+    decommissioned_at: Mapped[datetime | None] = mapped_column(DateTime)
+    decommissioned_by_sub: Mapped[str | None] = mapped_column(String(255))
+    decommission_note: Mapped[str | None] = mapped_column(Text)
 
     contract: Mapped["Contract"] = relationship()
     access_grants: Mapped[list["ClusterAccess"]] = relationship(

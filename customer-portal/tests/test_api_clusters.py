@@ -33,6 +33,7 @@ from app.cluster_git_backend import ClusterDeletionBlocked
 from app.cluster_quotas import managed_cluster_quotas
 from app.config import get_settings
 from app.git_backend import managed_role_bindings
+from app.k8s import ManagedClusterLookupError
 from app.main import app as fastapi_app
 from app.models import (
     ClusterAccess,
@@ -846,6 +847,101 @@ async def test_admin_delete_refuses_legacy_record_with_project_state(
     assert "acme-prod-acme" in git_backend.projects
     response = await client.get("/api/admin/clusters/acme-prod")
     assert response.status_code == 200
+
+
+async def test_admin_finalizes_verified_decommissioning_and_preserves_history(
+    client,
+    session,
+    git_backend,
+    cluster_git_backend,
+    monkeypatch,
+):
+    def missing_managed_cluster(*_args):
+        raise ManagedClusterLookupError("missing", "not found")
+
+    monkeypatch.setattr("app.routers.clusters.get_managed_cluster", missing_managed_cluster)
+    monkeypatch.setattr("app.routers.clusters.project_cr_exists", lambda *_args: False)
+    await seed_customer_contract(session)
+    await session.commit()
+    _login_as("admin@test")
+    _require_admin_for({"admin@test"})
+    _is_sunet_admin_for({"admin@test"})
+    response = await client.post(
+        "/api/admin/clusters",
+        json={
+            "contract_number": "CO-001",
+            "name": "Acme prod",
+            "slug": "acme-prod",
+        },
+    )
+    assert response.status_code == 201, response.text
+    cluster = await session.scalar(
+        select(TenantCluster).where(TenantCluster.slug == "acme-prod")
+    )
+    issuance = KubeconfigIssuance(
+        cluster_id=cluster.id,
+        user_sub="alice@org",
+        label="old",
+        cert_serial="serial",
+        rolebinding_name="portal-old",
+        cert_group="tenant-old",
+        expires_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    addon = ClusterAddon(
+        cluster_id=cluster.id,
+        addon_type="jupyterhub",
+        enabled_by_sub="admin@test",
+    )
+    change_request = ClusterRequest(
+        cluster_id=cluster.id,
+        request_type="resize",
+        payload='{"target_worker_groups": 2}',
+        requested_by_sub="alice@org",
+        status="pending",
+    )
+    session.add_all([issuance, addon, change_request])
+    await session.commit()
+
+    del cluster_git_backend.clusters["acme-prod"]
+    git_backend.delete_project("acme-prod-acme")
+
+    response = await client.post(
+        "/api/admin/clusters/acme-prod/decommission",
+        json={
+            "confirmation": "wrong",
+            "infrastructure_removed": True,
+            "note": "OPS-123",
+        },
+    )
+    assert response.status_code == 422
+
+    response = await client.post(
+        "/api/admin/clusters/acme-prod/decommission",
+        json={
+            "confirmation": "acme-prod",
+            "infrastructure_removed": True,
+            "note": "OPS-123 cleanup complete",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["decommission_note"] == "OPS-123 cleanup complete"
+    assert response.json()["decommissioned_at"] is not None
+
+    await session.refresh(issuance)
+    await session.refresh(addon)
+    await session.refresh(change_request)
+    assert issuance.revoked_at is not None
+    assert issuance.revoked_by_sub == "admin@test"
+    assert addon.disabled_at is not None
+    assert addon.disabled_by_sub == "admin@test"
+    assert change_request.status == "denied"
+
+    response = await client.get("/api/admin/clusters")
+    assert all(item["slug"] != "acme-prod" for item in response.json())
+    response = await client.get("/api/admin/clusters?include_decommissioned=true")
+    assert any(item["slug"] == "acme-prod" for item in response.json())
+    response = await client.get("/api/clusters/acme-prod")
+    assert response.status_code == 410
 
 
 async def test_customer_admin_grants_user_access(client, session):

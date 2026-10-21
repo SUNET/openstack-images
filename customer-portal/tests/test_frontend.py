@@ -179,6 +179,15 @@ def test_cluster_creation_has_no_repository_credential_fields() -> None:
     assert "sessionStorage" not in js
 
 
+def test_cluster_decommissioning_requires_explicit_cleanup_confirmation() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+
+    assert "Decommissioned cluster history" in js
+    assert "Finalize decommissioning" in js
+    assert "infrastructure_removed: true" in js
+    assert "Type ${c.slug} to confirm" in js
+
+
 def test_live_cluster_keeps_versioned_settings_and_shared_repository_editor() -> None:
     js = APP_JS.read_text(encoding="utf-8")
     detail = js.split("async function renderAdminClusterDetail(slug)", 1)[1].split(

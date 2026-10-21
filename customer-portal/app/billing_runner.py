@@ -19,7 +19,7 @@ from uuid import uuid4
 import httpx
 import openstack
 from croniter import croniter
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
@@ -503,6 +503,10 @@ def _capture_synthetic_facts(
             select(TenantCluster).where(
                 TenantCluster.provisioned_at.is_not(None),
                 TenantCluster.provisioned_at < period_end,
+                or_(
+                    TenantCluster.decommissioned_at.is_(None),
+                    TenantCluster.decommissioned_at > period_start,
+                ),
                 TenantCluster.contract_id.in_(contract_id_to_number),
             )
         ).scalars()
@@ -826,13 +830,17 @@ def _emit_synthetic_cluster_lines(
     """
     contract_id_to_number = {v: k for k, v in contract_id_map.items()}
 
-    # Load all provisioned clusters active during this period. We don't model
-    # decommissioning yet, so "active" ≡ provisioned_at < period_end.
+    # Management fees are monthly and not prorated. Include a cluster in the
+    # month in which it was decommissioned, then stop billing in later months.
     clusters = list(
         sync_session.execute(
             select(TenantCluster).where(
                 TenantCluster.provisioned_at.is_not(None),
                 TenantCluster.provisioned_at < period_end,
+                or_(
+                    TenantCluster.decommissioned_at.is_(None),
+                    TenantCluster.decommissioned_at > period_start,
+                ),
             )
         ).scalars()
     )

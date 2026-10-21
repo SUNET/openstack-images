@@ -283,6 +283,9 @@ async def apply_request(
         )
     ).scalar_one()
 
+    if cluster.decommissioned_at is not None:
+        raise HTTPException(status_code=410, detail="Cluster has been decommissioned")
+
     payload = json.loads(request.payload)
 
     if request.request_type == "addon":

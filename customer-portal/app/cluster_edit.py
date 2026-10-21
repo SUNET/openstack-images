@@ -65,7 +65,12 @@ def validate_ca_bundle(value: str) -> str:
     return value
 
 
-async def locked_cluster(slug: str, session: AsyncSession) -> TenantCluster:
+async def locked_cluster(
+    slug: str,
+    session: AsyncSession,
+    *,
+    allow_decommissioned: bool = False,
+) -> TenantCluster:
     """Re-read metadata after waiting for any earlier cluster mutation to commit."""
     cluster = await session.scalar(
         select(TenantCluster)
@@ -76,6 +81,8 @@ async def locked_cluster(slug: str, session: AsyncSession) -> TenantCluster:
     )
     if cluster is None:
         raise HTTPException(404, "Cluster not found")
+    if cluster.decommissioned_at is not None and not allow_decommissioned:
+        raise HTTPException(410, "Cluster has been decommissioned")
     return cluster
 
 

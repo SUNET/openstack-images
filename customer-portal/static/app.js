@@ -2742,20 +2742,27 @@ async function renderAdminClusters() {
         ],
     }));
     try {
-        const clusters = await api("/api/admin/clusters");
-        app.appendChild(slbl("Clusters", clusters.length));
-        if (!clusters.length) {
+        const clusters = await api("/api/admin/clusters?include_decommissioned=true");
+        const active = clusters.filter(c => !c.decommissioned_at);
+        const decommissioned = clusters.filter(c => c.decommissioned_at);
+        const clusterCard = c => h("a", { className: "card link", href: `#/admin/clusters/${encodeURIComponent(c.slug)}` },
+            h("div", { className: "card-head" },
+                h("h3", {}, c.name),
+                c.decommissioned_at ? badge("decommissioned", "muted")
+                    : c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
+            ),
+            h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} Kubernetes nodes (jumphost excluded) · contract ${c.contract_number}`),
+            h("div", { className: "meta mono" }, c.api_url),
+        );
+        app.appendChild(slbl("Active clusters", active.length));
+        if (!active.length) {
             app.appendChild(emptyState("No clusters yet."));
-            return;
         }
-        for (const c of clusters) {
-            app.appendChild(h("a", { className: "card link", href: `#/admin/clusters/${encodeURIComponent(c.slug)}` },
-                h("div", { className: "card-head" },
-                    h("h3", {}, c.name),
-                    c.provisioned_at ? badge("provisioned", "ok") : badge("pending", "warn"),
-                ),
-                h("div", { className: "meta" }, `${c.size_label} — ${c.total_servers} Kubernetes nodes (jumphost excluded) · contract ${c.contract_number}`),
-                h("div", { className: "meta mono" }, c.api_url),
+        for (const c of active) app.appendChild(clusterCard(c));
+        if (decommissioned.length) {
+            app.appendChild(h("details", { className: "section-gap" },
+                h("summary", {}, `Decommissioned cluster history (${decommissioned.length})`),
+                ...decommissioned.map(clusterCard),
             ));
         }
     } catch (e) { showAlert(e.message); }
@@ -3498,9 +3505,11 @@ async function renderAdminClusterDetail(slug) {
             clear(summary).appendChild(phead({
                 eyebrow: `Cluster · ${c.size_label}`,
                 title: c.name,
-                lead: c.provisioned_at ? "Activated for customer use. Infrastructure and publication status are tracked below." : "Provisioning, GitOps publication and operator activation are tracked separately.",
+                lead: c.decommissioned_at ? `Decommissioned ${fmtDate(c.decommissioned_at)}. Historical billing and lifecycle records are retained.`
+                    : c.provisioned_at ? "Activated for customer use. Infrastructure and publication status are tracked below."
+                    : "Provisioning, GitOps publication and operator activation are tracked separately.",
                 actions: [
-                    !c.provisioned_at && c.connection_configured ? h("button", { className: "btn primary sm",
+                    !c.decommissioned_at && !c.provisioned_at && c.connection_configured ? h("button", { className: "btn primary sm",
                         onclick: async e => {
                             if (!confirm("Mark this cluster as provisioned? Complete all setup gates first. This enables credential issuance and starts billing for the initial setup fee in the next billing run.")) return;
                             const button = e.currentTarget;
@@ -3510,11 +3519,12 @@ async function renderAdminClusterDetail(slug) {
                                 route();
                             } catch (err) { button.disabled = false; showAlert(err.message); }
                         }}, "Mark provisioned") : null,
-                    h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user"),
+                    !c.decommissioned_at ? h("a", { className: "btn ghost sm", href: `#/clusters/${encodeURIComponent(slug)}` }, "Open as user") : null,
                 ].filter(Boolean),
             }));
-            summary.appendChild(h("p", { className: "hint" },
-                "Resize, deletion and requested-alias DNS automation require operator work outside this lifecycle. Cluster, project and credential cleanup requires coordinated manual decommissioning."));
+            summary.appendChild(h("p", { className: "hint" }, c.decommissioned_at
+                ? `Finalized by ${c.decommissioned_by_sub || "unknown"}. ${c.decommission_note || ""}`
+                : "Resize and requested-alias DNS automation require operator work outside this lifecycle. Finalize decommissioning only after cluster, project, DNS and secret cleanup is complete."));
             summary.appendChild(slbl("Cluster identity (read-only)"));
             summary.appendChild(kv(
                 kvRowMono("Slug", c.slug),
@@ -3528,12 +3538,15 @@ async function renderAdminClusterDetail(slug) {
                 kvRowMono("Cluster manifest", c.manifest_path),
                 kvRow("Contract", c.contract_number),
                 kvRow("Provisioned", c.provisioned_at ? fmtDay(c.provisioned_at) : "(not yet)"),
+                kvRow("Decommissioned", c.decommissioned_at ? fmtDate(c.decommissioned_at) : "—"),
                 kvRow("Management project", c.management_project_resource_name || "—"),
                 kvRow("Backup project", c.backup_project_resource_name || "—"),
                 kvRow("Configuration version", String(c.config_version)),
             ));
         }
         renderSummary();
+
+        if (c.decommissioned_at) return;
 
         let gitops;
         const repository = sharedRepositoryEditor(c.customer_id, { onChange: (value, changed) => gitops?.repositoryChanged(value, changed) });
@@ -3544,6 +3557,27 @@ async function renderAdminClusterDetail(slug) {
             renderSummary();
             await gitops.settingsChanged();
         }));
+        const decommission = h("section", { className: "danger-zone", "aria-label": "Finalize decommissioning" },
+            h("div", { className: "dz-head" }, "Finalize decommissioning"),
+            h("p", { className: "hint" },
+                "Use only after the ManagedCluster manifest, managed project manifests, OpenStack resources, DNS records and OpenBao material are gone. This preserves history, revokes portal credentials and stops future billing."),
+            h("button", { className: "btn danger sm", onclick: async e => {
+                const confirmation = prompt(`Type ${c.slug} to confirm that all infrastructure has been removed.`);
+                if (confirmation === null) return;
+                const note = prompt("Record the cleanup ticket or decommissioning note:");
+                if (!note?.trim()) return showAlert("A decommissioning note is required.");
+                const button = e.currentTarget;
+                button.disabled = true;
+                try {
+                    await api(`/api/admin/clusters/${encodeURIComponent(c.slug)}/decommission`, {
+                        method: "POST",
+                        body: JSON.stringify({ confirmation, infrastructure_removed: true, note: note.trim() }),
+                    });
+                    navigate("/admin/clusters");
+                } catch (err) { button.disabled = false; showAlert(err.message); }
+            }}, "Finalize decommissioning"),
+        );
+        app.appendChild(decommission);
         void repository.refresh();
         void gitops.refresh();
     } catch (e) { showAlert(e.message); }

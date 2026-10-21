@@ -260,6 +260,46 @@ def test_subsequent_period_emits_management_and_addon_only(sync_session):
     assert mgmt[6] == "5227"
 
 
+def test_decommissioned_cluster_is_billed_for_final_month_only(sync_session):
+    s = sync_session
+    _, contract = _seed_customer_contract(s)
+    cluster = TenantCluster(
+        contract_id=contract.id,
+        name="Acme retired",
+        slug="acme-retired",
+        openbao_mount="kubernetes/acme-retired",
+        worker_groups=1,
+        initial_worker_groups=1,
+        provisioned_at=datetime(2026, 3, 10),
+        decommissioned_at=datetime(2026, 4, 20),
+        decommissioned_by_sub="admin@test",
+        decommission_note="OPS-123",
+        created_by_sub="admin@test",
+    )
+    s.add(cluster)
+    s.commit()
+
+    april = _emit(s, datetime(2026, 4, 1), datetime(2026, 5, 1), {"CO-001"})
+    may = _emit(s, datetime(2026, 5, 1), datetime(2026, 6, 1), {"CO-001"})
+    april_facts = _capture_synthetic_facts(
+        s,
+        datetime(2026, 4, 1),
+        datetime(2026, 5, 1),
+        {contract.id: contract.contract_number},
+    )
+    may_facts = _capture_synthetic_facts(
+        s,
+        datetime(2026, 5, 1),
+        datetime(2026, 6, 1),
+        {contract.id: contract.contract_number},
+    )
+
+    assert any("Cluster management fee" in line for line in april)
+    assert not any("managed-cluster:acme-retired" in line for line in may)
+    assert [fact["slug"] for fact in april_facts["clusters"]] == ["acme-retired"]
+    assert may_facts["clusters"] == []
+
+
 def test_resize_period_emits_expansion_fee(sync_session):
     s = sync_session
     _, contract = _seed_customer_contract(s)

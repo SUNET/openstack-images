@@ -34,6 +34,7 @@ from app.schemas import (
     BackupRequestPayload,
     CreateClusterRequest,
     CreateProjectRequest,
+    DecommissionClusterRequest,
     ProjectResponse,
     ResizeRequestPayload,
     UpdateClusterRequest,
@@ -482,3 +483,19 @@ def test_managed_cluster_quotas(worker_groups: int, expected: tuple[int, ...]) -
 def test_managed_cluster_quotas_rejects_invalid_worker_groups() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         managed_cluster_quotas(0)
+
+
+def test_decommission_confirmation_requires_explicit_cleanup_attestation() -> None:
+    request = DecommissionClusterRequest(
+        confirmation="cluster-one",
+        infrastructure_removed=True,
+        note="OPS-123 cleanup complete",
+    )
+    assert request.infrastructure_removed is True
+
+    with pytest.raises(ValidationError):
+        DecommissionClusterRequest(
+            confirmation="cluster-one",
+            infrastructure_removed=False,
+            note="OPS-123 cleanup complete",
+        )

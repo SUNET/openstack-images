@@ -43,6 +43,28 @@ def get_project_status(resource_name: str, namespace: str = "customer-projects")
         return None
 
 
+def project_cr_exists(resource_name: str, namespace: str = "customer-projects") -> bool:
+    """Return exact OpenstackProject CR existence without hiding lookup failures."""
+    if _api is None:
+        raise RuntimeError("Management Kubernetes API is unavailable")
+    try:
+        _api.get_namespaced_custom_object(
+            group="sunet.se",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="openstackprojects",
+            name=resource_name,
+            _request_timeout=10,
+        )
+        return True
+    except client.ApiException as exc:
+        if exc.status == 404:
+            return False
+        raise RuntimeError("OpenstackProject lookup failed") from None
+    except Exception:
+        raise RuntimeError("OpenstackProject lookup failed") from None
+
+
 def find_project_cr_by_spec_name(spec_name: str) -> str | None:
     """Find any OpenstackProject CR (cluster-wide) targeting an OpenStack project.
 
