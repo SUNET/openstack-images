@@ -12,6 +12,7 @@ from openstack.network.v2.security_group_rule import SecurityGroupRule
 
 from customer_cluster_operator.errors import OwnershipError, ValidationError
 from customer_cluster_operator.openstack import (
+    EXTRA_SG_TAG,
     Provisioner,
     _exact,
     _server_uses_flavor,
@@ -1230,19 +1231,38 @@ def test_extra_security_group_refuses_rules_that_are_not_declared(provisioning_i
 
 def test_undeclared_extra_security_groups_are_deleted_only_when_owned(provisioning_input):
     uid = provisioning_input.data["cluster"]["uid"]
-    mine = SimpleNamespace(
-        id="a", name="cc-example-extra-old", tags=[f"customer-cluster-uid={uid}"]
-    )
+    owned = f"customer-cluster-uid={uid}"
+    mine = SimpleNamespace(id="a", name="cc-example-extra-old", tags=[owned, EXTRA_SG_TAG])
     foreign = SimpleNamespace(
-        id="b", name="cc-example-extra-theirs", tags=["customer-cluster-uid=x"]
+        id="b", name="cc-example-extra-theirs", tags=["customer-cluster-uid=x", EXTRA_SG_TAG]
     )
-    unrelated = SimpleNamespace(
-        id="c", name="cc-example-cluster-sg", tags=[f"customer-cluster-uid={uid}"]
-    )
-    existing = {g.name: g for g in (mine, foreign, unrelated)}
+    unrelated = SimpleNamespace(id="c", name="cc-example-cluster-sg", tags=[owned])
+    untagged = SimpleNamespace(id="d", name="cc-example-extra-by-hand", tags=[owned])
+    existing = {g.name: g for g in (mine, foreign, unrelated, untagged)}
     provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input, existing)
     provisioner._remove_undeclared_extra_security_groups()
-    assert set(groups) == {"cc-example-extra-theirs", "cc-example-cluster-sg"}
+    assert set(groups) == {
+        "cc-example-extra-theirs",
+        "cc-example-cluster-sg",
+        "cc-example-extra-by-hand",
+    }
+
+
+def test_removed_extra_group_is_deleted_even_with_a_long_slug(provisioning_input):
+    # stable_name() shortens the slug by the suffix length, so a name prefix would not match
+    provisioning_input.data["cluster"]["slug"] = "c" * 40
+    group_name = "g" * 32
+    group = deepcopy(SSH_GROUP) | {"name": group_name}
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    assert len(groups) == 1
+    created = next(iter(groups.values()))
+    assert EXTRA_SG_TAG in created.tags
+    assert not created.name.startswith(stable_name("c" * 40, "extra-"))
+    provisioning_input.data["extraSecurityGroups"] = []
+    provisioner._remove_undeclared_extra_security_groups()
+    assert groups == {}
 
 
 def test_flavor_override_replaces_only_the_declared_role(provisioning_input):

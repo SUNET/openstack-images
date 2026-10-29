@@ -30,6 +30,9 @@ def _exact(resources: Iterable[Any], name: str, kind: str) -> Any | None:
     return matches[0] if matches else None
 
 
+EXTRA_SG_TAG = "customer-cluster-extra-security-group"
+
+
 def _tag(uid: str) -> str:
     return f"customer-cluster-uid={uid}"
 
@@ -412,6 +415,10 @@ class Provisioner:
         }
         for item in declared:
             group = self._security_group(f"extra-{item['name']}")
+            if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
+                group = self.conn.network.set_tags(
+                    group, sorted({*(getattr(group, "tags", None) or []), EXTRA_SG_TAG})
+                )
             allowed = set(default_egress)
             for rule in item["rules"]:
                 prefix = rule["remoteIpPrefix"]
@@ -451,16 +458,19 @@ class Provisioner:
         return per_role
 
     def _remove_undeclared_extra_security_groups(self) -> None:
-        """Delete owned extra groups that are no longer declared (ports were already reset)."""
+        """Delete owned extra groups that are no longer declared (ports were already reset).
+
+        Matched by the cluster UID tag plus EXTRA_SG_TAG, not by name: stable_name() shortens
+        the slug depending on the suffix length, so a name prefix would miss long names.
+        """
         declared = {
             stable_name(self.slug, f"extra-{item['name']}")
             for item in (self.data.get("extraSecurityGroups") or [])
         }
-        prefix = stable_name(self.slug, "extra-")
         for group in self.conn.network.security_groups():
-            if not (group.name or "").startswith(prefix) or group.name in declared:
+            if group.name in declared or not _owned(group, self.uid):
                 continue
-            if not _owned(group, self.uid):
+            if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
                 continue
             try:
                 self.conn.network.delete_security_group(group)
