@@ -229,7 +229,10 @@ The declaration is not part of the immutable infrastructure hash, so adding, cha
 removing a group does not cause `InfrastructureDriftUnsupported`. A declared group may hold
 only the declared rules (plus the default egress rules): any other rule fails the check with
 an `OwnershipError` that names it. A group removed from the spec is detached from the node
-ports and deleted if the operator owns it. The four managed groups stay exact: rules added
+ports and deleted if the operator owns it. A group `description` is reconciled onto the group (an empty
+one restores the default text). Neutron cannot change a security group rule, so a rule `description` is
+set when the rule is created; a later change is only reported in the worker log. Rules that target a
+remote address group are not supported and count as undeclared. The four managed groups stay exact: rules added
 to them by hand are still refused, so move such rules into a declared group.
 
 ## Inventory publication

@@ -60,13 +60,18 @@ def _rule_key(rule: Any) -> tuple[Any, ...]:
         getattr(rule, "port_range_max", None),
         getattr(rule, "remote_ip_prefix", None),
         getattr(rule, "remote_group_id", None),
+        getattr(rule, "remote_address_group_id", None),
     )
 
 
 def _describe_extra_rule(rule: tuple[Any, ...]) -> str:
-    direction, ether_type, protocol, port_min, port_max, prefix, group = rule
+    direction, ether_type, protocol, port_min, port_max, prefix, group, address_group = rule
     ports = "all ports" if port_min is None else f"{port_min}-{port_max}"
-    source = prefix or (f"group {group}" if group else "any")
+    source = prefix or (
+        f"group {group}"
+        if group
+        else (f"address group {address_group}" if address_group else "any")
+    )
     return f"{direction} {ether_type} {protocol or 'any protocol'} {ports} from {source}"
 
 
@@ -276,6 +281,7 @@ class Provisioner:
             "port_range_max",
             "remote_ip_prefix",
             "remote_group_id",
+            "remote_address_group_id",
         )
         normalized = {key: desired.get(key) for key in keys}
         for rule in self.conn.network.security_group_rules(security_group_id=security_group.id):
@@ -425,13 +431,14 @@ class Provisioner:
                 )
             generated[full] = item["name"]
         default_egress = {
-            ("egress", "IPv4", None, None, None, None, None),
-            ("egress", "IPv6", None, None, None, None, None),
+            ("egress", "IPv4", None, None, None, None, None, None),
+            ("egress", "IPv6", None, None, None, None, None, None),
         }
         for item in declared:
-            group = self._security_group(f"extra-{item['name']}", item.get("description") or None)
-            wanted = item.get("description") or ""
-            if wanted and getattr(group, "description", None) != wanted:
+            default_description = f"ManagedCluster {self.slug} ({self.uid}) extra-{item['name']}"
+            wanted = item.get("description") or default_description
+            group = self._security_group(f"extra-{item['name']}", wanted)
+            if getattr(group, "description", None) != wanted:
                 group = self.conn.network.update_security_group(group, description=wanted)
             if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
                 group = self.conn.network.set_tags(
@@ -459,12 +466,36 @@ class Provisioner:
                         rule["portRangeMax"],
                         prefix,
                         None,
+                        None,
                     )
                 )
-            actual = {
-                _rule_key(rule)
-                for rule in self.conn.network.security_group_rules(security_group_id=group.id)
-            }
+            existing_rules = list(
+                self.conn.network.security_group_rules(security_group_id=group.id)
+            )
+            actual = {_rule_key(rule) for rule in existing_rules}
+            for rule in item["rules"]:
+                key = (
+                    rule["direction"],
+                    rule["etherType"],
+                    rule["protocol"],
+                    rule["portRangeMin"],
+                    rule["portRangeMax"],
+                    rule["remoteIpPrefix"],
+                    None,
+                    None,
+                )
+                for existing in existing_rules:
+                    if _rule_key(existing) == key and (
+                        getattr(existing, "description", None) or ""
+                    ) != (rule.get("description") or ""):
+                        logger.warning(
+                            "extra security group %s: the description of rule %s differs from "
+                            "the declaration; Neutron cannot change a rule, remove the rule to "
+                            "have it recreated",
+                            item["name"],
+                            _describe_extra_rule(key),
+                        )
+
             if actual - allowed:
                 raise OwnershipError(
                     f"extra security group {item['name']} contains unexpected rules: "

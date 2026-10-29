@@ -1337,3 +1337,62 @@ def test_extra_groups_with_colliding_generated_names_are_refused(provisioning_in
         provisioner._extra_security_groups()
     assert groups == {}
     network_api.create_security_group.assert_not_called()
+
+
+def test_cleared_group_description_goes_back_to_the_default(provisioning_input):
+    group = deepcopy(SSH_GROUP) | {"description": "custom text"}
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    name = "cc-example-extra-ssh-from-anywhere"
+    assert groups[name].description == "custom text"
+    provisioning_input.data["extraSecurityGroups"] = [deepcopy(SSH_GROUP)]
+    provisioner._extra_security_groups()
+    uid = provisioning_input.data["cluster"]["uid"]
+    assert groups[name].description == f"ManagedCluster example ({uid}) extra-ssh-from-anywhere"
+
+
+def test_rule_with_a_remote_address_group_is_not_taken_for_the_declared_rule(provisioning_input):
+    group = deepcopy(SSH_GROUP)
+    group["rules"] = [
+        {
+            "direction": "ingress",
+            "etherType": "IPv4",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": None,
+            "description": "",
+        }
+    ]
+    _with_extra_groups(provisioning_input, [group])
+    uid = provisioning_input.data["cluster"]["uid"]
+    name = "cc-example-extra-ssh-from-anywhere"
+    existing = {name: SimpleNamespace(id=name, name=name, tags=[f"customer-cluster-uid={uid}"])}
+    restricted = SecurityGroupRule(
+        direction="ingress",
+        ether_type="IPv4",
+        protocol="tcp",
+        port_range_min=22,
+        port_range_max=22,
+        remote_address_group_id="ag-1",
+    )
+    provisioner, _, rules, _ = _extra_group_provisioner(
+        provisioning_input, groups_in_cloud=existing, rules={name: [restricted]}
+    )
+    with pytest.raises(OwnershipError, match="address group ag-1"):
+        provisioner._extra_security_groups()
+    # the declared, unrestricted rule was still created next to it
+    assert any(r.remote_address_group_id is None for r in rules[name])
+
+
+def test_changed_rule_description_is_reported_not_silently_ignored(provisioning_input, caplog):
+    group = deepcopy(SSH_GROUP)
+    group["rules"][0]["description"] = "first"
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, _, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    group["rules"][0]["description"] = "second"
+    with caplog.at_level("WARNING"):
+        provisioner._extra_security_groups()
+    assert "description of rule ingress IPv4 tcp 22-22 from 0.0.0.0/0 differs" in caplog.text
