@@ -425,7 +425,11 @@ def test_security_rule_is_idempotent(provisioning_input):
 
 def test_security_rule_duplicate_conflict_is_idempotent(provisioning_input):
     network_api = Mock()
-    network_api.security_group_rules.return_value = []
+    equivalent = SecurityGroupRule(
+        direction="ingress", ether_type="IPv4", remote_group_id="remote-sg"
+    )
+    # not there at first, there after the conflict (created concurrently)
+    network_api.security_group_rules.side_effect = [[], [equivalent]]
     network_api.create_security_group_rule.side_effect = ConflictException(
         "Security group rule already exists"
     )
@@ -1396,3 +1400,19 @@ def test_changed_rule_description_is_reported_not_silently_ignored(provisioning_
     with caplog.at_level("WARNING"):
         provisioner._extra_security_groups()
     assert "description of rule ingress IPv4 tcp 22-22 from 0.0.0.0/0 differs" in caplog.text
+
+
+def test_security_rule_conflict_without_an_equivalent_rule_is_not_success(provisioning_input):
+    # Neutron answers 409 for an exceeded rule quota too
+    network_api = Mock()
+    network_api.security_group_rules.return_value = []
+    network_api.create_security_group_rule.side_effect = ConflictException("quota exceeded")
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with pytest.raises(ConflictException):
+        provisioner._rule(
+            SimpleNamespace(id="sg"), direction="ingress", ether_type="IPv4", protocol="tcp"
+        )

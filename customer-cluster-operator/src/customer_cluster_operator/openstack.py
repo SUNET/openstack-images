@@ -284,16 +284,26 @@ class Provisioner:
             "remote_address_group_id",
         )
         normalized = {key: desired.get(key) for key in keys}
-        for rule in self.conn.network.security_group_rules(security_group_id=security_group.id):
-            if all(getattr(rule, key, None) == value for key, value in normalized.items()):
-                return
+
+        def exists() -> bool:
+            return any(
+                all(getattr(rule, key, None) == value for key, value in normalized.items())
+                for rule in self.conn.network.security_group_rules(
+                    security_group_id=security_group.id
+                )
+            )
+
+        if exists():
+            return
         try:
             self.conn.network.create_security_group_rule(
                 security_group_id=security_group.id, **desired
             )
         except ConflictException:
-            # Neutron guarantees this response means an equivalent rule exists.
-            return
+            # 409 is returned for a duplicate rule, but also when a quota (rules per group)
+            # is exceeded: only a rule that is really there counts as success.
+            if not exists():
+                raise
 
     def _security_groups(self) -> tuple[Any, Any, Any, Any]:
         cluster = self._security_group("cluster-sg")
