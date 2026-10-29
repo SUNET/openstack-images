@@ -693,6 +693,90 @@ def test_adopted_server_role_and_attachments_are_verified(provisioning_input):
         )
 
 
+def test_verify_server_tolerates_foreign_volume_attachments(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    server = SimpleNamespace(
+        id="server",
+        name="worker",
+        metadata={"customer_cluster_uid": uid, "customer_cluster_role": "worker"},
+        flavor_id="flavor",
+        flavor=None,
+        key_name="key",
+        attached_volumes=[{"id": "volume"}, {"id": "pvc-volume"}],
+        security_groups=[{"name": "cluster-sg"}],
+    )
+    port = Port(
+        id="port",
+        name="port",
+        metadata={"customer_cluster_uid": uid},
+        tags=[],
+        device_id="server",
+        security_group_ids=["sg"],
+    )
+    compute = Mock()
+    compute.get_server.return_value = server
+    network = Mock()
+    network.get_port.return_value = port
+    provisioner = Provisioner(
+        SimpleNamespace(compute=compute, network=network),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    assert (
+        provisioner._verify_server(
+            server,
+            role="worker",
+            flavor=SimpleNamespace(id="flavor"),
+            keypair=SimpleNamespace(name="key"),
+            volume=SimpleNamespace(id="volume"),
+            port=port,
+            security_groups=[SimpleNamespace(id="sg", name="cluster-sg")],
+        )
+        is server
+    )
+
+
+def test_verify_server_requires_managed_volume_attachment(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    server = SimpleNamespace(
+        id="server",
+        name="worker",
+        metadata={"customer_cluster_uid": uid, "customer_cluster_role": "worker"},
+        flavor_id="flavor",
+        flavor=None,
+        key_name="key",
+        attached_volumes=[{"id": "pvc-volume"}],
+        security_groups=[{"name": "cluster-sg"}],
+    )
+    port = Port(
+        id="port",
+        name="port",
+        metadata={"customer_cluster_uid": uid},
+        tags=[],
+        device_id="server",
+        security_group_ids=["sg"],
+    )
+    compute = Mock()
+    compute.get_server.return_value = server
+    network = Mock()
+    network.get_port.return_value = port
+    provisioner = Provisioner(
+        SimpleNamespace(compute=compute, network=network),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with pytest.raises(OwnershipError, match="missing its managed volume attachment"):
+        provisioner._verify_server(
+            server,
+            role="worker",
+            flavor=SimpleNamespace(id="flavor"),
+            keypair=SimpleNamespace(name="key"),
+            volume=SimpleNamespace(id="volume"),
+            port=port,
+            security_groups=[SimpleNamespace(id="sg", name="cluster-sg")],
+        )
+
+
 def test_vip_validates_network_subnet_and_port_security(provisioning_input):
     uid = provisioning_input.data["cluster"]["uid"]
     port = SimpleNamespace(
@@ -971,5 +1055,8 @@ def test_endpoint_security_group_rejects_nonpublic_source(provisioning_input):
         provisioning_input.data,
         ["ssh-ed25519 QUFBQQ=="],
     )
-    with pytest.raises(OwnershipError, match="unexpected IPv4 ingress"):
+    with pytest.raises(
+        OwnershipError,
+        match=r"unexpected ingress rules: api-sg: IPv4 tcp 6443-6443 from 10\.0\.0\.0/8",
+    ):
         provisioner._security_groups()

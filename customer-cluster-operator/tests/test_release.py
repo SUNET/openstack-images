@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 OPERATOR_ROOT = Path(__file__).resolve().parents[1]
-RELEASE_VERSION = "0.1.6"
+RELEASE_VERSION = "0.1.7"
 DEPLOYMENT = (
     OPERATOR_ROOT.parents[2]
     / "k8s/platform-manifests/customer-cluster-operator/base/deployment.yaml"
@@ -31,7 +31,7 @@ def test_release_metadata_matches_jenkins_image_tag() -> None:
 def test_customer_cluster_release_does_not_bump_unrelated_images() -> None:
     jenkins = yaml.safe_load((OPERATOR_ROOT.parent / ".jenkins.yaml").read_text(encoding="utf-8"))
     assert jenkins["environment_variables"]["OPERATOR_VERSION"] == "0.1.8"
-    assert jenkins["environment_variables"]["PORTAL_VERSION"] == "0.1.25"
+    assert jenkins["environment_variables"]["PORTAL_VERSION"] == "0.1.34"
     jobs = {job["name"]: job for job in jenkins["extra_jobs"]}
     assert jobs["openstack-operator"]["docker_tags"] == ["${OPERATOR_VERSION}", "latest"]
     assert jobs["customer-portal"]["docker_tags"] == ["${PORTAL_VERSION}", "latest"]
