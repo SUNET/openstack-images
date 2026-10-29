@@ -91,6 +91,24 @@ spec:
                     projectResourceName:
                       type: string
                       minLength: 1
+                    workerFlavor:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      description: >-
+                        Optional. Flavor of this cluster's workers when it differs from the
+                        ClusterProfile (for example after a resize). Used for new workers and as
+                        the expected flavor; existing servers are never resized.
+                    controllerFlavor:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      description: Optional. Same as workerFlavor, for controllers.
+                    jumphostFlavor:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                      description: Optional. Same as workerFlavor, for the jumphost.
                 dns:
                   type: object
                   description: >-
@@ -142,6 +160,80 @@ spec:
                       type: string
                     secretRoot:
                       type: string
+                network:
+                  type: object
+                  properties:
+                    extraSecurityGroups:
+                      type: array
+                      maxItems: 10
+                      description: >-
+                        Additional security groups owned by the operator and attached to
+                        the ports of the listed node roles. Rules not declared here are
+                        refused. Not part of the immutable infrastructure hash.
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - attachTo
+                          - rules
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 32
+                            pattern: ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$
+                          description:
+                            type: string
+                            maxLength: 255
+                          attachTo:
+                            type: array
+                            minItems: 1
+                            items:
+                              type: string
+                              enum:
+                                - controller
+                                - worker
+                                - jumphost
+                          rules:
+                            type: array
+                            minItems: 1
+                            maxItems: 20
+                            items:
+                              type: object
+                              required:
+                                - direction
+                                - etherType
+                              properties:
+                                direction:
+                                  type: string
+                                  enum:
+                                    - ingress
+                                    - egress
+                                etherType:
+                                  type: string
+                                  enum:
+                                    - IPv4
+                                    - IPv6
+                                protocol:
+                                  type: string
+                                  enum:
+                                    - tcp
+                                    - udp
+                                    - icmp
+                                    - ipv6-icmp
+                                portRangeMin:
+                                  type: integer
+                                  minimum: 1
+                                  maximum: 65535
+                                portRangeMax:
+                                  type: integer
+                                  minimum: 1
+                                  maximum: 65535
+                                remoteIpPrefix:
+                                  type: string
+                                  maxLength: 64
+                                description:
+                                  type: string
+                                  maxLength: 255
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true

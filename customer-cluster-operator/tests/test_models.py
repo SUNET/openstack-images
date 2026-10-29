@@ -500,3 +500,140 @@ def test_job_name_is_stable_and_dns_length_bounded():
     assert len(value) <= 57
     assert len(f"{value}-input") <= 63
     assert value.endswith("-12345678-bbbbbbbbbb-g1-v0")
+
+
+SSH_FROM_ANYWHERE = {
+    "name": "ssh-from-anywhere",
+    "description": "SSH to the ingress nodes",
+    "attachTo": ["worker"],
+    "rules": [
+        {
+            "direction": "ingress",
+            "etherType": "IPv4",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": "0.0.0.0/0",
+        },
+        {
+            "direction": "ingress",
+            "etherType": "IPv6",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "remoteIpPrefix": "::/0",
+        },
+    ],
+}
+
+
+def _build(spec, profile):
+    return build_input(
+        spec=deepcopy(spec),
+        profile=deepcopy(profile),
+        profile_revision={"uid": "profile-uid", "generation": 1},
+        uid="12345678-1234-1234-1234-123456789abc",
+        slug="example",
+        namespace="openstack-operator",
+        project_id="project-id",
+        operator_namespace="openstack-operator",
+    )
+
+
+def test_extra_security_groups_are_normalized_and_kept_out_of_the_infrastructure_hash(
+    spec, profile
+):
+    baseline = _build(spec, profile)
+    assert "extraSecurityGroups" not in baseline.data
+    spec["network"] = {"extraSecurityGroups": [deepcopy(SSH_FROM_ANYWHERE)]}
+    with_groups = _build(spec, profile)
+    group = with_groups.data["extraSecurityGroups"][0]
+    assert group["name"] == "ssh-from-anywhere"
+    assert group["attachTo"] == ["worker"]
+    assert {rule["portRangeMax"] for rule in group["rules"]} == {22}
+    assert with_groups.input_hash == baseline.input_hash
+    assert with_groups.publication_hash != baseline.publication_hash
+
+
+def test_extra_security_groups_empty_list_changes_nothing(spec, profile):
+    baseline = _build(spec, profile)
+    spec["network"] = {"extraSecurityGroups": []}
+    assert _build(spec, profile).data == baseline.data
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda g: g.update(name="Bad_Name"),
+        lambda g: g.update(attachTo=["ingress"]),
+        lambda g: g.update(attachTo=[]),
+        lambda g: g.update(rules=[]),
+        lambda g: g["rules"][0].update(direction="sideways"),
+        lambda g: g["rules"][0].update(protocol="gre"),
+        lambda g: g["rules"][0].update(protocol=None),
+        lambda g: g["rules"][0].update(portRangeMax=21),
+        lambda g: g["rules"][0].update(portRangeMin=0),
+        lambda g: g["rules"][0].update(remoteIpPrefix="not-a-cidr"),
+        lambda g: g["rules"][0].update(remoteIpPrefix="::/0"),
+    ],
+)
+def test_extra_security_groups_reject_invalid_declarations(spec, profile, change):
+    group = deepcopy(SSH_FROM_ANYWHERE)
+    change(group)
+    spec["network"] = {"extraSecurityGroups": [group]}
+    with pytest.raises(ValidationError):
+        _build(spec, profile)
+
+
+def test_extra_security_groups_reject_duplicate_names(spec, profile):
+    spec["network"] = {"extraSecurityGroups": [deepcopy(SSH_FROM_ANYWHERE)] * 2}
+    with pytest.raises(ValidationError, match="used twice"):
+        _build(spec, profile)
+
+
+def test_flavor_overrides_are_recorded_and_kept_out_of_the_infrastructure_hash(spec, profile):
+    baseline = _build(spec, profile)
+    assert "flavorOverrides" not in baseline.data
+    spec["openstack"]["workerFlavor"] = "b2.c16r32"
+    spec["openstack"]["jumphostFlavor"] = " b2.c2r4 "
+    with_overrides = _build(spec, profile)
+    assert with_overrides.data["flavorOverrides"] == {"worker": "b2.c16r32", "jumphost": "b2.c2r4"}
+    assert with_overrides.data["openstack"] == baseline.data["openstack"]
+    assert with_overrides.input_hash == baseline.input_hash
+    assert with_overrides.publication_hash != baseline.publication_hash
+
+
+@pytest.mark.parametrize("value", ["", "  ", 5, ["b2.c4r8"]])
+def test_flavor_overrides_reject_invalid_values(spec, profile, value):
+    spec["openstack"]["controllerFlavor"] = value
+    with pytest.raises(ValidationError):
+        _build(spec, profile)
+
+
+def test_extra_security_group_ipv6_icmp_is_normalized_and_descriptions_are_kept(spec, profile):
+    group = {
+        "name": "ping",
+        "description": " allow ping ",
+        "attachTo": ["worker"],
+        "rules": [
+            {"direction": "ingress", "etherType": "IPv6", "protocol": "icmp", "description": "v6"},
+            {"direction": "ingress", "etherType": "IPv4", "protocol": "icmp"},
+        ],
+    }
+    spec["network"] = {"extraSecurityGroups": [group]}
+    built = _build(spec, profile).data["extraSecurityGroups"][0]
+    assert built["description"] == "allow ping"
+    by_family = {rule["etherType"]: rule for rule in built["rules"]}
+    assert by_family["IPv6"]["protocol"] == "ipv6-icmp"
+    assert by_family["IPv6"]["description"] == "v6"
+    assert by_family["IPv4"]["protocol"] == "icmp"
+
+
+def test_extra_security_group_rejects_ipv6_icmp_on_ipv4(spec, profile):
+    group = {
+        "name": "ping",
+        "attachTo": ["worker"],
+        "rules": [{"direction": "ingress", "etherType": "IPv4", "protocol": "ipv6-icmp"}],
+    }
+    spec["network"] = {"extraSecurityGroups": [group]}
+    with pytest.raises(ValidationError, match="ipv6-icmp needs etherType IPv6"):
+        _build(spec, profile)

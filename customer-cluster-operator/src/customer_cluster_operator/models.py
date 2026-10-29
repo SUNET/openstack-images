@@ -19,6 +19,103 @@ DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 MAX_WORKER_GROUPS = 80
 
 
+EXTRA_SG_ROLES = ("controller", "worker", "jumphost")
+EXTRA_SG_PROTOCOLS = ("tcp", "udp", "icmp", "ipv6-icmp")
+EXTRA_SG_NAME = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
+
+
+def _extra_security_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate spec.network.extraSecurityGroups into a canonical, sorted list."""
+    network = spec.get("network")
+    if network is None:
+        return []
+    items = _mapping(network, "spec.network").get("extraSecurityGroups")
+    if items in (None, []):
+        return []
+    if not isinstance(items, list) or len(items) > 10:
+        raise ValidationError("spec.network.extraSecurityGroups must be a list of at most 10")
+    groups: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(items):
+        path = f"spec.network.extraSecurityGroups[{index}]"
+        group = _mapping(raw, path)
+        name = _required_string(group, "name", path)
+        if not EXTRA_SG_NAME.fullmatch(name):
+            raise ValidationError(f"{path}.name must be a lowercase DNS-style label (max 32)")
+        if name in groups:
+            raise ValidationError(f"{path}.name {name!r} is used twice")
+        roles = group.get("attachTo")
+        if (
+            not isinstance(roles, list)
+            or not roles
+            or any(role not in EXTRA_SG_ROLES for role in roles)
+        ):
+            raise ValidationError(f"{path}.attachTo must list roles from {list(EXTRA_SG_ROLES)}")
+        rules_in = group.get("rules")
+        if not isinstance(rules_in, list) or not rules_in or len(rules_in) > 20:
+            raise ValidationError(f"{path}.rules must be a list of 1 to 20 rules")
+        rules = []
+        for rule_index, raw_rule in enumerate(rules_in):
+            rpath = f"{path}.rules[{rule_index}]"
+            rule = _mapping(raw_rule, rpath)
+            direction, ether = rule.get("direction"), rule.get("etherType")
+            if direction not in ("ingress", "egress"):
+                raise ValidationError(f"{rpath}.direction must be ingress or egress")
+            if ether not in ("IPv4", "IPv6"):
+                raise ValidationError(f"{rpath}.etherType must be IPv4 or IPv6")
+            protocol = rule.get("protocol")
+            if protocol is not None and protocol not in EXTRA_SG_PROTOCOLS:
+                raise ValidationError(f"{rpath}.protocol must be one of {list(EXTRA_SG_PROTOCOLS)}")
+            # Neutron stores ICMP on IPv6 as ipv6-icmp; keep the declaration in that form so
+            # the rule read back equals the declared one.
+            if protocol == "icmp" and ether == "IPv6":
+                protocol = "ipv6-icmp"
+            if protocol == "ipv6-icmp" and ether != "IPv6":
+                raise ValidationError(f"{rpath}.protocol ipv6-icmp needs etherType IPv6")
+            low, high = rule.get("portRangeMin"), rule.get("portRangeMax")
+            if low is not None or high is not None:
+                if protocol not in ("tcp", "udp"):
+                    raise ValidationError(f"{rpath} ports need protocol tcp or udp")
+                if low is None:
+                    low = high
+                if high is None:
+                    high = low
+                if (
+                    any(type(port) is not int or not 1 <= port <= 65535 for port in (low, high))
+                    or low > high
+                ):
+                    raise ValidationError(f"{rpath} has an invalid port range")
+            prefix = rule.get("remoteIpPrefix")
+            if prefix is not None:
+                try:
+                    network_prefix = ipaddress.ip_network(prefix, strict=False)
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError(f"{rpath}.remoteIpPrefix is not a valid CIDR") from exc
+                if network_prefix.version != (4 if ether == "IPv4" else 6):
+                    raise ValidationError(f"{rpath}.remoteIpPrefix does not match etherType")
+                prefix = str(network_prefix)
+            rules.append(
+                {
+                    "direction": direction,
+                    "etherType": ether,
+                    "protocol": protocol,
+                    "portRangeMin": low,
+                    "portRangeMax": high,
+                    "remoteIpPrefix": prefix,
+                    "description": str(rule.get("description") or "").strip()[:255],
+                }
+            )
+        groups[name] = {
+            "name": name,
+            "description": str(group.get("description") or "").strip()[:255],
+            "attachTo": sorted(set(roles)),
+            "rules": sorted(
+                {json.dumps(rule, sort_keys=True): rule for rule in rules}.values(),
+                key=lambda rule: json.dumps(rule, sort_keys=True),
+            ),
+        }
+    return [groups[name] for name in sorted(groups)]
+
+
 def _mapping(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValidationError(f"{path} must be an object")
@@ -70,6 +167,8 @@ class ProvisioningInput:
         if infrastructure.get("schemaVersion") == 2:
             infrastructure.pop("inventory")
             infrastructure.pop("profileRevision")
+            infrastructure.pop("extraSecurityGroups", None)
+            infrastructure.pop("flavorOverrides", None)
             infrastructure["schemaVersion"] = 1
         encoded = json.dumps(infrastructure, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
@@ -265,6 +364,23 @@ def build_input(
         "inventory": build_inventory_parameters(spec, profile, profile_name(spec)),
         "profileRevision": validate_profile_revision(profile_revision),
     }
+    overrides = {}
+    for role, key in (
+        ("controller", "controllerFlavor"),
+        ("worker", "workerFlavor"),
+        ("jumphost", "jumphostFlavor"),
+    ):
+        if openstack_spec.get(key) is not None:
+            overrides[role] = _required_string(openstack_spec, key, "spec.openstack")
+    if overrides:
+        # Declared per cluster, not part of the immutable infrastructure hash (see input_hash);
+        # data["openstack"][role]["flavor"] keeps the ClusterProfile value for that hash.
+        data["flavorOverrides"] = overrides
+    extra_groups = _extra_security_groups(spec)
+    if extra_groups:
+        # Not part of the immutable infrastructure hash (see input_hash); present only when
+        # declared, so existing clusters keep their exact publication hash.
+        data["extraSecurityGroups"] = extra_groups
     return ProvisioningInput(deepcopy(data))
 
 

@@ -1,4 +1,5 @@
 import base64
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -11,6 +12,7 @@ from openstack.network.v2.security_group_rule import SecurityGroupRule
 
 from customer_cluster_operator.errors import OwnershipError, ValidationError
 from customer_cluster_operator.openstack import (
+    EXTRA_SG_TAG,
     Provisioner,
     _exact,
     _server_uses_flavor,
@@ -423,7 +425,11 @@ def test_security_rule_is_idempotent(provisioning_input):
 
 def test_security_rule_duplicate_conflict_is_idempotent(provisioning_input):
     network_api = Mock()
-    network_api.security_group_rules.return_value = []
+    equivalent = SecurityGroupRule(
+        direction="ingress", ether_type="IPv4", remote_group_id="remote-sg"
+    )
+    # not there at first, there after the conflict (created concurrently)
+    network_api.security_group_rules.side_effect = [[], [equivalent]]
     network_api.create_security_group_rule.side_effect = ConflictException(
         "Security group rule already exists"
     )
@@ -849,6 +855,14 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
         "_security_groups",
         lambda: (cluster_sg, jump_sg, api_sg, ingress_sg),
     )
+    ssh_sg = SimpleNamespace(id="extra-ssh", name="extra-ssh")
+    monkeypatch.setattr(
+        provisioner,
+        "_extra_security_groups",
+        lambda: {"controller": [], "worker": [ssh_sg], "jumphost": [ssh_sg]},
+    )
+    removed = Mock()
+    monkeypatch.setattr(provisioner, "_remove_undeclared_extra_security_groups", removed)
     monkeypatch.setattr(provisioner, "_keypair", lambda: keypair)
     monkeypatch.setattr(provisioner, "_image", lambda: image)
     monkeypatch.setattr(
@@ -887,9 +901,11 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
         for item in controllers
     )
     assert all(
-        {group.id for group in item["security_groups"]} == {"cluster-sg", "ingress-sg"}
+        {group.id for group in item["security_groups"]} == {"cluster-sg", "ingress-sg", "extra-ssh"}
         for item in workers
     )
+    assert {group.id for group in jump[0]["security_groups"]} == {"jump-sg", "extra-ssh"}
+    removed.assert_called_once_with()
     assert "vip" not in jump[0]
 
 
@@ -1104,4 +1120,299 @@ def test_verify_server_tolerates_flavor_drift_with_a_warning(provisioning_input,
             )
             is server
         )
-    assert "worker has flavor b2.c8r16, the profile asks for b2.c4r16" in caplog.text
+    assert "worker has flavor b2.c8r16, the expected flavor is b2.c4r16" in caplog.text
+
+
+SSH_GROUP = {
+    "name": "ssh-from-anywhere",
+    "description": "",
+    "attachTo": ["worker"],
+    "rules": [
+        {
+            "direction": "ingress",
+            "etherType": "IPv4",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": "0.0.0.0/0",
+        },
+        {
+            "direction": "ingress",
+            "etherType": "IPv6",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": "::/0",
+        },
+    ],
+}
+
+
+def _extra_group_provisioner(provisioning_input, groups_in_cloud=None, rules=None):
+    """Provisioner whose fake Neutron stores groups and rules in memory."""
+    uid = provisioning_input.data["cluster"]["uid"]
+    groups = {} if groups_in_cloud is None else groups_in_cloud
+    rules = {} if rules is None else rules
+    network_api = Mock()
+
+    def security_groups(name=None):
+        return [g for g in groups.values() if name is None or g.name == name]
+
+    def create_security_group(*, name, description):
+        group = SimpleNamespace(id=name, name=name, tags=[], description=description)
+        groups[name] = group
+        return group
+
+    def update_security_group(group, **values):
+        for key, value in values.items():
+            setattr(group, key, value)
+        return group
+
+    def set_tags(resource, tags):
+        resource.tags = list(tags)
+        return resource
+
+    def create_security_group_rule(*, security_group_id, **values):
+        rule = SecurityGroupRule(**values)
+        rules.setdefault(security_group_id, []).append(rule)
+        return rule
+
+    def delete_security_group(group):
+        groups.pop(group.name)
+
+    network_api.security_groups.side_effect = security_groups
+    network_api.create_security_group.side_effect = create_security_group
+    network_api.set_tags.side_effect = set_tags
+    network_api.security_group_rules.side_effect = lambda *, security_group_id: rules.setdefault(
+        security_group_id, []
+    )
+    network_api.create_security_group_rule.side_effect = create_security_group_rule
+    network_api.delete_security_group.side_effect = delete_security_group
+    network_api.update_security_group.side_effect = update_security_group
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    provisioner.tags = [f"customer-cluster-uid={uid}"]
+    return provisioner, groups, rules, network_api
+
+
+def _with_extra_groups(provisioning_input, groups):
+    provisioning_input.data["extraSecurityGroups"] = groups
+    return provisioning_input
+
+
+def test_extra_security_groups_are_created_with_rules_and_attached_per_role(provisioning_input):
+    _with_extra_groups(provisioning_input, [deepcopy(SSH_GROUP)])
+    provisioner, groups, rules, _ = _extra_group_provisioner(provisioning_input)
+    per_role = provisioner._extra_security_groups()
+    assert [g.name for g in per_role["worker"]] == ["cc-example-extra-ssh-from-anywhere"]
+    assert per_role["controller"] == [] and per_role["jumphost"] == []
+    created = rules["cc-example-extra-ssh-from-anywhere"]
+    assert {(r.ether_type, r.remote_ip_prefix, r.port_range_min) for r in created} == {
+        ("IPv4", "0.0.0.0/0", 22),
+        ("IPv6", "::/0", 22),
+    }
+    # idempotent: a second run creates nothing new
+    provisioner._extra_security_groups()
+    assert len(rules["cc-example-extra-ssh-from-anywhere"]) == 2
+
+
+def test_extra_security_group_refuses_rules_that_are_not_declared(provisioning_input):
+    _with_extra_groups(provisioning_input, [deepcopy(SSH_GROUP)])
+    uid = provisioning_input.data["cluster"]["uid"]
+    name = "cc-example-extra-ssh-from-anywhere"
+    existing = {name: SimpleNamespace(id=name, name=name, tags=[f"customer-cluster-uid={uid}"])}
+    stray = SecurityGroupRule(
+        direction="ingress",
+        ether_type="IPv4",
+        protocol="tcp",
+        port_range_min=3389,
+        port_range_max=3389,
+        remote_ip_prefix="0.0.0.0/0",
+    )
+    provisioner, _, _, _ = _extra_group_provisioner(
+        provisioning_input, groups_in_cloud=existing, rules={name: [stray]}
+    )
+    with pytest.raises(OwnershipError, match="unexpected rules: ingress IPv4 tcp 3389-3389"):
+        provisioner._extra_security_groups()
+
+
+def test_undeclared_extra_security_groups_are_deleted_only_when_owned(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    owned = f"customer-cluster-uid={uid}"
+    mine = SimpleNamespace(id="a", name="cc-example-extra-old", tags=[owned, EXTRA_SG_TAG])
+    foreign = SimpleNamespace(
+        id="b", name="cc-example-extra-theirs", tags=["customer-cluster-uid=x", EXTRA_SG_TAG]
+    )
+    unrelated = SimpleNamespace(id="c", name="cc-example-cluster-sg", tags=[owned])
+    untagged = SimpleNamespace(id="d", name="cc-example-extra-by-hand", tags=[owned])
+    existing = {g.name: g for g in (mine, foreign, unrelated, untagged)}
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input, existing)
+    provisioner._remove_undeclared_extra_security_groups()
+    assert set(groups) == {
+        "cc-example-extra-theirs",
+        "cc-example-cluster-sg",
+        "cc-example-extra-by-hand",
+    }
+
+
+def test_removed_extra_group_is_deleted_even_with_a_long_slug(provisioning_input):
+    # stable_name() shortens the slug by the suffix length, so a name prefix would not match
+    provisioning_input.data["cluster"]["slug"] = "c" * 40
+    group_name = "g" * 32
+    group = deepcopy(SSH_GROUP) | {"name": group_name}
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    assert len(groups) == 1
+    created = next(iter(groups.values()))
+    assert EXTRA_SG_TAG in created.tags
+    assert not created.name.startswith(stable_name("c" * 40, "extra-"))
+    provisioning_input.data["extraSecurityGroups"] = []
+    provisioner._remove_undeclared_extra_security_groups()
+    assert groups == {}
+
+
+def test_flavor_override_replaces_only_the_declared_role(provisioning_input):
+    before = deepcopy(provisioning_input.data["openstack"])
+    provisioning_input.data["flavorOverrides"] = {"worker": "b2.c16r32"}
+    provisioner = Provisioner(Mock(), provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
+    assert provisioner._machine("worker")["flavor"] == "b2.c16r32"
+    assert provisioner._machine("worker")["rootVolumeGB"] == before["worker"]["rootVolumeGB"]
+    assert provisioner._machine("controller") == before["controller"]
+    assert provisioner._machine("jumphost") == before["jumphost"]
+    assert provisioning_input.data["openstack"] == before
+
+
+def test_flavor_without_override_is_the_profile_flavor(provisioning_input):
+    provisioner = Provisioner(Mock(), provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
+    assert provisioner._machine("worker") == provisioning_input.data["openstack"]["worker"]
+
+
+def test_extra_group_and_rule_descriptions_are_applied(provisioning_input):
+    group = deepcopy(SSH_GROUP) | {"description": "SSH to the ingress nodes"}
+    group["rules"][0]["description"] = "ssh v4"
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, rules, network_api = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    name = "cc-example-extra-ssh-from-anywhere"
+    assert groups[name].description == "SSH to the ingress nodes"
+    by_family = {r.ether_type: r for r in rules[name]}
+    assert by_family["IPv4"].description == "ssh v4"
+    # an existing owned group with another description is reconciled to the declared one
+    groups[name].description = "old"
+    provisioner._extra_security_groups()
+    assert groups[name].description == "SSH to the ingress nodes"
+    assert network_api.create_security_group.call_count == 1
+
+
+def test_extra_group_ipv6_icmp_roundtrip_has_no_ownership_error(provisioning_input):
+    group = {
+        "name": "ping",
+        "description": "",
+        "attachTo": ["worker"],
+        "rules": [
+            {
+                "direction": "ingress",
+                "etherType": "IPv6",
+                "protocol": "ipv6-icmp",
+                "portRangeMin": None,
+                "portRangeMax": None,
+                "remoteIpPrefix": "::/0",
+                "description": "",
+            }
+        ],
+    }
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, _, rules, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    assert [r.protocol for r in rules["cc-example-extra-ping"]] == ["ipv6-icmp"]
+
+
+def test_extra_groups_with_colliding_generated_names_are_refused(provisioning_input):
+    provisioning_input.data["cluster"]["slug"] = "a" * 46 + "-extra" + "b" * 11
+    first = deepcopy(SSH_GROUP) | {"name": "x"}
+    second = deepcopy(SSH_GROUP) | {"name": "extra-x"}
+    _with_extra_groups(provisioning_input, [first, second])
+    provisioner, groups, _, network_api = _extra_group_provisioner(provisioning_input)
+    with pytest.raises(ValidationError, match="both map to"):
+        provisioner._extra_security_groups()
+    assert groups == {}
+    network_api.create_security_group.assert_not_called()
+
+
+def test_cleared_group_description_goes_back_to_the_default(provisioning_input):
+    group = deepcopy(SSH_GROUP) | {"description": "custom text"}
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    name = "cc-example-extra-ssh-from-anywhere"
+    assert groups[name].description == "custom text"
+    provisioning_input.data["extraSecurityGroups"] = [deepcopy(SSH_GROUP)]
+    provisioner._extra_security_groups()
+    uid = provisioning_input.data["cluster"]["uid"]
+    assert groups[name].description == f"ManagedCluster example ({uid}) extra-ssh-from-anywhere"
+
+
+def test_rule_with_a_remote_address_group_is_not_taken_for_the_declared_rule(provisioning_input):
+    group = deepcopy(SSH_GROUP)
+    group["rules"] = [
+        {
+            "direction": "ingress",
+            "etherType": "IPv4",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": None,
+            "description": "",
+        }
+    ]
+    _with_extra_groups(provisioning_input, [group])
+    uid = provisioning_input.data["cluster"]["uid"]
+    name = "cc-example-extra-ssh-from-anywhere"
+    existing = {name: SimpleNamespace(id=name, name=name, tags=[f"customer-cluster-uid={uid}"])}
+    restricted = SecurityGroupRule(
+        direction="ingress",
+        ether_type="IPv4",
+        protocol="tcp",
+        port_range_min=22,
+        port_range_max=22,
+        remote_address_group_id="ag-1",
+    )
+    provisioner, _, rules, _ = _extra_group_provisioner(
+        provisioning_input, groups_in_cloud=existing, rules={name: [restricted]}
+    )
+    with pytest.raises(OwnershipError, match="address group ag-1"):
+        provisioner._extra_security_groups()
+    # the declared, unrestricted rule was still created next to it
+    assert any(r.remote_address_group_id is None for r in rules[name])
+
+
+def test_changed_rule_description_is_reported_not_silently_ignored(provisioning_input, caplog):
+    group = deepcopy(SSH_GROUP)
+    group["rules"][0]["description"] = "first"
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, _, _, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    group["rules"][0]["description"] = "second"
+    with caplog.at_level("WARNING"):
+        provisioner._extra_security_groups()
+    assert "description of rule ingress IPv4 tcp 22-22 from 0.0.0.0/0 differs" in caplog.text
+
+
+def test_security_rule_conflict_without_an_equivalent_rule_is_not_success(provisioning_input):
+    # Neutron answers 409 for an exceeded rule quota too
+    network_api = Mock()
+    network_api.security_group_rules.return_value = []
+    network_api.create_security_group_rule.side_effect = ConflictException("quota exceeded")
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with pytest.raises(ConflictException):
+        provisioner._rule(
+            SimpleNamespace(id="sg"), direction="ingress", ether_type="IPv4", protocol="tcp"
+        )

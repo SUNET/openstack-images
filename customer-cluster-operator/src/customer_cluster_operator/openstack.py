@@ -30,6 +30,9 @@ def _exact(resources: Iterable[Any], name: str, kind: str) -> Any | None:
     return matches[0] if matches else None
 
 
+EXTRA_SG_TAG = "customer-cluster-extra-security-group"
+
+
 def _tag(uid: str) -> str:
     return f"customer-cluster-uid={uid}"
 
@@ -46,6 +49,30 @@ def _describe_rule(rule: tuple[Any, ...]) -> str:
     ports = "all ports" if port_min is None else f"{port_min}-{port_max}"
     source = prefix or (f"group {group}" if group else "any")
     return f"{ether_type} {protocol or 'any protocol'} {ports} from {source}"
+
+
+def _rule_key(rule: Any) -> tuple[Any, ...]:
+    return (
+        getattr(rule, "direction", None),
+        getattr(rule, "ether_type", None),
+        getattr(rule, "protocol", None),
+        getattr(rule, "port_range_min", None),
+        getattr(rule, "port_range_max", None),
+        getattr(rule, "remote_ip_prefix", None),
+        getattr(rule, "remote_group_id", None),
+        getattr(rule, "remote_address_group_id", None),
+    )
+
+
+def _describe_extra_rule(rule: tuple[Any, ...]) -> str:
+    direction, ether_type, protocol, port_min, port_max, prefix, group, address_group = rule
+    ports = "all ports" if port_min is None else f"{port_min}-{port_max}"
+    source = prefix or (
+        f"group {group}"
+        if group
+        else (f"address group {address_group}" if address_group else "any")
+    )
+    return f"{direction} {ether_type} {protocol or 'any protocol'} {ports} from {source}"
 
 
 def _require_owned(resource: Any, uid: str, kind: str) -> Any:
@@ -234,14 +261,14 @@ class Provisioner:
             self.conn.network.add_interface_to_router(resource, subnet_id=subnet.id)
         return resource
 
-    def _security_group(self, suffix: str) -> Any:
+    def _security_group(self, suffix: str, description: str | None = None) -> Any:
         name = stable_name(self.slug, suffix)
         resource = _exact(self.conn.network.security_groups(name=name), name, "security group")
         if resource:
             return _require_owned(resource, self.uid, "security group")
         resource = self.conn.network.create_security_group(
             name=name,
-            description=f"ManagedCluster {self.slug} ({self.uid}) {suffix}",
+            description=description or f"ManagedCluster {self.slug} ({self.uid}) {suffix}",
         )
         return self._set_network_tags(resource)
 
@@ -254,18 +281,29 @@ class Provisioner:
             "port_range_max",
             "remote_ip_prefix",
             "remote_group_id",
+            "remote_address_group_id",
         )
         normalized = {key: desired.get(key) for key in keys}
-        for rule in self.conn.network.security_group_rules(security_group_id=security_group.id):
-            if all(getattr(rule, key, None) == value for key, value in normalized.items()):
-                return
+
+        def exists() -> bool:
+            return any(
+                all(getattr(rule, key, None) == value for key, value in normalized.items())
+                for rule in self.conn.network.security_group_rules(
+                    security_group_id=security_group.id
+                )
+            )
+
+        if exists():
+            return
         try:
             self.conn.network.create_security_group_rule(
                 security_group_id=security_group.id, **desired
             )
         except ConflictException:
-            # Neutron guarantees this response means an equivalent rule exists.
-            return
+            # 409 is returned for a duplicate rule, but also when a quota (rules per group)
+            # is exceeded: only a rule that is really there counts as success.
+            if not exists():
+                raise
 
     def _security_groups(self) -> tuple[Any, Any, Any, Any]:
         cluster = self._security_group("cluster-sg")
@@ -383,6 +421,123 @@ class Provisioner:
             )
         return cluster, jump, api, ingress
 
+    def _extra_security_groups(self) -> dict[str, list[Any]]:
+        """Create the declared extra security groups and return them per node role."""
+        per_role: dict[str, list[Any]] = {"controller": [], "worker": [], "jumphost": []}
+        declared = self.data.get("extraSecurityGroups") or []
+        generated: dict[str, str] = {}
+        reserved = {
+            stable_name(self.slug, suffix)
+            for suffix in ("cluster-sg", "jumphost-sg", "api-sg", "ingress-sg")
+        }
+        for item in declared:
+            # stable_name() shortens long slugs, so different declared names can map to the
+            # same OpenStack name; refuse that before anything is created or changed.
+            full = stable_name(self.slug, f"extra-{item['name']}")
+            if full in generated or full in reserved:
+                other = generated.get(full, "a managed group")
+                raise ValidationError(
+                    f"extra security groups {item['name']!r} and {other!r} both map to {full}"
+                )
+            generated[full] = item["name"]
+        default_egress = {
+            ("egress", "IPv4", None, None, None, None, None, None),
+            ("egress", "IPv6", None, None, None, None, None, None),
+        }
+        for item in declared:
+            default_description = f"ManagedCluster {self.slug} ({self.uid}) extra-{item['name']}"
+            wanted = item.get("description") or default_description
+            group = self._security_group(f"extra-{item['name']}", wanted)
+            if getattr(group, "description", None) != wanted:
+                group = self.conn.network.update_security_group(group, description=wanted)
+            if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
+                group = self.conn.network.set_tags(
+                    group, sorted({*(getattr(group, "tags", None) or []), EXTRA_SG_TAG})
+                )
+            allowed = set(default_egress)
+            for rule in item["rules"]:
+                prefix = rule["remoteIpPrefix"]
+                self._rule(
+                    group,
+                    direction=rule["direction"],
+                    ether_type=rule["etherType"],
+                    protocol=rule["protocol"],
+                    port_range_min=rule["portRangeMin"],
+                    port_range_max=rule["portRangeMax"],
+                    remote_ip_prefix=prefix,
+                    **({"description": rule["description"]} if rule.get("description") else {}),
+                )
+                allowed.add(
+                    (
+                        rule["direction"],
+                        rule["etherType"],
+                        rule["protocol"],
+                        rule["portRangeMin"],
+                        rule["portRangeMax"],
+                        prefix,
+                        None,
+                        None,
+                    )
+                )
+            existing_rules = list(
+                self.conn.network.security_group_rules(security_group_id=group.id)
+            )
+            actual = {_rule_key(rule) for rule in existing_rules}
+            for rule in item["rules"]:
+                key = (
+                    rule["direction"],
+                    rule["etherType"],
+                    rule["protocol"],
+                    rule["portRangeMin"],
+                    rule["portRangeMax"],
+                    rule["remoteIpPrefix"],
+                    None,
+                    None,
+                )
+                for existing in existing_rules:
+                    if _rule_key(existing) == key and (
+                        getattr(existing, "description", None) or ""
+                    ) != (rule.get("description") or ""):
+                        logger.warning(
+                            "extra security group %s: the description of rule %s differs from "
+                            "the declaration; Neutron cannot change a rule, remove the rule to "
+                            "have it recreated",
+                            item["name"],
+                            _describe_extra_rule(key),
+                        )
+
+            if actual - allowed:
+                raise OwnershipError(
+                    f"extra security group {item['name']} contains unexpected rules: "
+                    + ", ".join(
+                        _describe_extra_rule(rule) for rule in sorted(actual - allowed, key=str)
+                    )
+                )
+            for role in item["attachTo"]:
+                per_role[role].append(group)
+        return per_role
+
+    def _remove_undeclared_extra_security_groups(self) -> None:
+        """Delete owned extra groups that are no longer declared (ports were already reset).
+
+        Matched by the cluster UID tag plus EXTRA_SG_TAG, not by name: stable_name() shortens
+        the slug depending on the suffix length, so a name prefix would miss long names.
+        """
+        declared = {
+            stable_name(self.slug, f"extra-{item['name']}")
+            for item in (self.data.get("extraSecurityGroups") or [])
+        }
+        for group in self.conn.network.security_groups():
+            if group.name in declared or not _owned(group, self.uid):
+                continue
+            if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
+                continue
+            try:
+                self.conn.network.delete_security_group(group)
+                logger.info("deleted undeclared extra security group %s", group.name)
+            except ConflictException:
+                logger.warning("extra security group %s is still in use; kept", group.name)
+
     def _keypair(self) -> Any:
         name = stable_name(self.slug, f"bootstrap-{self.uid.replace('-', '')[:8]}")
         existing = _exact(self.conn.compute.keypairs(name=name), name, "keypair")
@@ -405,6 +560,14 @@ class Provisioner:
         if distro != "debian" or not any(value in searchable for value in ("13", "trixie")):
             raise ValidationError(f"image {name} is not identified as Debian Trixie")
         return image
+
+    def _machine(self, role: str) -> dict[str, Any]:
+        """Machine settings for a role, with a per-cluster flavor override applied."""
+        machine = dict(self.data["openstack"][role])
+        override = (self.data.get("flavorOverrides") or {}).get(role)
+        if override:
+            machine["flavor"] = override
+        return machine
 
     def _flavor(self, name: str) -> Any:
         flavor = _exact(self.conn.compute.flavors(name=name), name, "flavor")
@@ -548,7 +711,7 @@ class Provisioner:
             # Workers may have been resized (Nova resize); the provisioner does not
             # resize and does not own the flavor after creation, so only report it.
             logger.warning(
-                "owned server %s has flavor %s, the profile asks for %s; leaving it as is",
+                "owned server %s has flavor %s, the expected flavor is %s; leaving it as is",
                 server.name,
                 _server_flavor_label(server),
                 getattr(flavor, "name", None) or getattr(flavor, "id", None),
@@ -738,6 +901,7 @@ class Provisioner:
         external = self._external_network()
         self._router(subnet, external)
         cluster_sg, jump_sg, api_sg, ingress_sg = self._security_groups()
+        extra_groups = self._extra_security_groups()
         keypair = self._keypair()
         image = self._image()
         api_vip = self._vip("api", self.data["network"]["apiVipAddress"], network, subnet)
@@ -750,10 +914,10 @@ class Provisioner:
         jump = self._server(
             name=stable_name(self.slug, "jumphost"),
             role="jumphost",
-            machine=self.data["openstack"]["jumphost"],
+            machine=self._machine("jumphost"),
             network=network,
             subnet=subnet,
-            security_groups=[jump_sg],
+            security_groups=[jump_sg, *extra_groups["jumphost"]],
             image=image,
             keypair=keypair,
         )
@@ -765,10 +929,10 @@ class Provisioner:
             server = self._server(
                 name=stable_name(self.slug, f"controller-{index:02d}"),
                 role="controller",
-                machine=self.data["openstack"]["controller"],
+                machine=self._machine("controller"),
                 network=network,
                 subnet=subnet,
-                security_groups=[cluster_sg, api_sg],
+                security_groups=[cluster_sg, api_sg, *extra_groups["controller"]],
                 image=image,
                 keypair=keypair,
                 vip=self.data["network"]["apiVipAddress"],
@@ -778,15 +942,16 @@ class Provisioner:
             server = self._server(
                 name=stable_name(self.slug, f"worker-{index:02d}"),
                 role="worker",
-                machine=self.data["openstack"]["worker"],
+                machine=self._machine("worker"),
                 network=network,
                 subnet=subnet,
-                security_groups=[cluster_sg, ingress_sg],
+                security_groups=[cluster_sg, ingress_sg, *extra_groups["worker"]],
                 image=image,
                 keypair=keypair,
                 vip=self.data["network"]["ingressVipAddress"],
             )
             workers.append({"name": server.name, "ip": self._private_ip(server, network)})
+        self._remove_undeclared_extra_security_groups()
         return {
             "jumphost": {"name": jump.name, "floating_ip": jump_fip},
             "controllers": controllers,
