@@ -1,6 +1,6 @@
 # Customer Cluster Operator
 
-Current package and image release: `0.1.8`.
+Current package and image release: `0.1.9`.
 
 This directory contains the first infrastructure slice of the
 `ManagedCluster` operator. A Kopf controller validates each desired cluster and
@@ -193,6 +193,44 @@ marked with this cluster UID cause a fail-closed ownership error.
 Retained same-name resources are never adopted across cluster UIDs. Recovery
 requires restoring the original ManagedCluster UID, selecting a different
 cluster slug, or manually resolving the retained resource after review.
+
+### Flavor overrides
+
+A cluster whose servers were resized can declare the flavors it actually uses, next to the
+profile, in `spec.openstack.workerFlavor`, `controllerFlavor` and `jumphostFlavor` (all
+optional). The override is the expected flavor for that role: new servers (for example after
+raising `workerGroups`) are created with it, and a server that has it is not reported. Like the
+extra security groups it is not part of the immutable infrastructure hash. The operator never
+resizes a server. A server whose flavor differs from the expected one (override, else the
+ClusterProfile) is not refused: a warning is logged and the server is left as is.
+
+### Extra security groups
+
+Rules outside the managed groups are declared per cluster in
+`spec.network.extraSecurityGroups`. Each entry creates an operator-owned security
+group `cc-<cluster>-extra-<name>`, adds the listed rules and attaches the group to the
+ports of the node roles in `attachTo` (`controller`, `worker`, `jumphost`):
+
+```yaml
+spec:
+  network:
+    extraSecurityGroups:
+      - name: ssh-from-anywhere
+        description: SSH to the ingress nodes
+        attachTo: [worker]
+        rules:
+          - {direction: ingress, etherType: IPv4, protocol: tcp,
+             portRangeMin: 22, portRangeMax: 22, remoteIpPrefix: 0.0.0.0/0}
+```
+
+Up to 10 groups with up to 20 rules each. Protocols are `tcp`, `udp`, `icmp` and
+`ipv6-icmp` (ports only for `tcp` and `udp`); the remote prefix must match the ether type.
+The declaration is not part of the immutable infrastructure hash, so adding, changing or
+removing a group does not cause `InfrastructureDriftUnsupported`. A declared group may hold
+only the declared rules (plus the default egress rules): any other rule fails the check with
+an `OwnershipError` that names it. A group removed from the spec is detached from the node
+ports and deleted if the operator owns it. The four managed groups stay exact: rules added
+to them by hand are still refused, so move such rules into a declared group.
 
 ## Inventory publication
 

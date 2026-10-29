@@ -1,4 +1,5 @@
 import base64
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -849,6 +850,14 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
         "_security_groups",
         lambda: (cluster_sg, jump_sg, api_sg, ingress_sg),
     )
+    ssh_sg = SimpleNamespace(id="extra-ssh", name="extra-ssh")
+    monkeypatch.setattr(
+        provisioner,
+        "_extra_security_groups",
+        lambda: {"controller": [], "worker": [ssh_sg], "jumphost": [ssh_sg]},
+    )
+    removed = Mock()
+    monkeypatch.setattr(provisioner, "_remove_undeclared_extra_security_groups", removed)
     monkeypatch.setattr(provisioner, "_keypair", lambda: keypair)
     monkeypatch.setattr(provisioner, "_image", lambda: image)
     monkeypatch.setattr(
@@ -887,9 +896,11 @@ def test_provision_routes_role_vips_to_explicit_node_ports(provisioning_input, m
         for item in controllers
     )
     assert all(
-        {group.id for group in item["security_groups"]} == {"cluster-sg", "ingress-sg"}
+        {group.id for group in item["security_groups"]} == {"cluster-sg", "ingress-sg", "extra-ssh"}
         for item in workers
     )
+    assert {group.id for group in jump[0]["security_groups"]} == {"jump-sg", "extra-ssh"}
+    removed.assert_called_once_with()
     assert "vip" not in jump[0]
 
 
@@ -1104,4 +1115,147 @@ def test_verify_server_tolerates_flavor_drift_with_a_warning(provisioning_input,
             )
             is server
         )
-    assert "worker has flavor b2.c8r16, the profile asks for b2.c4r16" in caplog.text
+    assert "worker has flavor b2.c8r16, the expected flavor is b2.c4r16" in caplog.text
+
+
+SSH_GROUP = {
+    "name": "ssh-from-anywhere",
+    "description": "",
+    "attachTo": ["worker"],
+    "rules": [
+        {
+            "direction": "ingress",
+            "etherType": "IPv4",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": "0.0.0.0/0",
+        },
+        {
+            "direction": "ingress",
+            "etherType": "IPv6",
+            "protocol": "tcp",
+            "portRangeMin": 22,
+            "portRangeMax": 22,
+            "remoteIpPrefix": "::/0",
+        },
+    ],
+}
+
+
+def _extra_group_provisioner(provisioning_input, groups_in_cloud=None, rules=None):
+    """Provisioner whose fake Neutron stores groups and rules in memory."""
+    uid = provisioning_input.data["cluster"]["uid"]
+    groups = {} if groups_in_cloud is None else groups_in_cloud
+    rules = {} if rules is None else rules
+    network_api = Mock()
+
+    def security_groups(name=None):
+        return [g for g in groups.values() if name is None or g.name == name]
+
+    def create_security_group(*, name, description):
+        group = SimpleNamespace(id=name, name=name, tags=[])
+        groups[name] = group
+        return group
+
+    def set_tags(resource, tags):
+        resource.tags = list(tags)
+        return resource
+
+    def create_security_group_rule(*, security_group_id, **values):
+        rule = SecurityGroupRule(**values)
+        rules.setdefault(security_group_id, []).append(rule)
+        return rule
+
+    def delete_security_group(group):
+        groups.pop(group.name)
+
+    network_api.security_groups.side_effect = security_groups
+    network_api.create_security_group.side_effect = create_security_group
+    network_api.set_tags.side_effect = set_tags
+    network_api.security_group_rules.side_effect = lambda *, security_group_id: rules.setdefault(
+        security_group_id, []
+    )
+    network_api.create_security_group_rule.side_effect = create_security_group_rule
+    network_api.delete_security_group.side_effect = delete_security_group
+    provisioner = Provisioner(
+        SimpleNamespace(network=network_api),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    provisioner.tags = [f"customer-cluster-uid={uid}"]
+    return provisioner, groups, rules, network_api
+
+
+def _with_extra_groups(provisioning_input, groups):
+    provisioning_input.data["extraSecurityGroups"] = groups
+    return provisioning_input
+
+
+def test_extra_security_groups_are_created_with_rules_and_attached_per_role(provisioning_input):
+    _with_extra_groups(provisioning_input, [deepcopy(SSH_GROUP)])
+    provisioner, groups, rules, _ = _extra_group_provisioner(provisioning_input)
+    per_role = provisioner._extra_security_groups()
+    assert [g.name for g in per_role["worker"]] == ["cc-example-extra-ssh-from-anywhere"]
+    assert per_role["controller"] == [] and per_role["jumphost"] == []
+    created = rules["cc-example-extra-ssh-from-anywhere"]
+    assert {(r.ether_type, r.remote_ip_prefix, r.port_range_min) for r in created} == {
+        ("IPv4", "0.0.0.0/0", 22),
+        ("IPv6", "::/0", 22),
+    }
+    # idempotent: a second run creates nothing new
+    provisioner._extra_security_groups()
+    assert len(rules["cc-example-extra-ssh-from-anywhere"]) == 2
+
+
+def test_extra_security_group_refuses_rules_that_are_not_declared(provisioning_input):
+    _with_extra_groups(provisioning_input, [deepcopy(SSH_GROUP)])
+    uid = provisioning_input.data["cluster"]["uid"]
+    name = "cc-example-extra-ssh-from-anywhere"
+    existing = {name: SimpleNamespace(id=name, name=name, tags=[f"customer-cluster-uid={uid}"])}
+    stray = SecurityGroupRule(
+        direction="ingress",
+        ether_type="IPv4",
+        protocol="tcp",
+        port_range_min=3389,
+        port_range_max=3389,
+        remote_ip_prefix="0.0.0.0/0",
+    )
+    provisioner, _, _, _ = _extra_group_provisioner(
+        provisioning_input, groups_in_cloud=existing, rules={name: [stray]}
+    )
+    with pytest.raises(OwnershipError, match="unexpected rules: ingress IPv4 tcp 3389-3389"):
+        provisioner._extra_security_groups()
+
+
+def test_undeclared_extra_security_groups_are_deleted_only_when_owned(provisioning_input):
+    uid = provisioning_input.data["cluster"]["uid"]
+    mine = SimpleNamespace(
+        id="a", name="cc-example-extra-old", tags=[f"customer-cluster-uid={uid}"]
+    )
+    foreign = SimpleNamespace(
+        id="b", name="cc-example-extra-theirs", tags=["customer-cluster-uid=x"]
+    )
+    unrelated = SimpleNamespace(
+        id="c", name="cc-example-cluster-sg", tags=[f"customer-cluster-uid={uid}"]
+    )
+    existing = {g.name: g for g in (mine, foreign, unrelated)}
+    provisioner, groups, _, _ = _extra_group_provisioner(provisioning_input, existing)
+    provisioner._remove_undeclared_extra_security_groups()
+    assert set(groups) == {"cc-example-extra-theirs", "cc-example-cluster-sg"}
+
+
+def test_flavor_override_replaces_only_the_declared_role(provisioning_input):
+    before = deepcopy(provisioning_input.data["openstack"])
+    provisioning_input.data["flavorOverrides"] = {"worker": "b2.c16r32"}
+    provisioner = Provisioner(Mock(), provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
+    assert provisioner._machine("worker")["flavor"] == "b2.c16r32"
+    assert provisioner._machine("worker")["rootVolumeGB"] == before["worker"]["rootVolumeGB"]
+    assert provisioner._machine("controller") == before["controller"]
+    assert provisioner._machine("jumphost") == before["jumphost"]
+    assert provisioning_input.data["openstack"] == before
+
+
+def test_flavor_without_override_is_the_profile_flavor(provisioning_input):
+    provisioner = Provisioner(Mock(), provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
+    assert provisioner._machine("worker") == provisioning_input.data["openstack"]["worker"]
