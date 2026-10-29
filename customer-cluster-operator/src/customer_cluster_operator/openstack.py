@@ -78,6 +78,16 @@ def _server_uses_flavor(server: Any, flavor: Any) -> bool:
     return bool(embedded_id) and embedded_id == flavor.id
 
 
+def _server_flavor_label(server: Any) -> str:
+    """Describe the flavor a Nova server reports, for log messages."""
+    embedded = getattr(server, "flavor", None) or {}
+    for key in ("original_name", "name", "id"):
+        value = embedded.get(key) if isinstance(embedded, dict) else getattr(embedded, key, None)
+        if value:
+            return str(value)
+    return str(getattr(server, "flavor_id", None) or "unknown")
+
+
 def read_public_keys(path: Path) -> list[str]:
     try:
         lines = path.read_text().splitlines()
@@ -535,7 +545,14 @@ class Provisioner:
         current_port = self.conn.network.get_port(port.id)
         _require_owned(current_port, self.uid, "node port")
         if not _server_uses_flavor(server, flavor):
-            raise OwnershipError(f"owned server {server.name} has a different flavor")
+            # Workers may have been resized (Nova resize); the provisioner does not
+            # resize and does not own the flavor after creation, so only report it.
+            logger.warning(
+                "owned server %s has flavor %s, the profile asks for %s; leaving it as is",
+                server.name,
+                _server_flavor_label(server),
+                getattr(flavor, "name", None) or getattr(flavor, "id", None),
+            )
         if metadata.get("customer_cluster_role") != role:
             raise OwnershipError(f"owned server {server.name} has a different role")
         if server.key_name != keypair.name:
