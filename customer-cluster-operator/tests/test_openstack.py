@@ -1060,3 +1060,48 @@ def test_endpoint_security_group_rejects_nonpublic_source(provisioning_input):
         match=r"unexpected ingress rules: api-sg: IPv4 tcp 6443-6443 from 10\.0\.0\.0/8",
     ):
         provisioner._security_groups()
+
+
+def test_verify_server_tolerates_flavor_drift_with_a_warning(provisioning_input, caplog):
+    uid = provisioning_input.data["cluster"]["uid"]
+    server = SimpleNamespace(
+        id="server",
+        name="worker",
+        metadata={"customer_cluster_uid": uid, "customer_cluster_role": "worker"},
+        flavor_id=None,
+        flavor={"original_name": "b2.c8r16"},
+        key_name="key",
+        attached_volumes=[{"id": "volume"}],
+        security_groups=[{"name": "cluster-sg"}],
+    )
+    port = Port(
+        id="port",
+        name="port",
+        metadata={"customer_cluster_uid": uid},
+        tags=[],
+        device_id="server",
+        security_group_ids=["sg"],
+    )
+    compute = Mock()
+    compute.get_server.return_value = server
+    network = Mock()
+    network.get_port.return_value = port
+    provisioner = Provisioner(
+        SimpleNamespace(compute=compute, network=network),
+        provisioning_input.data,
+        ["ssh-ed25519 QUFBQQ=="],
+    )
+    with caplog.at_level("WARNING"):
+        assert (
+            provisioner._verify_server(
+                server,
+                role="worker",
+                flavor=SimpleNamespace(id="flavor", name="b2.c4r16"),
+                keypair=SimpleNamespace(name="key"),
+                volume=SimpleNamespace(id="volume"),
+                port=port,
+                security_groups=[SimpleNamespace(id="sg", name="cluster-sg")],
+            )
+            is server
+        )
+    assert "worker has flavor b2.c8r16, the profile asks for b2.c4r16" in caplog.text

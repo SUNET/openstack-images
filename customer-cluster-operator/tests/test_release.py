@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 OPERATOR_ROOT = Path(__file__).resolve().parents[1]
-RELEASE_VERSION = "0.1.7"
+RELEASE_VERSION = "0.1.8"
 DEPLOYMENT = (
     OPERATOR_ROOT.parents[2]
     / "k8s/platform-manifests/customer-cluster-operator/base/deployment.yaml"
