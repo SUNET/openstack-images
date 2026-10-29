@@ -1155,8 +1155,13 @@ def _extra_group_provisioner(provisioning_input, groups_in_cloud=None, rules=Non
         return [g for g in groups.values() if name is None or g.name == name]
 
     def create_security_group(*, name, description):
-        group = SimpleNamespace(id=name, name=name, tags=[])
+        group = SimpleNamespace(id=name, name=name, tags=[], description=description)
         groups[name] = group
+        return group
+
+    def update_security_group(group, **values):
+        for key, value in values.items():
+            setattr(group, key, value)
         return group
 
     def set_tags(resource, tags):
@@ -1179,6 +1184,7 @@ def _extra_group_provisioner(provisioning_input, groups_in_cloud=None, rules=Non
     )
     network_api.create_security_group_rule.side_effect = create_security_group_rule
     network_api.delete_security_group.side_effect = delete_security_group
+    network_api.update_security_group.side_effect = update_security_group
     provisioner = Provisioner(
         SimpleNamespace(network=network_api),
         provisioning_input.data,
@@ -1279,3 +1285,55 @@ def test_flavor_override_replaces_only_the_declared_role(provisioning_input):
 def test_flavor_without_override_is_the_profile_flavor(provisioning_input):
     provisioner = Provisioner(Mock(), provisioning_input.data, ["ssh-ed25519 QUFBQQ=="])
     assert provisioner._machine("worker") == provisioning_input.data["openstack"]["worker"]
+
+
+def test_extra_group_and_rule_descriptions_are_applied(provisioning_input):
+    group = deepcopy(SSH_GROUP) | {"description": "SSH to the ingress nodes"}
+    group["rules"][0]["description"] = "ssh v4"
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, groups, rules, network_api = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    name = "cc-example-extra-ssh-from-anywhere"
+    assert groups[name].description == "SSH to the ingress nodes"
+    by_family = {r.ether_type: r for r in rules[name]}
+    assert by_family["IPv4"].description == "ssh v4"
+    # an existing owned group with another description is reconciled to the declared one
+    groups[name].description = "old"
+    provisioner._extra_security_groups()
+    assert groups[name].description == "SSH to the ingress nodes"
+    assert network_api.create_security_group.call_count == 1
+
+
+def test_extra_group_ipv6_icmp_roundtrip_has_no_ownership_error(provisioning_input):
+    group = {
+        "name": "ping",
+        "description": "",
+        "attachTo": ["worker"],
+        "rules": [
+            {
+                "direction": "ingress",
+                "etherType": "IPv6",
+                "protocol": "ipv6-icmp",
+                "portRangeMin": None,
+                "portRangeMax": None,
+                "remoteIpPrefix": "::/0",
+                "description": "",
+            }
+        ],
+    }
+    _with_extra_groups(provisioning_input, [group])
+    provisioner, _, rules, _ = _extra_group_provisioner(provisioning_input)
+    provisioner._extra_security_groups()
+    assert [r.protocol for r in rules["cc-example-extra-ping"]] == ["ipv6-icmp"]
+
+
+def test_extra_groups_with_colliding_generated_names_are_refused(provisioning_input):
+    provisioning_input.data["cluster"]["slug"] = "a" * 46 + "-extra" + "b" * 11
+    first = deepcopy(SSH_GROUP) | {"name": "x"}
+    second = deepcopy(SSH_GROUP) | {"name": "extra-x"}
+    _with_extra_groups(provisioning_input, [first, second])
+    provisioner, groups, _, network_api = _extra_group_provisioner(provisioning_input)
+    with pytest.raises(ValidationError, match="both map to"):
+        provisioner._extra_security_groups()
+    assert groups == {}
+    network_api.create_security_group.assert_not_called()

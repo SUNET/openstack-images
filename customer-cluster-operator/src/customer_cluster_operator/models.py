@@ -65,6 +65,12 @@ def _extra_security_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
             protocol = rule.get("protocol")
             if protocol is not None and protocol not in EXTRA_SG_PROTOCOLS:
                 raise ValidationError(f"{rpath}.protocol must be one of {list(EXTRA_SG_PROTOCOLS)}")
+            # Neutron stores ICMP on IPv6 as ipv6-icmp; keep the declaration in that form so
+            # the rule read back equals the declared one.
+            if protocol == "icmp" and ether == "IPv6":
+                protocol = "ipv6-icmp"
+            if protocol == "ipv6-icmp" and ether != "IPv6":
+                raise ValidationError(f"{rpath}.protocol ipv6-icmp needs etherType IPv6")
             low, high = rule.get("portRangeMin"), rule.get("portRangeMax")
             if low is not None or high is not None:
                 if protocol not in ("tcp", "udp"):
@@ -95,6 +101,7 @@ def _extra_security_groups(spec: dict[str, Any]) -> list[dict[str, Any]]:
                     "portRangeMin": low,
                     "portRangeMax": high,
                     "remoteIpPrefix": prefix,
+                    "description": str(rule.get("description") or "").strip()[:255],
                 }
             )
         groups[name] = {

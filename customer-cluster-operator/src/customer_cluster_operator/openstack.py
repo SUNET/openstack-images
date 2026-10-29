@@ -256,14 +256,14 @@ class Provisioner:
             self.conn.network.add_interface_to_router(resource, subnet_id=subnet.id)
         return resource
 
-    def _security_group(self, suffix: str) -> Any:
+    def _security_group(self, suffix: str, description: str | None = None) -> Any:
         name = stable_name(self.slug, suffix)
         resource = _exact(self.conn.network.security_groups(name=name), name, "security group")
         if resource:
             return _require_owned(resource, self.uid, "security group")
         resource = self.conn.network.create_security_group(
             name=name,
-            description=f"ManagedCluster {self.slug} ({self.uid}) {suffix}",
+            description=description or f"ManagedCluster {self.slug} ({self.uid}) {suffix}",
         )
         return self._set_network_tags(resource)
 
@@ -409,12 +409,30 @@ class Provisioner:
         """Create the declared extra security groups and return them per node role."""
         per_role: dict[str, list[Any]] = {"controller": [], "worker": [], "jumphost": []}
         declared = self.data.get("extraSecurityGroups") or []
+        generated: dict[str, str] = {}
+        reserved = {
+            stable_name(self.slug, suffix)
+            for suffix in ("cluster-sg", "jumphost-sg", "api-sg", "ingress-sg")
+        }
+        for item in declared:
+            # stable_name() shortens long slugs, so different declared names can map to the
+            # same OpenStack name; refuse that before anything is created or changed.
+            full = stable_name(self.slug, f"extra-{item['name']}")
+            if full in generated or full in reserved:
+                other = generated.get(full, "a managed group")
+                raise ValidationError(
+                    f"extra security groups {item['name']!r} and {other!r} both map to {full}"
+                )
+            generated[full] = item["name"]
         default_egress = {
             ("egress", "IPv4", None, None, None, None, None),
             ("egress", "IPv6", None, None, None, None, None),
         }
         for item in declared:
-            group = self._security_group(f"extra-{item['name']}")
+            group = self._security_group(f"extra-{item['name']}", item.get("description") or None)
+            wanted = item.get("description") or ""
+            if wanted and getattr(group, "description", None) != wanted:
+                group = self.conn.network.update_security_group(group, description=wanted)
             if EXTRA_SG_TAG not in (getattr(group, "tags", None) or []):
                 group = self.conn.network.set_tags(
                     group, sorted({*(getattr(group, "tags", None) or []), EXTRA_SG_TAG})
@@ -430,6 +448,7 @@ class Provisioner:
                     port_range_min=rule["portRangeMin"],
                     port_range_max=rule["portRangeMax"],
                     remote_ip_prefix=prefix,
+                    **({"description": rule["description"]} if rule.get("description") else {}),
                 )
                 allowed.add(
                     (

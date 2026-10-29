@@ -607,3 +607,33 @@ def test_flavor_overrides_reject_invalid_values(spec, profile, value):
     spec["openstack"]["controllerFlavor"] = value
     with pytest.raises(ValidationError):
         _build(spec, profile)
+
+
+def test_extra_security_group_ipv6_icmp_is_normalized_and_descriptions_are_kept(spec, profile):
+    group = {
+        "name": "ping",
+        "description": " allow ping ",
+        "attachTo": ["worker"],
+        "rules": [
+            {"direction": "ingress", "etherType": "IPv6", "protocol": "icmp", "description": "v6"},
+            {"direction": "ingress", "etherType": "IPv4", "protocol": "icmp"},
+        ],
+    }
+    spec["network"] = {"extraSecurityGroups": [group]}
+    built = _build(spec, profile).data["extraSecurityGroups"][0]
+    assert built["description"] == "allow ping"
+    by_family = {rule["etherType"]: rule for rule in built["rules"]}
+    assert by_family["IPv6"]["protocol"] == "ipv6-icmp"
+    assert by_family["IPv6"]["description"] == "v6"
+    assert by_family["IPv4"]["protocol"] == "icmp"
+
+
+def test_extra_security_group_rejects_ipv6_icmp_on_ipv4(spec, profile):
+    group = {
+        "name": "ping",
+        "attachTo": ["worker"],
+        "rules": [{"direction": "ingress", "etherType": "IPv4", "protocol": "ipv6-icmp"}],
+    }
+    spec["network"] = {"extraSecurityGroups": [group]}
+    with pytest.raises(ValidationError, match="ipv6-icmp needs etherType IPv6"):
+        _build(spec, profile)
