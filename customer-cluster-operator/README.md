@@ -1,6 +1,6 @@
 # Customer Cluster Operator
 
-Current package and image release: `0.1.6`.
+Current package and image release: `0.1.7`.
 
 This directory contains the first infrastructure slice of the
 `ManagedCluster` operator. A Kopf controller validates each desired cluster and

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from openstack.config import OpenStackConfig
 from openstack.exceptions import ConflictException
 
 from .errors import OwnershipError, ValidationError
+
+logger = logging.getLogger(__name__)
 
 
 def stable_name(slug: str, suffix: str) -> str:
@@ -36,6 +39,13 @@ def _owned(resource: Any, uid: str) -> bool:
         return True
     metadata = getattr(resource, "metadata", None) or {}
     return metadata.get("customer_cluster_uid") == uid
+
+
+def _describe_rule(rule: tuple[Any, ...]) -> str:
+    ether_type, protocol, port_min, port_max, prefix, group = rule
+    ports = "all ports" if port_min is None else f"{port_min}-{port_max}"
+    source = prefix or (f"group {group}" if group else "any")
+    return f"{ether_type} {protocol or 'any protocol'} {ports} from {source}"
 
 
 def _require_owned(resource: Any, uid: str, kind: str) -> Any:
@@ -346,13 +356,21 @@ class Provisioner:
                 if rule.direction == "ingress"
             }
 
-        if (
-            actual_cluster - allowed_cluster
-            or actual_jump - allowed_jump
-            or ip_rules(api) - allowed_api
-            or ip_rules(ingress) - allowed_ingress
-        ):
-            raise OwnershipError("managed security group contains unexpected IPv4 ingress rules")
+        unexpected = {
+            "cluster-sg": actual_cluster - allowed_cluster,
+            "jumphost-sg": actual_jump - allowed_jump,
+            "api-sg": ip_rules(api) - allowed_api,
+            "ingress-sg": ip_rules(ingress) - allowed_ingress,
+        }
+        unexpected = {name: rules for name, rules in unexpected.items() if rules}
+        if unexpected:
+            raise OwnershipError(
+                "managed security group contains unexpected ingress rules: "
+                + "; ".join(
+                    f"{name}: " + ", ".join(_describe_rule(rule) for rule in sorted(rules, key=str))
+                    for name, rules in sorted(unexpected.items())
+                )
+            )
         return cluster, jump, api, ingress
 
     def _keypair(self) -> Any:
@@ -522,8 +540,21 @@ class Provisioner:
             raise OwnershipError(f"owned server {server.name} has a different role")
         if server.key_name != keypair.name:
             raise OwnershipError(f"owned server {server.name} has a different keypair")
-        if attached != {volume.id}:
-            raise OwnershipError(f"owned server {server.name} has unexpected volume attachments")
+        if volume.id not in attached:
+            raise OwnershipError(
+                f"owned server {server.name} is missing its managed volume attachment"
+            )
+        extra_attachments = attached - {volume.id}
+        if extra_attachments:
+            # The customer cluster's own CSI (cinder-csi PVCs) or operators may
+            # legitimately attach additional volumes; the provisioner only owns
+            # the boot volume and must not assume it owns every attachment.
+            logger.debug(
+                "server %s has %d additional (non-managed) volume attachment(s): %s",
+                server.name,
+                len(extra_attachments),
+                ",".join(sorted(extra_attachments)),
+            )
         if current_port.device_id != server.id:
             raise OwnershipError(f"owned server {server.name} is not attached to its owned port")
         expected_group_ids = {group.id for group in security_groups}
