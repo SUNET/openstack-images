@@ -15,5 +15,7 @@ jobs:
           python-version-file: "customer-cluster-operator/pyproject.toml"
       - name: Install the project
         run: uv sync --locked --all-extras --dev
-      - run: uv run pytest tests
+      - name: run tests
+        run: uv run pytest tests
+      - name: run ruff
       - run: uv run ruff check
