@@ -21,7 +21,7 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-          python-version-file: "customer-cluster-operator/pyproject.toml"
+          version-file: "customer-cluster-operator/pyproject.toml"
       - name: Install the project
         run: uv sync --all-extras --dev
       - name: Run tests
