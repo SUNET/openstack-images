@@ -15,13 +15,6 @@ dependencies = [
     "PyYAML==6.0.2",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest==9.0.3",
-    "pytest-cov==6.2.1",
-    "ruff==0.12.11",
-]
-
 [project.scripts]
 customer-cluster-operator = "customer_cluster_operator.controller:main"
 customer-cluster-worker = "customer_cluster_operator.worker:main"
@@ -43,3 +36,10 @@ ignore = ["S603", "S607"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers"
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.3",
+    "pytest-cov==6.2.1",
+    "ruff==0.12.11",
+]

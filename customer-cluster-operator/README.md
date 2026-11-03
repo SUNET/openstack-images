@@ -331,11 +331,10 @@ that local presence establishes policy ownership in the remote branch.
 ## Development
 
 ```bash
-python -m pip install -e '.[dev]'
-ruff check .
-ruff format --check .
-pytest
-python -m compileall -q src tests
+uv run ruff check
+uv run ruff format --check .
+uv run pytest
+uv run python -m compileall -q src tests
 ```
 
 Canonical `ManagedCluster` and `ClusterProfile` CRDs are stored under `crds/`.
